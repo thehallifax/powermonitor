@@ -34,3 +34,4 @@ collector/solaredge_cookie.txt
 *.xlsx
 *.csvdata/collector_health.json
 data/collector_health.json
+data/collector_health.json
