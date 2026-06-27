@@ -768,8 +768,16 @@ RULES: tuple[Rule, ...] = (
 )
 
 
-def generate_decisions(context: dict, thresholds: dict) -> list[Decision]:
-    recommendations = generate_shared_recommendations(context, thresholds)
+def generate_decisions(
+    context: dict,
+    thresholds: dict,
+    include_inactive: bool = False,
+) -> list[Decision]:
+    recommendations = generate_shared_recommendations(
+        context,
+        thresholds,
+        include_inactive=include_inactive,
+    )
     return [
         _validate_decision(decision)
         for decision in recommendations_to_decisions(
@@ -833,6 +841,7 @@ def generate_decisions_from_data_engine(
     data_engine,
     thresholds: dict,
     previous_summary: Optional[dict] = None,
+    include_inactive: bool = False,
 ) -> list[Decision]:
     recommendations = generate_shared_recommendations_from_data_engine(
         current_summary,
@@ -840,6 +849,7 @@ def generate_decisions_from_data_engine(
         data_engine,
         thresholds,
         previous_summary=previous_summary,
+        include_inactive=include_inactive,
     )
     expires_at = current_summary.get("end")
     return [_validate_decision(decision) for decision in recommendations_to_decisions(recommendations, expires_at=str(expires_at))]

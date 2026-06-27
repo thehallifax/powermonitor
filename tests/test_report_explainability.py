@@ -76,6 +76,7 @@ class ReportExplainabilityTests(unittest.TestCase):
             priority_score=42,
             category="solar",
         )
+        low.evidence["lifecycle_state"] = "dismissed"
         high = explained_decision(
             "peak_cost_reduction",
             title="Reduce Peak-period imports",
@@ -84,8 +85,9 @@ class ReportExplainabilityTests(unittest.TestCase):
         )
 
         markup = report.recommendation_centre_html(
-            [low, high],
+            [high],
             {"dismissed": 1, "snoozed_until": 2},
+            [low],
         )
 
         self.assertLess(
@@ -102,6 +104,10 @@ class ReportExplainabilityTests(unittest.TestCase):
         self.assertIn("Recommended action", markup)
         self.assertIn("Why?", markup)
         self.assertIn("3 hidden: 1 dismissed, 2 snoozed.", markup)
+        self.assertIn("Dismiss", markup)
+        self.assertIn("Snooze 1 day", markup)
+        self.assertIn("Next bill", markup)
+        self.assertIn("Restore", markup)
 
     def test_serialized_decision_includes_explanation_for_api_outputs(self):
         payload = explained_decision().as_dict()

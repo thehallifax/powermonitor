@@ -686,6 +686,9 @@ def recommendation_to_decision(recommendation: Recommendation, expires_at: Optio
         "recommendation_category": recommendation.category,
         "estimated_monthly_impact": recommendation.estimated_financial_impact.monthly,
         "difficulty": recommendation.difficulty,
+        "lifecycle_state": recommendation.dismissible_state.state,
+        "lifecycle_snoozed_until": recommendation.dismissible_state.dismissed_until,
+        "lifecycle_reason": recommendation.dismissible_state.reason,
     }
     decision = Decision(
         id=recommendation.stable_id,

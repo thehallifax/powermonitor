@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.8.3 - Recommendation Controls
+
+- Added Recommendation Centre controls to dismiss, snooze, and restore
+  recommendations.
+- Added local web POST handling for recommendation lifecycle updates backed by
+  `DataEngine` persistence.
+- Added snooze options for 1 day, 7 days, and next billing period where
+  available.
+- Added a hidden recommendations review section with restore controls.
+- Added tests for rendered controls and local web dismiss/snooze/restore
+  interactions.
+
 ## Sprint 0.8.2 - Recommendation Lifecycle v1
 
 - Added SQLite-backed recommendation lifecycle state keyed by stable

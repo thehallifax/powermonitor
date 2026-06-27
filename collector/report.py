@@ -224,7 +224,9 @@ def dashboard_data(
         )
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
-        recommendations = load_recommendations(conn, period_summary, settings)
+        all_recommendations = load_recommendations(conn, period_summary, settings)
+        recommendations = active_recommendations(all_recommendations)
+        hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         timeline_candidates = build_decision_timeline(period_summary, recommendations)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
@@ -260,6 +262,7 @@ def dashboard_data(
         "energy_score": energy_score.as_dict(),
         "car_comparison": car_comparison(settings),
         "recommendations": [decision.as_dict() for decision in recommendations],
+        "hidden_recommendations": [decision.as_dict() for decision in hidden],
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
     }
@@ -913,7 +916,26 @@ def load_recommendations(
         engine,
         settings.recommendation_thresholds,
         previous_summary=previous_summary,
+        include_inactive=True,
     )
+
+
+def recommendation_lifecycle_state(decision: Decision) -> str:
+    return str(decision.evidence.get("lifecycle_state") or "active")
+
+
+def active_recommendations(recommendations: list[Decision]) -> list[Decision]:
+    return [
+        decision for decision in recommendations
+        if recommendation_lifecycle_state(decision) == "active"
+    ]
+
+
+def hidden_recommendations(recommendations: list[Decision]) -> list[Decision]:
+    return [
+        decision for decision in recommendations
+        if recommendation_lifecycle_state(decision) in {"dismissed", "snoozed_until"}
+    ]
 
 
 def money(value: float) -> str:
@@ -1727,6 +1749,9 @@ def recommendation_evidence_html(decision: Decision) -> str:
         "estimated_monthly_impact",
         "difficulty",
         "confidence_reason",
+        "lifecycle_state",
+        "lifecycle_snoozed_until",
+        "lifecycle_reason",
     }
     rows = []
     for key, value in decision.evidence.items():
@@ -1741,11 +1766,38 @@ def recommendation_evidence_html(decision: Decision) -> str:
     return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
 
 
+def recommendation_controls_html(decision: Decision, hidden: bool = False) -> str:
+    stable_id = html.escape(decision.id)
+    if hidden:
+        return f"""
+        <form class="recommendation-controls" method="post" action="/recommendations/lifecycle">
+          <input type="hidden" name="stable_id" value="{stable_id}">
+          <button type="submit" name="action" value="restore">Restore</button>
+        </form>
+        """
+    return f"""
+    <div class="recommendation-controls">
+      <form method="post" action="/recommendations/lifecycle">
+        <input type="hidden" name="stable_id" value="{stable_id}">
+        <button type="submit" name="action" value="dismiss">Dismiss</button>
+      </form>
+      <form method="post" action="/recommendations/lifecycle">
+        <input type="hidden" name="stable_id" value="{stable_id}">
+        <button type="submit" name="action" value="snooze_1d">Snooze 1 day</button>
+        <button type="submit" name="action" value="snooze_7d">7 days</button>
+        <button type="submit" name="action" value="snooze_next_billing">Next bill</button>
+      </form>
+    </div>
+    """
+
+
 def recommendation_centre_html(
     recommendations: list[Decision],
     lifecycle_counts: Optional[dict[str, int]] = None,
+    hidden: Optional[list[Decision]] = None,
 ) -> str:
     ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
+    hidden = sorted(hidden or [], key=lambda item: (-recommendation_priority_score(item), item.title))
     lifecycle_counts = lifecycle_counts or {"dismissed": 0, "snoozed_until": 0}
     inactive_count = int(lifecycle_counts.get("dismissed", 0)) + int(lifecycle_counts.get("snoozed_until", 0))
     lifecycle_note = (
@@ -1755,14 +1807,6 @@ def recommendation_centre_html(
         if inactive_count
         else ""
     )
-    if not ranked:
-        return f"""
-        <section class="report-section compact-section">
-          <div class="section-title"><div><span class="eyebrow">Recommendation centre</span><h2>No active opportunities</h2></div></div>
-          <p class="notice">No recommendations are active for this period.</p>
-          {lifecycle_note}
-        </section>
-        """
     cards = []
     for decision in ranked:
         why = (
@@ -1794,9 +1838,52 @@ def recommendation_centre_html(
                 <strong>Supporting evidence</strong>
                 {recommendation_evidence_html(decision)}
               </div>
+              {recommendation_controls_html(decision)}
             </article>
             """
         )
+    hidden_cards = []
+    for decision in hidden:
+        state = recommendation_lifecycle_state(decision).replace("_", " ")
+        snoozed_until = decision.evidence.get("lifecycle_snoozed_until")
+        state_text = f"{state}: {snoozed_until}" if snoozed_until else state
+        hidden_cards.append(
+            f"""
+            <article class="recommendation-card recommendation-centre-card {html.escape(decision.severity)}">
+              <div class="recommendation-centre-heading">
+                <span class="recommendation-level">{html.escape(state_text.title())}</span>
+                <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
+              </div>
+              <h3>{html.escape(decision.title)}</h3>
+              <div class="recommendation-centre-meta">
+                <span>{html.escape(recommendation_category(decision).title())}</span>
+                <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
+              </div>
+              <div class="decision-lines">
+                <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
+              </div>
+              {recommendation_controls_html(decision, hidden=True)}
+            </article>
+            """
+        )
+    hidden_section = (
+        f"""
+        <section class="report-section recommendation-centre-section">
+          <div class="section-title">
+            <div><span class="eyebrow">Dismissed / Snoozed</span><h2>Hidden recommendations</h2></div>
+            <p>{len(hidden)} hidden</p>
+          </div>
+          <div class="recommendation-grid">{''.join(hidden_cards)}</div>
+        </section>
+        """
+        if hidden_cards
+        else ""
+    )
+    active_notice = (
+        '<p class="notice">No recommendations are active for this period.</p>'
+        if not cards
+        else ""
+    )
     return f"""
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
@@ -1804,8 +1891,10 @@ def recommendation_centre_html(
         <p>{len(ranked)} active</p>
       </div>
       {lifecycle_note}
+      {active_notice}
       <div class="recommendation-grid">{''.join(cards)}</div>
     </section>
+    {hidden_section}
     """
 
 
@@ -2418,6 +2507,7 @@ def write_html(
     output_path: Optional[Path] = REPORT_PATH,
     timeline: Optional[DecisionTimeline] = None,
     recommendation_lifecycle_counts: Optional[dict[str, int]] = None,
+    hidden: Optional[list[Decision]] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -2603,6 +2693,10 @@ def write_html(
     .recommendation-evidence {{ display:grid; gap:6px; margin:0; padding:0; list-style:none; }}
     .recommendation-evidence li {{ display:grid; grid-template-columns:145px 1fr; gap:8px; color:var(--muted); font-size:11px; }}
     .recommendation-evidence strong {{ color:var(--ink); font-size:10px; text-transform:capitalize; }}
+    .recommendation-controls {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,.08); }}
+    .recommendation-controls form {{ display:flex; flex-wrap:wrap; gap:8px; margin:0; }}
+    .recommendation-controls button {{ min-height:30px; padding:6px 9px; color:var(--deep-2); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; font-size:11px; font-weight:750; cursor:pointer; }}
+    .recommendation-controls button:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
     .action-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
     .action-card {{ padding:17px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
     .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
@@ -2778,7 +2872,7 @@ def write_html(
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts)}
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [])}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
@@ -2841,7 +2935,9 @@ def build_live_html(
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
-        recommendations = load_recommendations(conn, selected_summary, settings)
+        all_recommendations = load_recommendations(conn, selected_summary, settings)
+        recommendations = active_recommendations(all_recommendations)
+        hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(selected_summary, recommendations, comparison)
@@ -2858,6 +2954,7 @@ def build_live_html(
         output_path=None,
         timeline=timeline,
         recommendation_lifecycle_counts=recommendation_lifecycle_counts,
+        hidden=hidden,
     )
 
 
@@ -2875,7 +2972,9 @@ def main() -> None:
         period_summary = load_summary(conn, period_start, period_end, settings)
         trends = load_daily_trends(conn, period_start, period_end, settings)
         health = health_data(conn, current_day, settings)
-        recommendations = load_recommendations(conn, period_summary, settings)
+        all_recommendations = load_recommendations(conn, period_summary, settings)
+        recommendations = active_recommendations(all_recommendations)
+        hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         previous = resolve_period("previous_billing_period", settings, current_day)
         previous_summary = load_summary(conn, previous.start, previous.end, settings)
@@ -2906,6 +3005,7 @@ def main() -> None:
         comparison,
         timeline=timeline,
         recommendation_lifecycle_counts=recommendation_lifecycle_counts,
+        hidden=hidden,
     )
     logging.info(
         "Generated report for %s and billing period %s to %s at %s",
