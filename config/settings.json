@@ -1,0 +1,52 @@
+{
+  "supply_charge_per_day": 1.292269,
+  "import_rates": {
+    "super_off_peak": 0.086151,
+    "overnight": 0.193841,
+    "off_peak": 0.236916,
+    "peak": 0.538446
+  },
+  "export_credit_rate": 0.02,
+  "collection_backfill_days": 7,
+  "ev_baseline_watts": 250,
+  "ev_data_source": "ocular_export",
+  "home_assistant_url": "http://192.168.4.96:8123",
+  "billing_period_start_day": 1,
+  "current_billing_period_start": "2026-06-06",
+  "current_billing_period_end": null,
+  "previous_billing_period_start": "2026-04-03",
+  "previous_billing_period_end": "2026-06-05",
+  "current_plan": "synergy_ev_add_on",
+  "comparison_plan": "previous_flat_or_home_plan",
+  "comparison_plan_rates": {
+    "flat_import_rate": 0.30,
+    "supply_charge_per_day": 1.292269,
+    "export_credit_rate": 0.02
+  },
+  "petrol_price_per_litre": 1.80,
+  "previous_car_l_per_100km": 8.0,
+  "ev_kwh_per_100km": null,
+  "ev_odometer_km": null,
+  "car_comparison_enabled": false,
+  "recommendation_thresholds": {
+    "peak_cost_share_pct": 25,
+    "peak_shift_kwh_per_day": 5,
+    "solar_self_consumption_pct": 60,
+    "ev_detected_min_kwh": 0.5,
+    "baseload_excess_pct": 20,
+    "high_cost_threshold": 300,
+    "positive_peak_share_pct": 20,
+    "positive_self_consumption_pct": 70
+  },
+  "failure_email_notification": {
+    "enabled": false,
+    "failure_after_hours": 24,
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password_env": "POWERMONITOR_SMTP_PASSWORD",
+    "from_address": "",
+    "to_address": "",
+    "use_starttls": true
+  }
+}

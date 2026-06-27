@@ -1,0 +1,2868 @@
+#!/usr/bin/env python3
+import html
+import json
+import logging
+import re
+import sqlite3
+import statistics
+import sys
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from collector_health import public_health
+from periods import LOCAL_TIMEZONE, Period, previous_equivalent, resolve_period
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.decision_engine import Decision, generate_decisions, generate_ev_session_decisions
+
+DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
+REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
+LOG_PATH = PROJECT_ROOT / "logs" / "report.log"
+SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
+COLLECT_LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
+
+BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
+BUCKET_LABELS = {
+    "overnight": "Overnight",
+    "off_peak": "Off peak",
+    "super_off_peak": "Super off peak",
+    "peak": "Peak",
+}
+EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
+EV_BUCKET_LABELS = {
+    "super_off_peak": "9am-3pm super off-peak / EV solar window",
+    "overnight": "11pm-6am overnight",
+    "off_peak": "off-peak",
+    "peak": "peak",
+}
+EV_TARIFF_COLUMN_PAIRS = {
+    bucket: (f"{bucket}_kwh", f"{bucket}_cost")
+    for bucket in BUCKET_ORDER
+}
+DEFAULT_SETTINGS = {
+    "supply_charge_per_day": 1.292269,
+    "import_rates": {
+        "super_off_peak": 0.086151,
+        "overnight": 0.193841,
+        "off_peak": 0.236916,
+        "peak": 0.538446,
+    },
+    "export_credit_rate": 0.02,
+    "ev_baseline_watts": 250.0,
+    "ev_data_source": "estimated",
+    "home_assistant_url": "http://192.168.4.96:8123",
+    "billing_period_start_day": 1,
+    "current_billing_period_start": None,
+    "current_billing_period_end": None,
+    "previous_billing_period_start": None,
+    "previous_billing_period_end": None,
+    "current_plan": "synergy_ev_add_on",
+    "comparison_plan": "previous_flat_or_home_plan",
+    "comparison_plan_rates": {
+        "flat_import_rate": 0.30,
+        "supply_charge_per_day": 1.292269,
+        "export_credit_rate": 0.02,
+    },
+    "petrol_price_per_litre": 1.80,
+    "previous_car_l_per_100km": 8.0,
+    "ev_kwh_per_100km": None,
+    "ev_odometer_km": None,
+    "car_comparison_enabled": False,
+    "recommendation_thresholds": {
+        "peak_cost_share_pct": 25.0,
+        "peak_shift_kwh_per_day": 5.0,
+        "solar_self_consumption_pct": 60.0,
+        "ev_detected_min_kwh": 0.5,
+        "baseload_excess_pct": 20.0,
+        "high_cost_threshold": 300.0,
+        "positive_peak_share_pct": 20.0,
+        "positive_self_consumption_pct": 70.0,
+    },
+}
+
+
+@dataclass
+class Settings:
+    supply_charge_per_day: float
+    import_rates: dict
+    export_credit_rate: float
+    ev_baseline_watts: float
+    ev_data_source: str
+    home_assistant_url: str
+    billing_period_start_day: int
+    current_billing_period_start: Optional[date]
+    current_billing_period_end: Optional[date]
+    previous_billing_period_start: Optional[date]
+    previous_billing_period_end: Optional[date]
+    current_plan: str
+    comparison_plan: str
+    comparison_plan_rates: dict
+    petrol_price_per_litre: float
+    previous_car_l_per_100km: float
+    ev_kwh_per_100km: Optional[float]
+    ev_odometer_km: Optional[float]
+    car_comparison_enabled: bool
+    recommendation_thresholds: dict
+
+
+@dataclass
+class Summary:
+    start: date
+    end: date
+    supply_days: int
+    intervals: int
+    reading_days: int
+    grid_import_kwh: float
+    import_cost: float
+    supply_cost: float
+    total_cost: float
+    export_credit: float
+    net_cost: float
+    solar_generated_kwh: float
+    solar_used_kwh: float
+    solar_exported_kwh: float
+    self_consumption_pct: float
+    solar_export_pct: float
+    peak_cost_share_pct: float
+    ev_charging_kwh: float
+    ev_charging_cost: float
+    ev_charging_source: str
+    actual_ev_charging_kwh: float
+    actual_ev_charging_cost: float
+    actual_ev_tariff_breakdown: dict
+    actual_ev_cost_partial: bool
+    ev_session_analytics: dict
+    average_daily_grid_import_kwh: float
+    average_daily_solar_generation_kwh: float
+    average_daily_net_cost: float
+    buckets: dict
+
+
+@dataclass
+class DailyTrend:
+    day: date
+    grid_import_kwh: float
+    solar_generated_kwh: float
+    solar_exported_kwh: float
+    import_cost: float
+    export_credit: float
+    net_cost: float
+    ev_charging_kwh: float
+    ev_charging_source: str
+
+
+def latest_collect_log_entry() -> tuple[Optional[str], Optional[str]]:
+    if not COLLECT_LOG_PATH.exists():
+        return None, None
+    timestamp_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?)")
+    latest_timestamp = None
+    latest_status = None
+    with COLLECT_LOG_PATH.open("r", encoding="utf-8", errors="replace") as log_file:
+        for line in log_file:
+            match = timestamp_pattern.match(line)
+            if match:
+                latest_timestamp = match.group(1)
+                if " ERROR " in line:
+                    latest_status = "error"
+                elif "Collection succeeded" in line:
+                    latest_status = "ok"
+                elif "Starting SolarEdge collection" in line:
+                    latest_status = "collecting"
+    return latest_timestamp, latest_status
+
+
+def health_data(conn: sqlite3.Connection, today: date, settings: Settings) -> dict:
+    period_start, period_end = billing_period(today, settings)
+    row = conn.execute("SELECT MAX(measurement_time) FROM readings").fetchone()
+    latest_measurement = row[0] if row else None
+    latest_collect, collect_status = latest_collect_log_entry()
+    collector_health = public_health()
+    report_timestamp = collector_health.get("last_successful_report_generation")
+    report_age_minutes = None
+    if REPORT_PATH.exists():
+        report_modified = datetime.fromtimestamp(REPORT_PATH.stat().st_mtime).astimezone()
+        try:
+            recorded_report = datetime.fromisoformat(report_timestamp) if report_timestamp else None
+        except ValueError:
+            recorded_report = None
+        if not recorded_report or report_modified > recorded_report:
+            report_timestamp = report_modified.isoformat(timespec="seconds")
+        report_age_minutes = max(
+            (datetime.now().astimezone() - report_modified).total_seconds() / 60,
+            0.0,
+        )
+
+    status = collector_health.get("status") or collect_status or "collect log unavailable"
+    if not latest_measurement:
+        if status == "ok":
+            status = "no readings"
+    else:
+        try:
+            if status == "ok" and datetime.fromisoformat(latest_measurement).date() < today:
+                status = "stale"
+        except ValueError:
+            status = "invalid reading timestamp"
+
+    return {
+        "status": status,
+        "failure_type": collector_health.get("failure_type"),
+        "collector_message": collector_health.get("message"),
+        "last_successful_collection": collector_health.get("last_success_at"),
+        "last_collection_attempt": collector_health.get("last_attempt_at"),
+        "last_collection_failure": collector_health.get("last_failure_at"),
+        "last_successful_report_generation": report_timestamp,
+        "last_report_generation_failure": collector_health.get("last_report_failure_at"),
+        "report_age_minutes": report_age_minutes,
+        "consecutive_failures": collector_health.get("consecutive_failures", 0),
+        "days_since_last_successful_collection": collector_health.get(
+            "days_since_last_successful_collection"
+        ),
+        "failure_notification_sent_at": collector_health.get("notification_sent_at"),
+        "latest_measurement_time": latest_measurement,
+        "latest_collect_log_timestamp": latest_collect,
+        "current_billing_period_start": period_start.isoformat(),
+        "current_billing_period_end": period_end.isoformat(),
+    }
+
+
+def summary_to_dict(summary: Summary) -> dict:
+    result = asdict(summary)
+    result["start"] = summary.start.isoformat()
+    result["end"] = summary.end.isoformat()
+    return result
+
+
+def trend_to_dict(trend: DailyTrend) -> dict:
+    result = asdict(trend)
+    result["day"] = trend.day.isoformat()
+    return result
+
+
+def local_today() -> date:
+    return datetime.now(LOCAL_TIMEZONE).date()
+
+
+def dashboard_data(
+    today: Optional[date] = None,
+    period_kind: str = "current_billing_period",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> dict:
+    current_day = today or local_today()
+    settings = load_settings()
+    selected = resolve_period(period_kind, settings, current_day, start, end)
+    billing = resolve_period("current_billing_period", settings, current_day)
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found: {DB_PATH}")
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        today_summary = load_summary(conn, current_day, current_day, settings)
+        period_summary = load_summary(conn, selected.start, selected.end, settings)
+        billing_summary = (
+            period_summary
+            if selected.start == billing.start and selected.end == billing.end
+            else load_summary(conn, billing.start, billing.end, settings)
+        )
+        trends = load_daily_trends(conn, selected.start, selected.end, settings)
+        health = health_data(conn, current_day, settings)
+        recommendations = load_recommendations(conn, period_summary, settings)
+    scenarios = scenario_analysis(period_summary, settings)
+    return {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "ev_data_source": settings.ev_data_source,
+        "today": summary_to_dict(today_summary),
+        "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
+        "summary": summary_to_dict(period_summary),
+        "current_billing_period": summary_to_dict(billing_summary),
+        "actual_ev_charging_kwh": period_summary.actual_ev_charging_kwh,
+        "actual_ev_charging_cost": period_summary.actual_ev_charging_cost,
+        "actual_ev_tariff_breakdown": period_summary.actual_ev_tariff_breakdown,
+        "actual_ev_cost_partial": period_summary.actual_ev_cost_partial,
+        "ev_session_analytics": period_summary.ev_session_analytics,
+        "daily_trends": [trend_to_dict(trend) for trend in trends],
+        "tariff_scenario": tariff_scenario(period_summary, settings),
+        "plan_comparison": plan_comparison(period_summary, settings),
+        "scenario_analysis": scenarios,
+        "billing_scenarios": scenarios["scenarios"],
+        "ev_source_counts": ev_source_counts(),
+        "data_completeness": data_completeness(period_summary, settings),
+        "car_comparison": car_comparison(settings),
+        "recommendations": recommendations,
+        "health": health,
+    }
+
+
+def setup_logging() -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_PATH,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+
+def load_settings() -> Settings:
+    raw = DEFAULT_SETTINGS
+    if SETTINGS_PATH.exists():
+        with SETTINGS_PATH.open("r", encoding="utf-8") as settings_file:
+            loaded = json.load(settings_file)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Settings must be a JSON object: {SETTINGS_PATH}")
+        raw = {**DEFAULT_SETTINGS, **loaded}
+        raw["import_rates"] = {**DEFAULT_SETTINGS["import_rates"], **loaded.get("import_rates", {})}
+        raw["recommendation_thresholds"] = {
+            **DEFAULT_SETTINGS["recommendation_thresholds"],
+            **loaded.get("recommendation_thresholds", {}),
+        }
+        raw["comparison_plan_rates"] = {
+            **DEFAULT_SETTINGS["comparison_plan_rates"],
+            **loaded.get("comparison_plan_rates", {}),
+        }
+
+    rates = {bucket: float(raw["import_rates"][bucket]) for bucket in BUCKET_ORDER}
+
+    def optional_date(name: str) -> Optional[date]:
+        value = raw.get(name)
+        if value in (None, ""):
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be an ISO date in YYYY-MM-DD format")
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an ISO date in YYYY-MM-DD format") from exc
+
+    settings = Settings(
+        supply_charge_per_day=float(raw["supply_charge_per_day"]),
+        import_rates=rates,
+        export_credit_rate=float(raw["export_credit_rate"]),
+        ev_baseline_watts=float(raw["ev_baseline_watts"]),
+        ev_data_source=str(raw["ev_data_source"]),
+        home_assistant_url=str(raw["home_assistant_url"]),
+        billing_period_start_day=int(raw["billing_period_start_day"]),
+        current_billing_period_start=optional_date("current_billing_period_start"),
+        current_billing_period_end=optional_date("current_billing_period_end"),
+        previous_billing_period_start=optional_date("previous_billing_period_start"),
+        previous_billing_period_end=optional_date("previous_billing_period_end"),
+        current_plan=str(raw["current_plan"]),
+        comparison_plan=str(raw["comparison_plan"]),
+        comparison_plan_rates={
+            key: float(value) for key, value in raw["comparison_plan_rates"].items()
+        },
+        petrol_price_per_litre=float(raw["petrol_price_per_litre"]),
+        previous_car_l_per_100km=float(raw["previous_car_l_per_100km"]),
+        ev_kwh_per_100km=float(raw["ev_kwh_per_100km"]) if raw.get("ev_kwh_per_100km") is not None else None,
+        ev_odometer_km=float(raw["ev_odometer_km"]) if raw.get("ev_odometer_km") is not None else None,
+        car_comparison_enabled=bool(raw["car_comparison_enabled"]),
+        recommendation_thresholds={
+            key: float(value) for key, value in raw["recommendation_thresholds"].items()
+        },
+    )
+    if settings.supply_charge_per_day < 0 or settings.export_credit_rate < 0:
+        raise ValueError("Supply charge and export credit rate cannot be negative")
+    if settings.ev_baseline_watts < 0 or any(rate < 0 for rate in settings.import_rates.values()):
+        raise ValueError("Import rates and EV baseline cannot be negative")
+    if settings.ev_data_source not in {"estimated", "ocular_csv", "ocpp", "home_assistant_ocpp", "ocular_export"}:
+        raise ValueError("ev_data_source must be estimated, ocular_csv, ocpp, home_assistant_ocpp, or ocular_export")
+    if not 1 <= settings.billing_period_start_day <= 28:
+        raise ValueError("billing_period_start_day must be from 1 to 28")
+    if bool(settings.previous_billing_period_start) != bool(settings.previous_billing_period_end):
+        raise ValueError("Previous billing period start and end must both be set")
+    if (
+        settings.current_billing_period_start
+        and settings.current_billing_period_end
+        and settings.current_billing_period_start > settings.current_billing_period_end
+    ):
+        raise ValueError("Current billing period start cannot be after its end")
+    if (
+        settings.previous_billing_period_start
+        and settings.previous_billing_period_start > settings.previous_billing_period_end
+    ):
+        raise ValueError("Previous billing period start cannot be after its end")
+    if any(value < 0 for value in settings.recommendation_thresholds.values()):
+        raise ValueError("Recommendation thresholds cannot be negative")
+    if any(value < 0 for value in settings.comparison_plan_rates.values()):
+        raise ValueError("Comparison plan rates cannot be negative")
+    return settings
+
+
+def billing_period(today: date, settings: Settings) -> tuple[date, date]:
+    period = resolve_period("current_billing_period", settings, today)
+    return period.start, period.end
+
+
+def backfill_ev_tariff_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT rowid, tariff_breakdown_json
+        FROM ev_sessions
+        WHERE tariff_breakdown_json IS NOT NULL
+          AND (
+            COALESCE(super_off_peak_kwh, 0) + COALESCE(overnight_kwh, 0) +
+            COALESCE(off_peak_kwh, 0) + COALESCE(peak_kwh, 0)
+          ) = 0
+        """
+    ).fetchall()
+    for rowid, raw_breakdown in rows:
+        try:
+            parsed = json.loads(raw_breakdown) if raw_breakdown else {}
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        values = []
+        assignments = []
+        for bucket in BUCKET_ORDER:
+            bucket_values = parsed.get(bucket, {})
+            if not isinstance(bucket_values, dict):
+                bucket_values = {}
+            kwh_column, cost_column = EV_TARIFF_COLUMN_PAIRS[bucket]
+            assignments.extend((f"{kwh_column} = ?", f"{cost_column} = ?"))
+            values.extend((
+                float(bucket_values.get("kwh") or 0),
+                float(bucket_values.get("cost") or 0),
+            ))
+        conn.execute(
+            f"UPDATE ev_sessions SET {', '.join(assignments)} WHERE rowid = ?",
+            (*values, rowid),
+        )
+
+
+def validate_database(conn: sqlite3.Connection) -> None:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'readings'"
+    ).fetchone()
+    if not table:
+        raise RuntimeError(f"No readings table found in {DB_PATH}")
+
+    required = {
+        "measurement_time",
+        "tariff_bucket",
+        "production_kwh",
+        "solar_to_home_kwh",
+        "solar_to_grid_kwh",
+        "grid_to_home_w",
+        "grid_to_home_kwh",
+        "import_cost",
+    }
+    present = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+    missing = sorted(required - present)
+    if missing:
+        raise RuntimeError(f"Readings table is missing columns: {', '.join(missing)}")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ev_sessions (
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            energy_kwh REAL NOT NULL,
+            source TEXT NOT NULL,
+            cost_estimate REAL
+        )
+        """
+    )
+    present_ev_columns = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
+    ev_column_sql = {
+        "transaction_id": "ALTER TABLE ev_sessions ADD COLUMN transaction_id TEXT",
+        "last_seen": "ALTER TABLE ev_sessions ADD COLUMN last_seen TEXT",
+        "max_power_kw": "ALTER TABLE ev_sessions ADD COLUMN max_power_kw REAL",
+        "status": "ALTER TABLE ev_sessions ADD COLUMN status TEXT",
+        "tariff_breakdown_json": "ALTER TABLE ev_sessions ADD COLUMN tariff_breakdown_json TEXT",
+        "first_seen_energy_kwh": "ALTER TABLE ev_sessions ADD COLUMN first_seen_energy_kwh REAL",
+        "last_energy_kwh": "ALTER TABLE ev_sessions ADD COLUMN last_energy_kwh REAL",
+        "duration_minutes": "ALTER TABLE ev_sessions ADD COLUMN duration_minutes REAL",
+        "cost_partial": "ALTER TABLE ev_sessions ADD COLUMN cost_partial INTEGER DEFAULT 0",
+        "start_source": "ALTER TABLE ev_sessions ADD COLUMN start_source TEXT",
+        "stop_source": "ALTER TABLE ev_sessions ADD COLUMN stop_source TEXT",
+        "notes_json": "ALTER TABLE ev_sessions ADD COLUMN notes_json TEXT",
+    }
+    for bucket, (kwh_column, cost_column) in EV_TARIFF_COLUMN_PAIRS.items():
+        ev_column_sql[kwh_column] = f"ALTER TABLE ev_sessions ADD COLUMN {kwh_column} REAL DEFAULT 0"
+        ev_column_sql[cost_column] = f"ALTER TABLE ev_sessions ADD COLUMN {cost_column} REAL DEFAULT 0"
+    for column, statement in ev_column_sql.items():
+        if column not in present_ev_columns:
+            conn.execute(statement)
+    backfill_ev_tariff_columns(conn)
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_transaction_id
+        ON ev_sessions(transaction_id)
+        WHERE transaction_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS billing_periods (
+            name TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            actual_bill_amount REAL,
+            plan_name TEXT,
+            notes TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+def cost_sql(settings: Settings) -> tuple[str, list]:
+    parts = []
+    params = []
+    for bucket in BUCKET_ORDER:
+        parts.append("WHEN tariff_bucket = ? THEN COALESCE(grid_to_home_kwh, 0) * ?")
+        params.extend((bucket, settings.import_rates[bucket]))
+    return "CASE " + " ".join(parts) + " ELSE 0 END", params
+
+
+def empty_ev_breakdown() -> dict:
+    return {bucket: {"kwh": 0.0, "cost": 0.0} for bucket in BUCKET_ORDER}
+
+
+def actual_ev_sources(settings: Settings) -> list[str]:
+    if settings.ev_data_source in {"ocular_export", "home_assistant_ocpp"}:
+        return ["ocular_export", "home_assistant_ocpp"]
+    return []
+
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_time_from_minutes(minutes: Optional[float]) -> Optional[str]:
+    if minutes is None:
+        return None
+    rounded = int(round(minutes)) % (24 * 60)
+    return f"{rounded // 60:02d}:{rounded % 60:02d}"
+
+
+def average_clock_time(datetimes: list[datetime]) -> Optional[str]:
+    if not datetimes:
+        return None
+    minutes = [(value.hour * 60 + value.minute + value.second / 60) for value in datetimes]
+    return format_time_from_minutes(sum(minutes) / len(minutes))
+
+
+def format_duration(minutes: Optional[float]) -> str:
+    if minutes is None:
+        return "n/a"
+    total = max(int(round(minutes)), 0)
+    hours, remainder = divmod(total, 60)
+    return f"{hours}h {remainder:02d}m"
+
+
+def session_brief(session: dict) -> Optional[dict]:
+    if not session:
+        return None
+    return {
+        "transaction_id": session.get("transaction_id"),
+        "date": session.get("date"),
+        "start_time": session.get("start_time_display"),
+        "end_time": session.get("end_time_display"),
+        "duration_minutes": session.get("duration_minutes"),
+        "energy_kwh": session.get("energy_kwh"),
+        "cost": session.get("cost"),
+        "cost_per_kwh": session.get("cost_per_kwh"),
+        "dominant_tariff": session.get("dominant_tariff"),
+        "max_power_kw": session.get("max_power_kw"),
+    }
+
+
+def load_actual_ev_sessions(
+    conn: sqlite3.Connection, start: date, end: date, settings: Settings
+) -> list[dict]:
+    sources = actual_ev_sources(settings)
+    if not sources:
+        return []
+    start_text = start.isoformat()
+    end_exclusive = (end + timedelta(days=1)).isoformat()
+    tariff_columns = [
+        column
+        for bucket in BUCKET_ORDER
+        for column in EV_TARIFF_COLUMN_PAIRS[bucket]
+    ]
+    rows = conn.execute(
+        """
+        SELECT
+            transaction_id,
+            start_time,
+            end_time,
+            COALESCE(last_seen, end_time, start_time) AS last_seen_value,
+            energy_kwh,
+            cost_estimate,
+            cost_partial,
+            source,
+            duration_minutes,
+            max_power_kw,
+            tariff_breakdown_json,
+            {}
+        FROM ev_sessions
+        WHERE source IN ({})
+          AND COALESCE(last_seen, end_time, start_time) >= ?
+          AND start_time < ?
+        ORDER BY start_time
+        """.format(
+            ", ".join(tariff_columns),
+            ",".join("?" for _ in sources),
+        ),
+        (*sources, start_text, end_exclusive),
+    ).fetchall()
+    if rows and any(row[7] == "ocular_export" for row in rows):
+        rows = [row for row in rows if row[7] == "ocular_export"]
+
+    sessions = []
+    for row in rows:
+        breakdown = empty_ev_breakdown()
+        stored_total = 0.0
+        column_offset = 11
+        for index, bucket in enumerate(BUCKET_ORDER):
+            kwh_value = float(row[column_offset + index * 2] or 0)
+            cost_value = float(row[column_offset + index * 2 + 1] or 0)
+            breakdown[bucket] = {"kwh": kwh_value, "cost": cost_value}
+            stored_total += abs(kwh_value) + abs(cost_value)
+        if stored_total <= 0:
+            try:
+                parsed = json.loads(row[10]) if row[10] else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                for bucket in BUCKET_ORDER:
+                    values = parsed.get(bucket, {})
+                    if isinstance(values, dict):
+                        breakdown[bucket] = {
+                            "kwh": float(values.get("kwh") or 0),
+                            "cost": float(values.get("cost") or 0),
+                        }
+
+        energy = float(row[4] or 0)
+        cost = sum(values["cost"] for values in breakdown.values())
+        if cost <= 0 and row[5] is not None:
+            cost = float(row[5] or 0)
+        start_dt = parse_iso_datetime(row[1])
+        end_dt = parse_iso_datetime(row[2]) or parse_iso_datetime(row[3])
+        duration = float(row[8]) if row[8] is not None else None
+        if duration is None and start_dt and end_dt:
+            duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
+        max_power = float(row[9]) if row[9] is not None else None
+        if max_power is None and duration and duration > 0:
+            max_power = energy / (duration / 60)
+        dominant = max(BUCKET_ORDER, key=lambda bucket: breakdown[bucket]["kwh"]) if energy > 0 else None
+        sessions.append(
+            {
+                "transaction_id": row[0],
+                "start_time": row[1],
+                "end_time": row[2],
+                "date": start_dt.date().isoformat() if start_dt else None,
+                "start_time_display": start_dt.strftime("%H:%M") if start_dt else "n/a",
+                "end_time_display": end_dt.strftime("%H:%M") if end_dt else "n/a",
+                "duration_minutes": duration,
+                "duration_display": format_duration(duration),
+                "energy_kwh": energy,
+                "cost": cost,
+                "cost_per_kwh": cost / energy if energy else 0.0,
+                "source": row[7],
+                "cost_partial": bool(row[6]),
+                "max_power_kw": max_power,
+                "dominant_tariff": dominant,
+                "dominant_tariff_label": EV_BUCKET_LABELS.get(dominant, dominant or "n/a"),
+                "tariff_breakdown": breakdown,
+            }
+        )
+    return sessions
+
+
+def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
+    if not sessions:
+        return {
+            "available": False,
+            "overview": {},
+            "tariff_usage": empty_ev_breakdown(),
+            "insights": {},
+            "recommendations": [],
+            "sessions": [],
+        }
+
+    total_kwh = sum(session["energy_kwh"] for session in sessions)
+    total_cost = sum(session["cost"] for session in sessions)
+    tariff_usage = empty_ev_breakdown()
+    for session in sessions:
+        for bucket in BUCKET_ORDER:
+            tariff_usage[bucket]["kwh"] += session["tariff_breakdown"][bucket]["kwh"]
+            tariff_usage[bucket]["cost"] += session["tariff_breakdown"][bucket]["cost"]
+    for bucket in BUCKET_ORDER:
+        tariff_usage[bucket]["pct"] = tariff_usage[bucket]["kwh"] / total_kwh * 100 if total_kwh else 0.0
+        tariff_usage[bucket]["label"] = EV_BUCKET_LABELS.get(bucket, bucket)
+
+    starts = [parse_iso_datetime(session["start_time"]) for session in sessions]
+    finishes = [parse_iso_datetime(session["end_time"]) for session in sessions]
+    starts = [value for value in starts if value]
+    finishes = [value for value in finishes if value]
+    cheapest = min(sessions, key=lambda session: session["cost"]) if sessions else None
+    expensive = max(sessions, key=lambda session: session["cost"]) if sessions else None
+    longest = max(sessions, key=lambda session: session["duration_minutes"] or 0) if sessions else None
+    highest_power = max(sessions, key=lambda session: session["max_power_kw"] or 0) if sessions else None
+
+    recommendations = generate_ev_session_decisions(sessions, settings.import_rates)
+
+    history = sorted(sessions, key=lambda session: session.get("start_time") or "", reverse=True)
+    return {
+        "available": True,
+        "overview": {
+            "total_kwh": total_kwh,
+            "total_cost": total_cost,
+            "average_session_cost": total_cost / len(sessions),
+            "average_session_kwh": total_kwh / len(sessions),
+            "average_effective_cost_per_kwh": total_cost / total_kwh if total_kwh else 0.0,
+        },
+        "tariff_usage": tariff_usage,
+        "insights": {
+            "cheapest_session": session_brief(cheapest),
+            "most_expensive_session": session_brief(expensive),
+            "longest_session": session_brief(longest),
+            "highest_power_session": session_brief(highest_power),
+            "session_count": len(sessions),
+            "charging_days": len({session["date"] for session in sessions if session["date"]}),
+            "average_start_time": average_clock_time(starts),
+            "average_finish_time": average_clock_time(finishes),
+        },
+        "recommendations": recommendations,
+        "sessions": history,
+    }
+
+
+def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
+    start_text = start.isoformat()
+    end_exclusive = (end + timedelta(days=1)).isoformat()
+    import_cost_expression, cost_params = cost_sql(settings)
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*),
+            COUNT(DISTINCT substr(measurement_time, 1, 10)),
+            COALESCE(SUM(grid_to_home_kwh), 0),
+            COALESCE(SUM({import_cost_expression}), 0),
+            COALESCE(SUM(production_kwh), 0),
+            COALESCE(SUM(solar_to_home_kwh), 0),
+            COALESCE(SUM(solar_to_grid_kwh), 0),
+            COALESCE(SUM(
+                CASE WHEN tariff_bucket = 'overnight'
+                     THEN MAX(COALESCE(grid_to_home_w, 0) - ?, 0) * 0.25 / 1000.0
+                     ELSE 0 END
+            ), 0)
+        FROM readings
+        WHERE measurement_time >= ? AND measurement_time < ?
+        """,
+        (*cost_params, settings.ev_baseline_watts, start_text, end_exclusive),
+    ).fetchone()
+
+    buckets = {
+        bucket: {"kwh": 0.0, "cost": 0.0}
+        for bucket in BUCKET_ORDER
+    }
+    for bucket, kwh in conn.execute(
+        """
+        SELECT tariff_bucket, COALESCE(SUM(grid_to_home_kwh), 0)
+        FROM readings
+        WHERE measurement_time >= ? AND measurement_time < ?
+        GROUP BY tariff_bucket
+        """,
+        (start_text, end_exclusive),
+    ):
+        buckets.setdefault(bucket, {"kwh": 0.0, "cost": 0.0})
+        buckets[bucket] = {
+            "kwh": float(kwh),
+            "cost": float(kwh) * settings.import_rates.get(bucket, 0),
+        }
+
+    intervals, reading_days, grid_import, import_cost, generated, used, exported, estimated_ev_charging = row
+    actual_ev_charging = None
+    actual_ev_cost = None
+    actual_ev_breakdown = empty_ev_breakdown()
+    actual_ev_partial = False
+    actual_source = "estimated"
+    actual_sessions = load_actual_ev_sessions(conn, start, end, settings)
+    analytics = ev_session_analytics(actual_sessions, settings)
+    if actual_sessions:
+        actual_source = actual_sessions[0]["source"]
+        actual_ev_charging = sum(session["energy_kwh"] for session in actual_sessions)
+        actual_ev_cost = sum(session["cost"] for session in actual_sessions)
+        actual_ev_partial = any(session["cost_partial"] for session in actual_sessions)
+        for session in actual_sessions:
+            for bucket in BUCKET_ORDER:
+                actual_ev_breakdown[bucket]["kwh"] += session["tariff_breakdown"][bucket]["kwh"]
+                actual_ev_breakdown[bucket]["cost"] += session["tariff_breakdown"][bucket]["cost"]
+    if actual_ev_charging is not None and actual_ev_charging <= 0:
+        actual_ev_charging = None
+        actual_ev_cost = None
+    supply_days = (end - start).days + 1
+    supply_cost = supply_days * settings.supply_charge_per_day
+    export_credit = float(exported) * settings.export_credit_rate
+    total_cost = float(import_cost) + supply_cost
+    net_cost = total_cost - export_credit
+    self_consumption = used / generated * 100 if generated else 0.0
+    export_pct = exported / generated * 100 if generated else 0.0
+    peak_cost = buckets["peak"]["cost"]
+    peak_cost_share = peak_cost / import_cost * 100 if import_cost else 0.0
+    observed_days = max(int(reading_days), 1)
+    return Summary(
+        start=start,
+        end=end,
+        supply_days=supply_days,
+        intervals=int(intervals),
+        reading_days=int(reading_days),
+        grid_import_kwh=float(grid_import),
+        import_cost=float(import_cost),
+        supply_cost=supply_cost,
+        total_cost=total_cost,
+        export_credit=export_credit,
+        net_cost=net_cost,
+        solar_generated_kwh=float(generated),
+        solar_used_kwh=float(used),
+        solar_exported_kwh=float(exported),
+        self_consumption_pct=self_consumption,
+        solar_export_pct=export_pct,
+        peak_cost_share_pct=peak_cost_share,
+        ev_charging_kwh=(
+            actual_ev_charging
+            if actual_ev_charging is not None
+            else float(estimated_ev_charging)
+        ),
+        ev_charging_cost=(
+            actual_ev_cost
+            if actual_ev_cost is not None
+            else float(estimated_ev_charging) * settings.import_rates["overnight"]
+        ),
+        ev_charging_source=(
+            actual_source if actual_ev_charging is not None else "estimated"
+        ),
+        actual_ev_charging_kwh=float(actual_ev_charging or 0),
+        actual_ev_charging_cost=float(actual_ev_cost or 0),
+        actual_ev_tariff_breakdown=actual_ev_breakdown,
+        actual_ev_cost_partial=actual_ev_partial,
+        ev_session_analytics=analytics,
+        average_daily_grid_import_kwh=float(grid_import) / observed_days,
+        average_daily_solar_generation_kwh=float(generated) / observed_days,
+        average_daily_net_cost=net_cost / supply_days,
+        buckets=buckets,
+    )
+
+
+def tariff_scenario(summary: Summary, settings: Settings) -> dict:
+    rates = settings.comparison_plan_rates
+    comparison_import = summary.grid_import_kwh * rates["flat_import_rate"]
+    comparison_supply = summary.supply_days * rates["supply_charge_per_day"]
+    comparison_credit = summary.solar_exported_kwh * rates["export_credit_rate"]
+    comparison_net = comparison_import + comparison_supply - comparison_credit
+    return {
+        "current_plan": settings.current_plan,
+        "comparison_plan": settings.comparison_plan,
+        "current_plan_net_cost": summary.net_cost,
+        "comparison_plan_net_cost": comparison_net,
+        "difference": summary.net_cost - comparison_net,
+        "estimated_savings": comparison_net - summary.net_cost,
+    }
+
+
+def ev_cost_under_rate(summary: Summary, rate: float) -> float:
+    return summary.ev_charging_kwh * rate
+
+
+def weighted_average_import_rate(summary: Summary) -> float:
+    return summary.import_cost / summary.grid_import_kwh if summary.grid_import_kwh else 0.0
+
+
+def plan_comparison(summary: Summary, settings: Settings) -> dict:
+    rates = settings.comparison_plan_rates
+    flat_rate = rates["flat_import_rate"]
+    comparison_supply_rate = rates.get("supply_charge_per_day", settings.supply_charge_per_day)
+    comparison_export_rate = rates.get("export_credit_rate", settings.export_credit_rate)
+
+    comparison_import_cost = summary.grid_import_kwh * flat_rate
+    comparison_supply_charge = summary.supply_days * comparison_supply_rate
+    comparison_export_credit = summary.solar_exported_kwh * comparison_export_rate
+    comparison_net_bill = comparison_import_cost + comparison_supply_charge - comparison_export_credit
+
+    current_ev_cost = summary.ev_charging_cost
+    comparison_ev_cost = ev_cost_under_rate(summary, flat_rate)
+    current_household_cost = max(summary.import_cost - current_ev_cost, 0.0)
+    comparison_household_kwh = max(summary.grid_import_kwh - summary.ev_charging_kwh, 0.0)
+    comparison_household_cost = comparison_household_kwh * flat_rate
+    export_value_difference = summary.export_credit - comparison_export_credit
+    savings = comparison_net_bill - summary.net_cost
+    monthly_savings = savings / summary.supply_days * 30 if summary.supply_days else savings
+    recommendation = (
+        f"The EV Add On is currently saving approximately {money(monthly_savings)} per month."
+        if savings > 0
+        else "Based on current charging behaviour, the Flat plan would currently be cheaper."
+        if savings < 0
+        else "The EV Add On and Flat plan are currently about even for this period."
+    )
+
+    return {
+        "current_plan": {
+            "name": settings.current_plan,
+            "display_name": "Synergy EV Add On",
+            "grid_import_cost": summary.import_cost,
+            "supply_charge": summary.supply_cost,
+            "export_credit": summary.export_credit,
+            "net_bill": summary.net_cost,
+            "ev_charging_cost": current_ev_cost,
+            "household_usage_cost": current_household_cost,
+        },
+        "comparison_plan": {
+            "name": settings.comparison_plan,
+            "display_name": "Previous Flat/Home Plan",
+            "flat_import_rate": flat_rate,
+            "grid_import_cost": comparison_import_cost,
+            "supply_charge": comparison_supply_charge,
+            "export_credit": comparison_export_credit,
+            "net_bill": comparison_net_bill,
+            "ev_charging_cost": comparison_ev_cost,
+            "household_usage_cost": comparison_household_cost,
+        },
+        "difference": summary.net_cost - comparison_net_bill,
+        "savings": savings,
+        "monthly_savings_estimate": monthly_savings,
+        "ev_charging_cost_difference": current_ev_cost - comparison_ev_cost,
+        "household_usage_cost_difference": current_household_cost - comparison_household_cost,
+        "solar_export_value_difference": export_value_difference,
+        "recommendation": recommendation,
+    }
+
+
+def scenario_confidence(summary: Summary, needs_actual_ev: bool = False) -> str:
+    coverage = summary.reading_days / summary.supply_days if summary.supply_days else 0.0
+    if needs_actual_ev and summary.ev_charging_source != "ocular_export":
+        return "medium" if coverage >= 0.5 else "low"
+    if coverage >= 0.8:
+        return "high"
+    if coverage >= 0.35:
+        return "medium"
+    return "low"
+
+
+def scenario_card(
+    scenario_id: str,
+    title: str,
+    estimated_bill: float,
+    actual_bill: float,
+    confidence: str,
+    description: str,
+) -> dict:
+    difference = estimated_bill - actual_bill
+    return {
+        "id": scenario_id,
+        "title": title,
+        "estimated_bill": estimated_bill,
+        "difference_vs_actual": difference,
+        "savings": max(-difference, 0.0),
+        "loss": max(difference, 0.0),
+        "confidence": confidence,
+        "description": description,
+    }
+
+
+def scenario_analysis(summary: Summary, settings: Settings) -> dict:
+    actual_bill = summary.net_cost
+    ev_kwh = summary.ev_charging_kwh
+    ev_actual_cost = summary.ev_charging_cost
+    cheapest_bucket = min(BUCKET_ORDER, key=lambda bucket: settings.import_rates.get(bucket, 0))
+    peak_bucket = max(BUCKET_ORDER, key=lambda bucket: settings.import_rates.get(bucket, 0))
+
+    scenarios = []
+    for scenario_id, title, bucket in (
+        ("ev_all_super_off_peak", "What if every EV session occurred in the 9am-3pm EV window?", "super_off_peak"),
+        ("ev_all_overnight", "What if every EV session occurred overnight?", "overnight"),
+        ("ev_all_peak", "What if every EV session occurred during Peak?", peak_bucket),
+    ):
+        scenario_ev_cost = ev_kwh * settings.import_rates[bucket]
+        scenarios.append(
+            scenario_card(
+                scenario_id,
+                title,
+                actual_bill - ev_actual_cost + scenario_ev_cost,
+                actual_bill,
+                scenario_confidence(summary, True),
+                f"Reprices {kwh(ev_kwh)} of EV charging at {BUCKET_LABELS.get(bucket, bucket)} rates.",
+            )
+        )
+
+    scenarios.append(
+        scenario_card(
+            "no_ev_charging",
+            "What if no EV charging occurred this billing period?",
+            actual_bill - ev_actual_cost,
+            actual_bill,
+            scenario_confidence(summary, True),
+            f"Removes {kwh(ev_kwh)} of EV charging cost from this period.",
+        )
+    )
+
+    average_import_rate = weighted_average_import_rate(summary)
+    self_consumed_kwh = min(summary.solar_exported_kwh, summary.grid_import_kwh)
+    avoided_import_cost = self_consumed_kwh * average_import_rate
+    lost_export_credit = summary.solar_exported_kwh * settings.export_credit_rate
+    scenarios.append(
+        scenario_card(
+            "solar_export_self_consumed",
+            "What if all exported solar had instead been self-consumed?",
+            actual_bill - avoided_import_cost + lost_export_credit,
+            actual_bill,
+            scenario_confidence(summary),
+            f"Models {kwh(self_consumed_kwh)} of exported solar offsetting grid imports, with export credit removed.",
+        )
+    )
+
+    battery_shift_kwh = min(10.0, summary.buckets.get("peak", {}).get("kwh", 0.0))
+    battery_savings = battery_shift_kwh * settings.import_rates[peak_bucket] - battery_shift_kwh * settings.export_credit_rate
+    scenarios.append(
+        scenario_card(
+            "battery_shift_peak_imports",
+            "What if a 10 kWh home battery shifted Peak imports to solar?",
+            actual_bill - max(battery_savings, 0.0),
+            actual_bill,
+            scenario_confidence(summary),
+            f"Models up to {kwh(battery_shift_kwh)} of Peak imports avoided by stored solar.",
+        )
+    )
+
+    ev_window_cost = ev_kwh * settings.import_rates[cheapest_bucket]
+    ev_window_savings = max(ev_actual_cost - ev_window_cost, 0.0)
+    tariff_usage = summary.ev_session_analytics.get("tariff_usage", {}) if summary.ev_session_analytics else {}
+    cheapest_pct = float(tariff_usage.get(cheapest_bucket, {}).get("pct") or 0.0)
+    peak_sessions = [
+        session for session in summary.ev_session_analytics.get("sessions", [])
+        if session.get("tariff_breakdown", {}).get(peak_bucket, {}).get("cost", 0) > 0
+    ] if summary.ev_session_analytics else []
+    insights = []
+    if ev_kwh > 0:
+        insights.append(
+            f"If every EV session had been shifted into the EV solar window you would have saved approximately {money(ev_window_savings)}."
+        )
+    if cheapest_pct:
+        insights.append(
+            f"You've already charged {cheapest_pct:.0f}% of energy in the cheapest tariff."
+        )
+    if peak_sessions:
+        count_word = "one charging session" if len(peak_sessions) == 1 else f"{len(peak_sessions)} charging sessions"
+        insights.append(f"Only {count_word} incurred Peak charges.")
+
+    return {
+        "actual_bill": actual_bill,
+        "scenarios": scenarios,
+        "ev_insights": insights,
+    }
+
+
+def car_comparison(settings: Settings) -> dict:
+    available = bool(
+        settings.car_comparison_enabled
+        and settings.ev_odometer_km is not None
+        and settings.ev_kwh_per_100km is not None
+    )
+    result = {
+        "enabled": settings.car_comparison_enabled,
+        "available": available,
+        "message": "EV fuel savings require distance or charger session data.",
+    }
+    if available:
+        distance = settings.ev_odometer_km
+        petrol_cost = distance / 100 * settings.previous_car_l_per_100km * settings.petrol_price_per_litre
+        result.update({"distance_km": distance, "estimated_previous_car_fuel_cost": petrol_cost})
+    return result
+
+
+def compare_summaries(period_a: Period, summary_a: Summary, period_b: Period, summary_b: Summary) -> dict:
+    fields = {
+        "net_cost": summary_a.net_cost - summary_b.net_cost,
+        "grid_import_kwh": summary_a.grid_import_kwh - summary_b.grid_import_kwh,
+        "solar_generated_kwh": summary_a.solar_generated_kwh - summary_b.solar_generated_kwh,
+        "peak_cost": summary_a.buckets["peak"]["cost"] - summary_b.buckets["peak"]["cost"],
+        "self_consumption_pct": summary_a.self_consumption_pct - summary_b.self_consumption_pct,
+        "ev_charging_kwh": summary_a.ev_charging_kwh - summary_b.ev_charging_kwh,
+    }
+    return {
+        "period_a": {"kind": period_a.kind, "label": period_a.label, "start": period_a.start.isoformat(), "end": period_a.end.isoformat()},
+        "period_b": {"kind": period_b.kind, "label": period_b.label, "start": period_b.start.isoformat(), "end": period_b.end.isoformat()},
+        "summary_a": summary_to_dict(summary_a),
+        "summary_b": summary_to_dict(summary_b),
+        "deltas": fields,
+    }
+
+
+def comparison_data(period_a: Period, period_b: Period, settings: Settings) -> dict:
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        return compare_summaries(
+            period_a,
+            load_summary(conn, period_a.start, period_a.end, settings),
+            period_b,
+            load_summary(conn, period_b.start, period_b.end, settings),
+        )
+
+
+def load_daily_trends(
+    conn: sqlite3.Connection, start: date, end: date, settings: Settings
+) -> list[DailyTrend]:
+    import_cost_expression, cost_params = cost_sql(settings)
+    rows = conn.execute(
+        f"""
+        SELECT
+            substr(measurement_time, 1, 10) AS day,
+            COALESCE(SUM(grid_to_home_kwh), 0),
+            COALESCE(SUM(production_kwh), 0),
+            COALESCE(SUM(solar_to_grid_kwh), 0),
+            COALESCE(SUM({import_cost_expression}), 0),
+            COALESCE(SUM(
+                CASE WHEN tariff_bucket = 'overnight'
+                     THEN MAX(COALESCE(grid_to_home_w, 0) - ?, 0) * 0.25 / 1000.0
+                     ELSE 0 END
+            ), 0)
+        FROM readings
+        WHERE measurement_time >= ? AND measurement_time < ?
+        GROUP BY day
+        ORDER BY day
+        """,
+        (*cost_params, settings.ev_baseline_watts, start.isoformat(), (end + timedelta(days=1)).isoformat()),
+    ).fetchall()
+    trends = []
+    for day_text, grid_import, generated, exported, import_cost, ev_charging in rows:
+        ev_value = float(ev_charging)
+        ev_source = "estimated"
+        actual_sources = actual_ev_sources(settings)
+        if actual_sources:
+            actual_ev = conn.execute(
+                """
+                SELECT source, COALESCE(SUM(energy_kwh), 0)
+                FROM ev_sessions
+                WHERE source IN ({})
+                  AND COALESCE(last_seen, start_time) >= ?
+                  AND start_time < ?
+                GROUP BY source
+                """.format(",".join("?" for _ in actual_sources)),
+                (*actual_sources, day_text, (date.fromisoformat(day_text) + timedelta(days=1)).isoformat()),
+            ).fetchall()
+            if actual_ev:
+                chosen = next((row for row in actual_ev if row[0] == "ocular_export"), actual_ev[0])
+                if float(chosen[1] or 0) > 0:
+                    ev_value = float(chosen[1])
+                    ev_source = chosen[0]
+        export_credit = float(exported) * settings.export_credit_rate
+        trends.append(
+            DailyTrend(
+                day=date.fromisoformat(day_text),
+                grid_import_kwh=float(grid_import),
+                solar_generated_kwh=float(generated),
+                solar_exported_kwh=float(exported),
+                import_cost=float(import_cost),
+                export_credit=export_credit,
+                net_cost=float(import_cost) + settings.supply_charge_per_day - export_credit,
+                ev_charging_kwh=ev_value,
+                ev_charging_source=ev_source,
+            )
+        )
+    return trends
+
+
+def load_recommendations(
+    conn: sqlite3.Connection, current_summary: Summary, settings: Settings
+) -> list[Decision]:
+    overnight_values = [
+        float(row[0])
+        for row in conn.execute(
+            """
+            SELECT grid_to_home_w
+            FROM readings
+            WHERE measurement_time >= ? AND measurement_time < ?
+              AND tariff_bucket = 'overnight' AND grid_to_home_w IS NOT NULL
+            """,
+            (
+                current_summary.start.isoformat(),
+                (current_summary.end + timedelta(days=1)).isoformat(),
+            ),
+        )
+    ]
+    overnight_baseload = statistics.median(overnight_values) if overnight_values else 0.0
+
+    projected_days = current_summary.supply_days
+    projected_end = current_summary.end
+    previous_summary = None
+    if settings.current_billing_period_start and settings.current_billing_period_end:
+        projected_end = settings.current_billing_period_end
+        projected_days = (projected_end - settings.current_billing_period_start).days + 1
+    elif (
+        settings.current_billing_period_start
+        and settings.previous_billing_period_start
+        and settings.previous_billing_period_end
+    ):
+        projected_days = (
+            settings.previous_billing_period_end - settings.previous_billing_period_start
+        ).days + 1
+        projected_end = settings.current_billing_period_start + timedelta(days=projected_days - 1)
+
+    if settings.previous_billing_period_start and settings.previous_billing_period_end:
+        candidate = load_summary(
+            conn,
+            settings.previous_billing_period_start,
+            settings.previous_billing_period_end,
+            settings,
+        )
+        if candidate.supply_days and candidate.reading_days / candidate.supply_days >= 0.5:
+            previous_summary = summary_to_dict(candidate)
+
+    context = {
+        "current": summary_to_dict(current_summary),
+        "previous": previous_summary,
+        "import_rates": settings.import_rates,
+        "ev_data_source": current_summary.ev_charging_source,
+        "ev_baseline_watts": settings.ev_baseline_watts,
+        "overnight_baseload_watts": overnight_baseload,
+        "projected_period_days": projected_days,
+        "projected_period_end": projected_end.isoformat(),
+        "projected_net_cost": current_summary.average_daily_net_cost * projected_days,
+    }
+    return generate_decisions(context, settings.recommendation_thresholds)
+
+
+def money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def kwh(value: float) -> str:
+    return f"{value:,.2f} kWh"
+
+
+def signed_money(value: float) -> str:
+    return f"{'+' if value > 0 else '-' if value < 0 else ''}{money(abs(value))}"
+
+
+def signed_kwh(value: float) -> str:
+    return f"{'+' if value > 0 else '-' if value < 0 else ''}{kwh(abs(value))}"
+
+
+EV_ESTIMATE_CAVEAT = (
+    "This estimate only covers overnight charging above the configured baseload. "
+    "Daytime EV charging is not included unless charger session data is connected."
+)
+
+
+def ev_energy_label(settings: Settings, summary: Optional[Summary] = None) -> str:
+    source = summary.ev_charging_source if summary else settings.ev_data_source
+    return (
+        "Actual EV charging"
+        if source in {"home_assistant_ocpp", "ocular_export"}
+        else "Estimated overnight EV charging"
+    )
+
+
+def ev_cost_label(settings: Settings, summary: Optional[Summary] = None) -> str:
+    source = summary.ev_charging_source if summary else settings.ev_data_source
+    return (
+        "Calculated charging cost"
+        if source == "home_assistant_ocpp"
+        else "Calculated session cost"
+        if source == "ocular_export"
+        else "Estimated overnight EV charging cost"
+    )
+
+
+def ev_note(settings: Settings, summary: Optional[Summary] = None) -> str:
+    source = summary.ev_charging_source if summary else settings.ev_data_source
+    if source == "home_assistant_ocpp":
+        return "Home Assistant OCPP charger sessions"
+    if source == "ocular_export":
+        return "Ocular charging history export"
+    return f"Above {settings.ev_baseline_watts:.0f} W overnight baseline"
+
+
+def print_summary(title: str, summary: Summary, settings: Settings) -> None:
+    print(title)
+    print(f"  Period:                       {summary.start} to {summary.end}")
+    print(f"  Grid import:                  {kwh(summary.grid_import_kwh)}")
+    for bucket in BUCKET_ORDER:
+        values = summary.buckets[bucket]
+        print(
+            f"    {BUCKET_LABELS[bucket]:24} "
+            f"{kwh(values['kwh']):>12}  {money(values['cost']):>9}"
+        )
+    print(f"  Import cost:                  {money(summary.import_cost)}")
+    print(
+        f"  Daily supply charge:          {money(settings.supply_charge_per_day)}/day "
+        f"x {summary.supply_days} = {money(summary.supply_cost)}"
+    )
+    print(f"  Total estimated cost:         {money(summary.total_cost)}")
+    print(f"  Export credit:                -{money(summary.export_credit)}")
+    print(f"  Net estimated cost:           {money(summary.net_cost)}")
+    print(f"  Solar generated:              {kwh(summary.solar_generated_kwh)}")
+    print(f"  Solar used directly:          {kwh(summary.solar_used_kwh)}")
+    print(f"  Solar exported:               {kwh(summary.solar_exported_kwh)}")
+    print(f"  Solar self-consumption:       {summary.self_consumption_pct:.1f}%")
+    print(f"  Solar export percentage:      {summary.solar_export_pct:.1f}%")
+    print(f"  Peak cost share:              {summary.peak_cost_share_pct:.1f}%")
+    print(f"  {ev_energy_label(settings, summary) + ':':31}{kwh(summary.ev_charging_kwh):>13}")
+    print(f"  {ev_cost_label(settings, summary) + ':':31}{money(summary.ev_charging_cost)}")
+    if summary.ev_charging_source == "estimated":
+        print(f"  EV estimate caveat:            {EV_ESTIMATE_CAVEAT}")
+    print(f"  Average daily grid import:     {kwh(summary.average_daily_grid_import_kwh)}")
+    print(f"  Average daily solar generated: {kwh(summary.average_daily_solar_generation_kwh)}")
+    print(f"  Average daily net cost:        {money(summary.average_daily_net_cost)}")
+    if not summary.intervals:
+        print("  Note: no readings found for this period")
+
+
+def metric(label: str, value: str, note: str = "", tone: str = "") -> str:
+    note_html = f"<small>{html.escape(note)}</small>" if note else ""
+    return (
+        f'<div class="metric {html.escape(tone)}">'
+        f"<span>{html.escape(label)}</span><strong>{html.escape(value)}</strong>{note_html}"
+        "</div>"
+    )
+
+
+def bar_chart(summary: Summary, value_key: str, title: str, value_type: str) -> str:
+    maximum = max((summary.buckets[bucket][value_key] for bucket in BUCKET_ORDER), default=0)
+    rows = []
+    for bucket in BUCKET_ORDER:
+        value = summary.buckets[bucket][value_key]
+        width = value / maximum * 100 if maximum else 0
+        display_value = money(value) if value_type == "money" else kwh(value)
+        peak_class = " peak" if bucket == "peak" else ""
+        peak_badge = '<span class="peak-badge">Highest rate</span>' if bucket == "peak" else ""
+        rows.append(
+            f"""
+            <div class="bar-row{peak_class}">
+              <div class="bar-label"><span>{html.escape(BUCKET_LABELS[bucket])}</span>{peak_badge}</div>
+              <div class="bar-track" role="img" aria-label="{html.escape(BUCKET_LABELS[bucket])}: {html.escape(display_value)}">
+                <span class="bar-fill" style="width:{width:.1f}%"></span>
+              </div>
+              <strong>{html.escape(display_value)}</strong>
+            </div>
+            """
+        )
+    return f"""
+    <div class="chart-card">
+      <div class="chart-heading"><h3>{html.escape(title)}</h3><span>Synergy EV tariff</span></div>
+      <div class="bar-chart">{''.join(rows)}</div>
+    </div>
+    """
+
+
+def actual_ev_message(summary: Summary) -> str:
+    breakdown = summary.actual_ev_tariff_breakdown
+    source_label = (
+        "Ocular charging history"
+        if summary.ev_charging_source == "ocular_export"
+        else "Home Assistant OCPP"
+    )
+    if not breakdown:
+        return f"Actual charging has been imported from {source_label}."
+    dominant = max(EV_BUCKET_ORDER, key=lambda bucket: breakdown[bucket]["kwh"])
+    total = sum(breakdown[bucket]["kwh"] for bucket in EV_BUCKET_ORDER)
+    if total <= 0:
+        return f"Actual charging has been imported from {source_label}."
+    share = breakdown[dominant]["kwh"] / total
+    if share < 0.5:
+        return "Charging was split across tariff windows."
+    if dominant == "super_off_peak":
+        return "Charging was mostly in the cheapest 9am-3pm EV window."
+    if dominant == "overnight":
+        return "Charging was mostly overnight."
+    return f"Charging was mostly during {EV_BUCKET_LABELS[dominant]}."
+
+
+def actual_ev_card_html(summary: Summary, settings: Settings) -> str:
+    if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"}:
+        return ""
+    cheapest_cost = summary.actual_ev_charging_kwh * settings.import_rates["super_off_peak"]
+    peak_cost = summary.actual_ev_charging_kwh * settings.import_rates["peak"]
+    savings_vs_peak = max(peak_cost - summary.actual_ev_charging_cost, 0.0)
+    maximum = max(
+        (summary.actual_ev_tariff_breakdown[bucket]["kwh"] for bucket in EV_BUCKET_ORDER),
+        default=0,
+    )
+    rows = []
+    for bucket in EV_BUCKET_ORDER:
+        values = summary.actual_ev_tariff_breakdown[bucket]
+        width = values["kwh"] / maximum * 100 if maximum else 0
+        rows.append(
+            f"""
+            <div class="actual-ev-breakdown-row {' peak' if bucket == 'peak' else ''}">
+              <div><span>{html.escape(EV_BUCKET_LABELS[bucket])}</span><strong>{html.escape(kwh(values['kwh']))}</strong></div>
+              <div class="actual-ev-track" role="img" aria-label="{html.escape(EV_BUCKET_LABELS[bucket])}: {kwh(values['kwh'])}, {money(values['cost'])}">
+                <span style="width:{width:.1f}%"></span>
+              </div>
+              <strong>{html.escape(money(values['cost']))}</strong>
+            </div>
+            """
+        )
+    partial = (
+        '<div class="actual-ev-partial"><strong>Partial session cost</strong><span>PowerMonitor started observing this transaction after energy had already accumulated, so earlier energy is not back-costed.</span></div>'
+        if summary.actual_ev_cost_partial
+        else ""
+    )
+    return f"""
+    <section class="actual-ev-card">
+      <div class="actual-ev-head">
+        <div><span>{html.escape(ev_note(settings, summary))}</span><h3>Actual EV charging</h3></div>
+        <p>{html.escape(actual_ev_message(summary))}</p>
+      </div>
+      <div class="actual-ev-metrics">
+        <div><span>Actual EV charging</span><strong>{html.escape(kwh(summary.actual_ev_charging_kwh))}</strong></div>
+        <div><span>{html.escape(ev_cost_label(settings, summary))}</span><strong>{html.escape(money(summary.actual_ev_charging_cost))}</strong></div>
+        <div><span>Cheapest equivalent / Peak comparison</span><strong>{html.escape(money(cheapest_cost))} / {html.escape(money(peak_cost))}</strong></div>
+        <div><span>Estimated savings vs Peak</span><strong>{html.escape(money(savings_vs_peak))}</strong></div>
+      </div>
+      {partial}
+      <div class="actual-ev-breakdown">
+        <div class="chart-heading"><h3>Tariff bucket breakdown</h3><span>Imported session energy</span></div>
+        {''.join(rows)}
+      </div>
+    </section>
+    """
+
+
+def cost_per_kwh(value: float) -> str:
+    return f"${value:.3f}/kWh"
+
+
+def compact_session_label(session: Optional[dict]) -> tuple[str, str]:
+    if not session:
+        return "n/a", "No session data"
+    date_text = session.get("date") or "unknown date"
+    start_text = session.get("start_time") or "n/a"
+    end_text = session.get("end_time") or "n/a"
+    return (
+        f"{date_text} {start_text}-{end_text}",
+        f"{kwh(float(session.get('energy_kwh') or 0))}, {money(float(session.get('cost') or 0))}",
+    )
+
+
+def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
+    analytics = summary.ev_session_analytics
+    if not analytics.get("available"):
+        return ""
+    overview = analytics["overview"]
+    insights = analytics["insights"]
+    tariff_usage = analytics["tariff_usage"]
+    sessions = analytics["sessions"]
+    total_kwh = overview["total_kwh"]
+
+    overview_cards = "".join(
+        [
+            metric("Total EV kWh this period", kwh(overview["total_kwh"]), ev_note(settings, summary), "primary"),
+            metric("Total EV cost", money(overview["total_cost"]), ev_cost_label(settings, summary), "cost"),
+            metric("Average session cost", money(overview["average_session_cost"]), "Across actual charger sessions", "ev"),
+            metric("Average session size", kwh(overview["average_session_kwh"]), "Mean imported session energy", "ev"),
+            metric("Average effective $/kWh", cost_per_kwh(overview["average_effective_cost_per_kwh"]), "Total cost divided by EV kWh", "cost"),
+        ]
+    )
+
+    tariff_rows = []
+    for bucket in EV_BUCKET_ORDER:
+        values = tariff_usage.get(bucket, {"kwh": 0.0, "cost": 0.0, "pct": 0.0})
+        width = float(values.get("pct") or 0)
+        tariff_rows.append(
+            f"""
+            <div class="ev-tariff-row {' peak' if bucket == 'peak' else ''}">
+              <div><span>{html.escape(EV_BUCKET_LABELS.get(bucket, bucket))}</span><strong>{kwh(float(values.get('kwh') or 0))} / {width:.1f}%</strong></div>
+              <div class="actual-ev-track" role="img" aria-label="{html.escape(EV_BUCKET_LABELS.get(bucket, bucket))}: {width:.1f}%">
+                <span style="width:{width:.1f}%"></span>
+              </div>
+              <strong>{money(float(values.get('cost') or 0))}</strong>
+            </div>
+            """
+        )
+
+    cheapest_title, cheapest_detail = compact_session_label(insights.get("cheapest_session"))
+    expensive_title, expensive_detail = compact_session_label(insights.get("most_expensive_session"))
+    longest = insights.get("longest_session") or {}
+    highest = insights.get("highest_power_session") or {}
+    insight_cards = "".join(
+        [
+            metric("Cheapest session", cheapest_title, cheapest_detail, "good"),
+            metric("Most expensive session", expensive_title, expensive_detail, "bad" if (insights.get("most_expensive_session") or {}).get("cost", 0) else "neutral"),
+            metric("Longest session", compact_session_label(longest)[0], format_duration(longest.get("duration_minutes")) if longest else "No session data", "ev"),
+            metric(
+                "Highest power session",
+                compact_session_label(highest)[0],
+                f"{float(highest.get('max_power_kw') or 0):.2f} kW" if highest else "No session data",
+                "ev",
+            ),
+            metric("Number of sessions", str(insights["session_count"]), "Imported charger sessions", "ev"),
+            metric("Charging days", str(insights["charging_days"]), "Unique days with charging", "ev"),
+            metric("Average start time", insights.get("average_start_time") or "n/a", "Across imported sessions", "ev"),
+            metric("Average finish time", insights.get("average_finish_time") or "n/a", "Across imported sessions", "ev"),
+        ]
+    )
+
+    recommendation_html = ""
+    if analytics["recommendations"]:
+        recommendation_html = f"""
+        <div class="ev-session-recommendations">
+          <div class="chart-heading"><h3>EV charging recommendations</h3><span>Session based</span></div>
+          <ul>{"".join(f"<li>{html.escape(item.recommendation)}</li>" for item in analytics["recommendations"])}</ul>
+        </div>
+        """
+
+    history_rows = []
+    for session in sessions:
+        date_text = session.get("date") or "n/a"
+        try:
+            date_text = date.fromisoformat(date_text).strftime("%d %b")
+        except ValueError:
+            pass
+        dominant = session.get("dominant_tariff_label") or "n/a"
+        history_rows.append(
+            f"""
+            <tr>
+              <td>{html.escape(date_text)}</td>
+              <td>{html.escape(str(session.get("start_time_display") or "n/a"))}</td>
+              <td>{html.escape(str(session.get("end_time_display") or "n/a"))}</td>
+              <td>{html.escape(str(session.get("duration_display") or "n/a"))}</td>
+              <td>{kwh(float(session.get("energy_kwh") or 0))}</td>
+              <td>{money(float(session.get("cost") or 0))}</td>
+              <td>{html.escape(dominant)}</td>
+              <td>{cost_per_kwh(float(session.get("cost_per_kwh") or 0))}</td>
+            </tr>
+            """
+        )
+
+    return f"""
+    <section class="report-section ev-session-section">
+      <div class="section-title">
+        <div><span class="eyebrow">EV charging</span><h2>Actual charging sessions</h2></div>
+        <p>{len(sessions)} sessions <span>·</span> {kwh(total_kwh)}</p>
+      </div>
+      <div class="metrics ev-overview-metrics">{overview_cards}</div>
+      <div class="ev-session-grid">
+        <div class="ev-session-card">
+          <div class="chart-heading"><h3>Tariff usage</h3><span>Stored session allocation</span></div>
+          <div class="ev-tariff-list">{''.join(tariff_rows)}</div>
+        </div>
+        <div class="ev-session-card">
+          <div class="chart-heading"><h3>Insights</h3><span>Session summary</span></div>
+          <div class="metrics ev-insight-metrics">{insight_cards}</div>
+        </div>
+      </div>
+      {recommendation_html}
+      <div class="ev-session-history">
+        <div class="chart-heading"><h3>Session history</h3><span>Latest first</span></div>
+        <div class="ev-session-table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Start</th><th>Finish</th><th>Duration</th><th>kWh</th><th>Cost</th><th>Dominant tariff</th><th>Cost/kWh</th></tr></thead>
+            <tbody>{''.join(history_rows)}</tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def ev_tariff_breakdown_html(summary: Summary) -> str:
+    return ""
+
+
+def summary_html(title: str, summary: Summary, settings: Settings) -> str:
+    peak_cost = summary.buckets["peak"]["cost"]
+    no_data = '<p class="notice">No readings found for this period.</p>' if not summary.intervals else ""
+    cards = "".join(
+        [
+            metric("Net estimated cost", money(summary.net_cost), "Import + supply - export credit", "primary"),
+            metric("Total before export credit", money(summary.total_cost), "Import plus daily supply", "cost"),
+            metric("Export credit", f"-{money(summary.export_credit)}", f"{money(settings.export_credit_rate)}/kWh exported", "credit"),
+            metric("Grid import", kwh(summary.grid_import_kwh), "Energy drawn from the grid", "grid"),
+            metric("Import cost", money(summary.import_cost), "Usage charges by tariff", "cost"),
+            metric(
+                "Supply charge",
+                money(summary.supply_cost),
+                f"{money(settings.supply_charge_per_day)}/day x {summary.supply_days}",
+                "supply",
+            ),
+            metric("Solar generated", kwh(summary.solar_generated_kwh), "Total rooftop production", "solar"),
+            metric("Solar used directly", kwh(summary.solar_used_kwh), "Production consumed at home", "solar"),
+            metric("Solar exported", kwh(summary.solar_exported_kwh), "Sent back to the grid", "export"),
+            metric("Solar self-consumption", f"{summary.self_consumption_pct:.1f}%", "Solar kept and used at home", "solar"),
+            metric("Solar export percentage", f"{summary.solar_export_pct:.1f}%", "Share of generation exported", "export"),
+            metric(
+                ev_energy_label(settings, summary),
+                kwh(summary.ev_charging_kwh),
+                ev_note(settings, summary),
+                "ev",
+            ) if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
+            metric(ev_cost_label(settings, summary), money(summary.ev_charging_cost), ev_note(settings, summary), "ev") if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
+            metric("Average daily grid import", kwh(summary.average_daily_grid_import_kwh), f"Across {summary.reading_days} days with readings", "grid"),
+            metric("Average daily solar generation", kwh(summary.average_daily_solar_generation_kwh), f"Across {summary.reading_days} days with readings", "solar"),
+            metric("Average daily net cost", money(summary.average_daily_net_cost), f"Across {summary.supply_days} elapsed days", "cost"),
+        ]
+    )
+    insights = "".join(
+        [
+            f"""
+            <div class="insight peak-insight">
+              <span class="insight-kicker">Peak exposure</span>
+              <strong>{summary.peak_cost_share_pct:.1f}% of import cost</strong>
+              <p>{money(peak_cost)} was spent during the expensive Peak window.</p>
+            </div>
+            """,
+            f"""
+            <div class="insight solar-insight">
+              <span class="insight-kicker">Solar performance</span>
+              <strong>{summary.self_consumption_pct:.1f}% self-consumed</strong>
+              <p>{kwh(summary.solar_used_kwh)} of generated solar was used directly.</p>
+            </div>
+            """,
+            f"""
+            <div class="insight ev-insight">
+              <span class="insight-kicker">{html.escape(ev_energy_label(settings, summary))}</span>
+              <strong>{kwh(summary.ev_charging_kwh)}</strong>
+              <p>{html.escape(ev_note(settings, summary))}, costing about {money(summary.ev_charging_cost)}.</p>
+            </div>
+            """,
+        ]
+    )
+    return f"""
+    <section class="report-section">
+      <div class="section-title">
+        <div>
+          <span class="eyebrow">Energy snapshot</span>
+          <h2>{html.escape(title)}</h2>
+        </div>
+        <p>{summary.start.strftime("%d %b %Y")} <span>to</span> {summary.end.strftime("%d %b %Y")}</p>
+      </div>
+      {no_data}
+      <div class="metrics">{cards}</div>
+      {actual_ev_card_html(summary, settings)}
+      <div class="charts">
+        {bar_chart(summary, "kwh", "Grid import by tariff bucket", "kwh")}
+        {bar_chart(summary, "cost", "Import cost by tariff bucket", "money")}
+        {ev_tariff_breakdown_html(summary)}
+      </div>
+      <div class="insights">{insights}</div>
+    </section>
+    """
+
+
+def display_timestamp(value: Optional[str]) -> str:
+    if not value:
+        return "Unavailable"
+    try:
+        return datetime.fromisoformat(value.replace(",", ".")).astimezone().strftime("%d %b %Y, %H:%M %Z")
+    except ValueError:
+        return value
+
+
+def recommendations_html(recommendations: list[Decision]) -> str:
+    if not recommendations:
+        return ""
+    cards = []
+    for decision in recommendations:
+        cards.append(
+            f"""
+            <article class="recommendation-card {html.escape(decision.severity)}">
+              <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
+              <h3>{html.escape(decision.title)}</h3>
+              <div class="decision-lines">
+                <p><strong>Finding</strong>{html.escape(decision.finding)}</p>
+                <p><strong>Financial impact</strong>{html.escape(recommendation_impact(decision))}</p>
+                <p><strong>Recommendation</strong>{html.escape(decision.recommendation)}</p>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="report-section recommendation-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Actionable insights</span><h2>Recommendations</h2></div>
+        <p>{len(recommendations)} relevant now</p>
+      </div>
+      <div class="recommendation-grid">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def hero_html(
+    period_summary: Summary,
+    generated_at: str,
+    health: dict,
+    recommendations: list[Decision],
+    period_label: str = "Current billing period",
+) -> str:
+    status_class = "healthy" if health["status"] == "ok" else "warning"
+    status_text = (
+        "SolarEdge session expired"
+        if health["status"] == "SolarEdge session expired"
+        else health["status"].title()
+    )
+    days_since_success = health.get("days_since_last_successful_collection")
+    days_since_text = (
+        f"{days_since_success:.2f} days" if days_since_success is not None else "Unavailable"
+    )
+    report_age = health.get("report_age_minutes")
+    report_age_text = f"{report_age:.1f} minutes" if report_age is not None else "Unavailable"
+    high_cost = next(
+        (item for item in recommendations if item.id == "high_cost_alert"),
+        None,
+    )
+    hero_class = " high-cost" if high_cost and high_cost.severity == "red" else ""
+    alert_html = ""
+    if high_cost:
+        projected = high_cost.evidence["projected_net_cost"]
+        confidence = high_cost.confidence
+        alert_html = (
+            f'<div class="hero-alert {html.escape(high_cost.severity)}">'
+            f"<span>{html.escape(confidence.title())}-confidence cost projection</span>"
+            f"<strong>Projected period cost {money(projected)}</strong></div>"
+        )
+    return f"""
+    <header class="hero{hero_class}">
+      <div class="hero-top">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div><span>Local energy dashboard</span><h1>PowerMonitor</h1></div>
+        </div>
+        <div class="generated"><span>Last generated</span><strong>{html.escape(generated_at)}</strong></div>
+      </div>
+      <div class="hero-summary">
+        <div>
+          <span class="hero-label">{html.escape(period_label)} net estimated cost</span>
+          <strong>{money(period_summary.net_cost)}</strong>
+          <p>{period_summary.start.strftime("%d %b")} to {period_summary.end.strftime("%d %b %Y")}</p>
+        </div>
+        <div class="hero-note">
+          <span>Estimate</span>
+          <p>{money(period_summary.total_cost)} before an estimated {money(period_summary.export_credit)} solar export credit.</p>
+        </div>
+      </div>
+      {alert_html}
+      <div class="status-strip">
+        <div><span>Last generated</span><strong>{html.escape(generated_at)}</strong></div>
+        <div><span>Latest SolarEdge reading</span><strong>{html.escape(display_timestamp(health["latest_measurement_time"]))}</strong></div>
+        <div><span>Collector status</span><strong class="status-value {status_class}">{html.escape(status_text)}</strong></div>
+        <div><span>Since successful collection</span><strong>{html.escape(days_since_text)}</strong></div>
+        <div><span>Report age</span><strong>{html.escape(report_age_text)}</strong></div>
+      </div>
+    </header>
+    """
+
+
+def trend_bar(value: float, maximum: float, css_class: str, label: str) -> str:
+    width = value / maximum * 100 if maximum else 0
+    return (
+        f'<span class="trend-track" role="img" aria-label="{html.escape(label)}">'
+        f'<i class="{html.escape(css_class)}" style="width:{width:.1f}%"></i></span>'
+    )
+
+
+def trends_html(trends: list[DailyTrend], settings: Settings) -> str:
+    if not trends:
+        return """
+        <section class="report-section trend-section">
+          <div class="section-title"><div><span class="eyebrow">Daily analytics</span><h2>Billing period trends</h2></div></div>
+          <p class="notice">No daily trend data is available for this billing period.</p>
+        </section>
+        """
+
+    max_cost = max(max(day.import_cost, day.net_cost, day.export_credit) for day in trends)
+    max_energy = max(max(day.grid_import_kwh, day.solar_generated_kwh) for day in trends)
+    max_ev = max(day.ev_charging_kwh for day in trends)
+    trend_ev_source = (
+        "ocular_export"
+        if any(day.ev_charging_source == "ocular_export" for day in trends)
+        else "home_assistant_ocpp"
+        if any(day.ev_charging_source == "home_assistant_ocpp" for day in trends)
+        else "estimated"
+    )
+    trend_ev_label = (
+        "Actual EV charging"
+        if trend_ev_source in {"home_assistant_ocpp", "ocular_export"}
+        else "Estimated overnight EV charging"
+    )
+    trend_ev_note = (
+        "Home Assistant OCPP charger sessions"
+        if trend_ev_source == "home_assistant_ocpp"
+        else "Ocular charging history export"
+        if trend_ev_source == "ocular_export"
+        else f"{settings.ev_baseline_watts:.0f} W baseline method"
+    )
+    cost_rows = []
+    energy_rows = []
+    ev_rows = []
+    for day in trends:
+        label = day.day.strftime("%d %b")
+        cost_rows.append(
+            f"""
+            <div class="trend-row cost-trend">
+              <strong>{label}</strong>
+              <div class="trend-bars">
+                {trend_bar(day.import_cost, max_cost, "import-bar", f"{label} import cost {money(day.import_cost)}")}
+                {trend_bar(day.net_cost, max_cost, "net-bar", f"{label} net cost {money(day.net_cost)}")}
+                {trend_bar(day.export_credit, max_cost, "credit-bar", f"{label} export credit {money(day.export_credit)}")}
+              </div>
+              <span>{money(day.net_cost)}</span>
+            </div>
+            """
+        )
+        energy_rows.append(
+            f"""
+            <div class="trend-row energy-trend">
+              <strong>{label}</strong>
+              <div class="trend-bars">
+                {trend_bar(day.grid_import_kwh, max_energy, "grid-bar", f"{label} grid import {kwh(day.grid_import_kwh)}")}
+                {trend_bar(day.solar_generated_kwh, max_energy, "solar-bar", f"{label} solar generation {kwh(day.solar_generated_kwh)}")}
+              </div>
+              <span>{day.grid_import_kwh:.1f} / {day.solar_generated_kwh:.1f}</span>
+            </div>
+            """
+        )
+        ev_rows.append(
+            f"""
+            <div class="trend-row ev-trend">
+              <strong>{label}</strong>
+              <div class="trend-bars">
+                {trend_bar(day.ev_charging_kwh, max_ev, "ev-bar", f"{label} {trend_ev_label.lower()} {kwh(day.ev_charging_kwh)}")}
+              </div>
+              <span>{day.ev_charging_kwh:.1f} kWh</span>
+            </div>
+            """
+        )
+    return f"""
+    <section class="report-section trend-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Daily analytics</span><h2>Billing period trends</h2></div>
+        <p>{trends[0].day.strftime("%d %b %Y")} <span>to</span> {trends[-1].day.strftime("%d %b %Y")}</p>
+      </div>
+      <div class="trend-grid">
+        <div class="trend-card">
+          <div class="chart-heading"><h3>Daily cost trend</h3><span class="trend-legend"><i class="import-dot"></i>Import <i class="net-dot"></i>Net <i class="credit-dot"></i>Credit</span></div>
+          <div class="trend-list">{''.join(cost_rows)}</div>
+        </div>
+        <div class="trend-card">
+          <div class="chart-heading"><h3>Grid import vs solar generation</h3><span class="trend-legend"><i class="grid-dot"></i>Grid <i class="solar-dot"></i>Solar</span></div>
+          <div class="trend-list">{''.join(energy_rows)}</div>
+        </div>
+        <div class="trend-card">
+          <div class="chart-heading"><h3>{html.escape(trend_ev_label)}</h3><span>{html.escape(trend_ev_note)}</span></div>
+          <div class="trend-list">{''.join(ev_rows)}</div>
+        </div>
+      </div>
+    </section>
+    """
+
+
+def ev_accuracy_html(settings: Settings) -> str:
+    if settings.ev_data_source == "ocular_export":
+        return """
+        <section class="ev-caveat" role="note">
+          <div><span>EV data source</span><strong>Ocular charging history exports</strong></div>
+          <p>Actual charger session energy is imported from Ocular Excel history exports. Re-importing all history is safe and updates existing sessions. If no Ocular sessions exist for a period, PowerMonitor falls back to estimated overnight EV charging above the configured baseload; daytime EV charging is not included unless charger session data is connected.</p>
+        </section>
+        """
+    if settings.ev_data_source == "home_assistant_ocpp":
+        return """
+        <section class="ev-caveat" role="note">
+          <div><span>EV data source</span><strong>Home Assistant OCPP sessions</strong></div>
+          <p>Actual charger session energy is imported from Home Assistant OCPP sensors. The overnight grid-import estimate is used only when actual session data is unavailable.</p>
+        </section>
+        """
+    if settings.ev_data_source != "estimated":
+        return ""
+    return f"""
+    <section class="ev-caveat" role="note">
+      <div><span>EV data source</span><strong>Estimated overnight grid import</strong></div>
+      <p>{html.escape(EV_ESTIMATE_CAVEAT)}</p>
+    </section>
+    """
+
+
+def authentication_alert_html(health: dict) -> str:
+    status = str(health.get("status") or "").lower()
+    failure_type = str(health.get("failure_type") or "").lower()
+    if "session expired" not in status and failure_type != "authentication failure":
+        return ""
+    last_success = display_timestamp(health.get("last_successful_collection"))
+    return f"""
+    <section class="auth-alert" role="alert">
+      <div class="auth-alert-heading">
+        <div><span>Collector action required</span><h2>SolarEdge login expired</h2></div>
+        <strong>Last successful collection: {html.escape(last_success)}</strong>
+      </div>
+      <ol>
+        <li>Sign in to the SolarEdge monitoring website in your browser.</li>
+        <li>Copy the fresh request cookie into <code>collector/solaredge_cookie.txt</code>.</li>
+        <li>Run <code>python3 collector/test_cookie.py</code>, then <code>python3 collector/collect_today.py</code>.</li>
+      </ol>
+      <p>Keep the cookie private. PowerMonitor never displays or logs its value.</p>
+    </section>
+    """
+
+
+def period_controls_html(selected: Period) -> str:
+    choices = (
+        ("today", "Today"),
+        ("yesterday", "Yesterday"),
+        ("last_7_days", "Last 7 days"),
+        ("this_month", "This month"),
+        ("current_billing_period", "Current billing period"),
+        ("custom", "Custom"),
+    )
+    options = "".join(
+        f'<option value="{kind}"{" selected" if selected.kind == kind else ""}>{label}</option>'
+        for kind, label in choices
+    )
+    return f"""
+    <section class="period-controls">
+      <form method="get" action="/">
+        <label><span>Dashboard period</span><select name="period">{options}</select></label>
+        <label><span>Custom start</span><input type="date" name="start" value="{selected.start.isoformat()}"></label>
+        <label><span>Custom end</span><input type="date" name="end" value="{selected.end.isoformat()}"></label>
+        <button type="submit">Apply period</button>
+      </form>
+      <p>Showing <strong>{html.escape(selected.label)}</strong>: {selected.start.strftime("%d %b %Y")} to {selected.end.strftime("%d %b %Y")}</p>
+    </section>
+    """
+
+
+def nav_html() -> str:
+    pages = (
+        ("home", "Home"),
+        ("bills", "Bills & Tariffs"),
+        ("solar", "Solar"),
+        ("ev", "EV Charging"),
+        ("whatif", "What If?"),
+        ("analytics", "Analytics"),
+        ("system", "System"),
+    )
+    return (
+        '<nav class="top-nav" aria-label="Dashboard pages">'
+        + "".join(f'<a href="#{page_id}">{html.escape(label)}</a>' for page_id, label in pages)
+        + "</nav>"
+    )
+
+
+def projected_bill(summary: Summary, settings: Settings) -> tuple[float, date, str]:
+    if settings.current_billing_period_start and settings.current_billing_period_end:
+        end = settings.current_billing_period_end
+        days = (end - settings.current_billing_period_start).days + 1
+        basis = "configured billing end"
+    elif settings.current_billing_period_start and settings.previous_billing_period_start and settings.previous_billing_period_end:
+        days = (settings.previous_billing_period_end - settings.previous_billing_period_start).days + 1
+        end = settings.current_billing_period_start + timedelta(days=days - 1)
+        basis = "previous period length"
+    else:
+        days = summary.supply_days
+        end = summary.end
+        basis = "selected period"
+    return summary.average_daily_net_cost * max(days, 1), end, basis
+
+
+def confidence_label(summary: Summary) -> tuple[str, str]:
+    if not summary.intervals or not summary.reading_days:
+        return "Low", "missing interval data"
+    if summary.reading_days / max(summary.supply_days, 1) < 0.5:
+        return "Low", "partial SolarEdge interval data"
+    if summary.ev_charging_source == "ocular_export":
+        return "High", "SolarEdge interval data + actual Ocular sessions"
+    if summary.ev_charging_source == "estimated":
+        return "Medium", "SolarEdge interval data + estimated EV charging"
+    if summary.ev_charging_source == "home_assistant_ocpp":
+        return "Medium", "SolarEdge interval data + HA OCPP session snapshots"
+    return "Low", "limited source coverage"
+
+
+def collector_status_text(health: dict) -> str:
+    return (
+        "SolarEdge session expired"
+        if health.get("status") == "SolarEdge session expired"
+        else str(health.get("status") or "unknown").title()
+    )
+
+
+def recommendation_confidence(decision: Decision) -> str:
+    return decision.confidence.title()
+
+
+def recommendation_impact(decision: Decision) -> str:
+    for key in ("today", "billing_period", "yearly"):
+        value = decision.financial_impact.get(key)
+        if value is not None:
+            try:
+                return money(float(value))
+            except (TypeError, ValueError):
+                return str(value)
+    for key in (
+        "estimated_savings",
+        "savings",
+        "savings_if_shifted",
+        "monthly_savings_estimate",
+        "estimated_period_savings",
+        "estimated_savings_vs_peak",
+    ):
+        if key in decision.evidence:
+            try:
+                return money(float(decision.evidence[key]))
+            except (TypeError, ValueError):
+                return str(decision.evidence[key])
+    for key in ("projected_net_cost", "current_estimate", "actual_cost"):
+        if key in decision.evidence:
+            try:
+                return money(float(decision.evidence[key]))
+            except (TypeError, ValueError):
+                return str(decision.evidence[key])
+    return "Not quantified"
+
+
+def top_actions_html(recommendations: list[Decision]) -> str:
+    items = recommendations[:3]
+    if not items:
+        return """
+        <section class="report-section compact-section">
+          <div class="section-title"><div><span class="eyebrow">Top actions</span><h2>Nothing urgent</h2></div></div>
+          <p class="notice">No high-priority recommendations are active for this period.</p>
+        </section>
+        """
+    cards = []
+    for item in items:
+        cards.append(
+            f"""
+            <article class="action-card {html.escape(item.severity)}">
+              <span>{html.escape(recommendation_confidence(item))} confidence</span>
+              <h3>{html.escape(item.title)}</h3>
+              <p><strong>Finding</strong>{html.escape(item.finding)}</p>
+              <p><strong>Financial impact</strong>{html.escape(recommendation_impact(item))}</p>
+              <p><strong>Recommendation</strong>{html.escape(item.recommendation)}</p>
+            </article>
+            """
+        )
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Top actions</span><h2>Next best moves</h2></div><p>Top {len(items)}</p></div>
+      <div class="action-grid">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def home_page_html(
+    today_summary: Summary,
+    period_summary: Summary,
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+) -> str:
+    projection, projection_end, basis = projected_bill(period_summary, settings)
+    confidence, confidence_note = confidence_label(period_summary)
+    health_note = (
+        f"{collector_status_text(health)}; latest reading {display_timestamp(health.get('latest_measurement_time'))}; "
+        f"report age {health.get('report_age_minutes'):.1f} minutes"
+        if health.get("report_age_minutes") is not None
+        else f"{collector_status_text(health)}; latest reading {display_timestamp(health.get('latest_measurement_time'))}"
+    )
+    cards = "".join(
+        [
+            metric("Current bill estimate", money(period_summary.net_cost), f"{period_summary.start:%d %b} to {period_summary.end:%d %b}", "primary"),
+            metric("Projected bill", money(projection), f"To {projection_end:%d %b %Y}, {basis}; {confidence} confidence", "cost"),
+            metric("Today's cost", money(today_summary.net_cost), "Net estimated cost today", "cost"),
+            metric("Energy Score", "Soon", "Placeholder for a future daily score", "good"),
+            metric("Solar today", kwh(today_summary.solar_generated_kwh), "Generated today", "solar"),
+            metric("EV charging today", kwh(today_summary.ev_charging_kwh), ev_note(settings, today_summary), "ev"),
+            metric("System health", collector_status_text(health), health_note, "grid"),
+        ]
+    )
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Home</span><h2>How am I doing today?</h2></div><p>{confidence} confidence</p></div>
+      <div class="metrics home-metrics">{cards}</div>
+    </section>
+    {top_actions_html(recommendations)}
+    """
+
+
+def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> str:
+    current = plan["current_plan"]
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Bill attribution</span><h2>What is driving the bill?</h2></div></div>
+      <div class="metrics">
+        {metric("Grid energy", money(summary.import_cost), kwh(summary.grid_import_kwh), "grid")}
+        {metric("Supply charge", money(summary.supply_cost), f"{money(summary.supply_cost / summary.supply_days)}/day", "supply")}
+        {metric("Export credit", f"-{money(summary.export_credit)}", kwh(summary.solar_exported_kwh), "credit")}
+        {metric("EV charging cost", money(summary.ev_charging_cost), ev_cost_label(settings, summary), "ev")}
+        {metric("Household usage cost", money(current["household_usage_cost"]), "Grid cost excluding EV charging", "cost")}
+        {metric("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad")}
+        {metric("Plan savings/loss", signed_money(-plan["difference"]), plan["recommendation"], "good" if plan["savings"] > 0 else "bad" if plan["savings"] < 0 else "neutral")}
+      </div>
+    </section>
+    """
+
+
+def solar_page_html(summary: Summary, recommendations: list[Decision]) -> str:
+    solar_recs = [
+        item for item in recommendations
+        if item.id in {"solar_self_consumption", "positive_reinforcement"}
+        or "solar" in item.title.lower()
+    ]
+    cards = "".join(
+        [
+            metric("Solar generated", kwh(summary.solar_generated_kwh), "Total rooftop production", "primary"),
+            metric("Solar used directly", kwh(summary.solar_used_kwh), "Consumed at home", "solar"),
+            metric("Solar exported", kwh(summary.solar_exported_kwh), "Sent to grid", "export"),
+            metric("Self-consumption", f"{summary.self_consumption_pct:.1f}%", "Solar kept at home", "solar"),
+            metric("Export percentage", f"{summary.solar_export_pct:.1f}%", "Generation exported", "export"),
+        ]
+    )
+    rec_html = recommendations_html(solar_recs) if solar_recs else '<p class="notice">No solar-specific recommendation is active for this period.</p>'
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Solar</span><h2>Generation and self-consumption</h2></div></div>
+      <div class="metrics">{cards}</div>
+    </section>
+    {rec_html}
+    """
+
+
+def ev_source_status_html(summary: Summary, settings: Settings) -> str:
+    source = summary.ev_charging_source
+    configured = settings.ev_data_source
+    if source == "ocular_export":
+        title = "Using Ocular charging history"
+        body = "Complete Ocular sessions are available for this period. Costs are calculated from exact session times and delivered energy."
+        tone = "green"
+    elif source == "home_assistant_ocpp":
+        title = "Using Home Assistant OCPP"
+        body = "OCPP charger snapshots are available for this period. Ocular export support remains enabled when imported sessions are present."
+        tone = "amber"
+    else:
+        title = "Using estimated EV fallback"
+        body = (
+            f"No actual Ocular or HA OCPP sessions were found for this period. "
+            f"PowerMonitor is estimating overnight EV charging above {settings.ev_baseline_watts:.0f} W. "
+            "Import Ocular history with: python3 collector/import_ocular_export.py /path/to/export.xlsx"
+        )
+        tone = "red"
+    return f"""
+    <section class="source-status {tone}">
+      <div><span>Actual EV source status</span><h2>{html.escape(title)}</h2></div>
+      <p>{html.escape(body)} Configured source: <strong>{html.escape(configured)}</strong>.</p>
+    </section>
+    """
+
+
+def ev_page_html(summary: Summary, settings: Settings) -> str:
+    warning = ""
+    if not summary.ev_session_analytics.get("available"):
+        warning = f"""
+        <section class="auth-alert">
+          <div class="auth-alert-heading"><div><span>EV data warning</span><h2>Actual session data unavailable</h2></div></div>
+          <p>{html.escape(EV_ESTIMATE_CAVEAT)}</p>
+          <ol>
+            <li>Export all charging history from the Ocular app.</li>
+            <li>Run <code>python3 collector/import_ocular_export.py /path/to/export.xlsx</code>.</li>
+            <li>Run <code>python3 collector/report.py</code>.</li>
+          </ol>
+        </section>
+        """
+    return f"""
+    {ev_source_status_html(summary, settings)}
+    {actual_ev_card_html(summary, settings)}
+    {ev_session_analytics_html(summary, settings)}
+    {warning}
+    """
+
+
+def ev_source_counts() -> list[dict]:
+    if not DB_PATH.exists():
+        return []
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            validate_database(conn)
+            rows = conn.execute(
+                """
+                SELECT source, COUNT(*), COALESCE(SUM(energy_kwh), 0), COALESCE(SUM(cost_estimate), 0)
+                FROM ev_sessions
+                GROUP BY source
+                ORDER BY source
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        {"source": row[0] or "unknown", "sessions": int(row[1]), "energy_kwh": float(row[2] or 0), "cost": float(row[3] or 0)}
+        for row in rows
+    ]
+
+
+def data_completeness(summary: Summary, settings: Settings) -> dict:
+    confidence, confidence_note = confidence_label(summary)
+    solar_present = summary.solar_generated_kwh > 0 or summary.solar_used_kwh > 0 or summary.solar_exported_kwh > 0
+    grid_present = summary.intervals > 0
+    ev_actual_present = summary.ev_charging_source in {"ocular_export", "home_assistant_ocpp"}
+    billing_configured = bool(settings.current_billing_period_start)
+    items = [
+        {
+            "name": "Solar data",
+            "status": "present" if solar_present else "missing",
+            "detail": kwh(summary.solar_generated_kwh) if solar_present else "No solar production/export values in selected period",
+        },
+        {
+            "name": "Grid data",
+            "status": "present" if grid_present else "missing",
+            "detail": f"{summary.intervals} intervals, {kwh(summary.grid_import_kwh)} imported" if grid_present else "No interval readings in selected period",
+        },
+        {
+            "name": "EV actual sessions",
+            "status": "present" if ev_actual_present else "missing",
+            "detail": ev_note(settings, summary) if ev_actual_present else "Using estimated overnight EV fallback",
+        },
+        {
+            "name": "Billing period",
+            "status": "configured" if billing_configured else "missing",
+            "detail": settings.current_billing_period_start.isoformat() if billing_configured else "Using calendar fallback",
+        },
+    ]
+    return {
+        "confidence": confidence,
+        "confidence_note": confidence_note,
+        "items": items,
+    }
+
+
+def data_completeness_html(summary: Summary, settings: Settings) -> str:
+    completeness = data_completeness(summary, settings)
+    rows = []
+    for item in completeness["items"]:
+        status = item["status"]
+        tone = "good" if status in {"present", "configured"} else "bad"
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(item["name"])}</span>
+              <strong>{html.escape(status.title())}</strong>
+              <small>{html.escape(item["detail"])}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Data completeness</h3><span>{html.escape(completeness["confidence"])} confidence</span></div>
+      <p class="scenario-note">{html.escape(completeness["confidence_note"])}</p>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
+def system_page_html(health: dict, settings: Settings, summary: Summary) -> str:
+    counts = ev_source_counts()
+    count_rows = "".join(
+        f"<tr><td>{html.escape(item['source'])}</td><td>{item['sessions']}</td><td>{kwh(item['energy_kwh'])}</td><td>{money(item['cost'])}</td></tr>"
+        for item in counts
+    ) or '<tr><td colspan="4">No EV sessions table rows found.</td></tr>'
+    config_rows = {
+        "ev_data_source": settings.ev_data_source,
+        "billing_period_start": settings.current_billing_period_start.isoformat() if settings.current_billing_period_start else "fallback",
+        "billing_period_end": settings.current_billing_period_end.isoformat() if settings.current_billing_period_end else "estimated",
+        "supply_charge_per_day": money(settings.supply_charge_per_day),
+        "export_credit_rate": money(settings.export_credit_rate),
+        "comparison_flat_rate": money(settings.comparison_plan_rates["flat_import_rate"]),
+    }
+    config_html = "".join(f"<div><span>{html.escape(key)}</span><strong>{html.escape(str(value))}</strong></div>" for key, value in config_rows.items())
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">System</span><h2>Collector and data sources</h2></div></div>
+      <div class="metrics">
+        {metric("Collector status", collector_status_text(health), str(health.get("collector_message") or ""), "grid")}
+        {metric("SolarEdge session", str(health.get("failure_type") or "ok"), "Auth/session status", "bad" if health.get("status") != "ok" else "good")}
+        {metric("Report age", f"{float(health.get('report_age_minutes') or 0):.1f} minutes", "Freshness of generated dashboard", "grid")}
+        {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
+      </div>
+      <div class="system-grid">
+        {data_completeness_html(summary, settings)}
+        <div class="system-card">
+          <div class="chart-heading"><h3>EV source counts</h3><span>Grouped by source</span></div>
+          <table><thead><tr><th>Source</th><th>Sessions</th><th>kWh</th><th>Cost</th></tr></thead><tbody>{count_rows}</tbody></table>
+        </div>
+        <div class="system-card">
+          <div class="chart-heading"><h3>Config summary</h3><span>Privacy safe</span></div>
+          <div class="config-grid">{config_html}</div>
+        </div>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Import instructions</h3><span>No secrets displayed</span></div>
+        <p>Ocular: <code>python3 collector/import_ocular_export.py /path/to/export.xlsx</code></p>
+        <p>SolarEdge: refresh <code>collector/solaredge_cookie.txt</code> only when the session warning appears. Cookie contents are never displayed here.</p>
+      </div>
+    </section>
+    """
+
+
+def comparison_html(comparison: dict) -> str:
+    deltas = comparison["deltas"]
+    label = (
+        "Compared with previous billing period"
+        if comparison["period_b"]["kind"] == "previous_billing_period"
+        else "Compared with selected period"
+    )
+
+    def delta_card(title: str, value: float, formatter, lower_is_better: bool = False) -> str:
+        tone = "neutral"
+        if value:
+            positive = value < 0 if lower_is_better else value > 0
+            tone = "good" if positive else "bad"
+        return metric(title, formatter(value), label, tone)
+
+    cards = "".join(
+        [
+            delta_card("Net cost delta", deltas["net_cost"], signed_money, True),
+            delta_card("Grid import delta", deltas["grid_import_kwh"], signed_kwh, True),
+            delta_card("Solar generation delta", deltas["solar_generated_kwh"], signed_kwh),
+            delta_card("Peak cost delta", deltas["peak_cost"], signed_money, True),
+            delta_card("Solar self-consumption delta", deltas["self_consumption_pct"], lambda v: f"{v:+.1f} pp" if v else "0.0 pp"),
+            delta_card("EV charging delta", deltas["ev_charging_kwh"], signed_kwh, True),
+        ]
+    )
+    return f"""
+    <section class="report-section comparison-section">
+      <div class="section-title"><div><span class="eyebrow">Period comparison</span><h2>{html.escape(label)}</h2></div>
+      <p>{html.escape(comparison["period_b"]["label"])}: {comparison["period_b"]["start"]} to {comparison["period_b"]["end"]}</p></div>
+      <div class="metrics comparison-metrics">{cards}</div>
+    </section>
+    """
+
+
+def plan_comparison_html(comparison: dict, car: dict) -> str:
+    current = comparison["current_plan"]
+    flat = comparison["comparison_plan"]
+    savings = comparison["savings"]
+    conclusion = (
+        f"You saved {money(savings)} this period."
+        if savings > 0
+        else f"The Flat plan would have been cheaper by {money(-savings)} this period."
+        if savings < 0
+        else "Both plans are about even for this period."
+    )
+    detail_rows = f"""
+      <div><span>EV charging cost</span><strong>{money(current["ev_charging_cost"])} / {money(flat["ev_charging_cost"])}</strong></div>
+      <div><span>Household usage cost</span><strong>{money(current["household_usage_cost"])} / {money(flat["household_usage_cost"])}</strong></div>
+      <div><span>Solar export value difference</span><strong>{signed_money(comparison["solar_export_value_difference"])}</strong></div>
+    """
+    return f"""
+    <section class="report-section plan-comparison-section">
+      <div class="section-title"><div><span class="eyebrow">Plan comparison</span><h2>Synergy EV Add On vs Flat plan</h2></div><p>Same measured usage, configured rates</p></div>
+      <div class="metrics">
+        {metric("Current plan", money(current["net_bill"]), current["display_name"], "primary")}
+        {metric("Flat plan", money(flat["net_bill"]), flat["display_name"], "cost")}
+        {metric("Difference", signed_money(comparison["difference"]), conclusion, "good" if savings > 0 else "bad" if savings < 0 else "neutral")}
+      </div>
+      <div class="plan-detail-grid">{detail_rows}</div>
+      <p class="scenario-note">{html.escape(comparison["recommendation"])} These are tariff-model estimates, not actual bill reconciliation.</p>
+      <p class="scenario-note">{html.escape(car["message"])}</p>
+    </section>
+    """
+
+
+def scenario_analysis_html(analysis: dict) -> str:
+    scenarios = analysis.get("scenarios", [])
+    if not scenarios:
+        return ""
+    cards = []
+    for scenario in scenarios:
+        difference = float(scenario["difference_vs_actual"])
+        tone = "good" if difference < 0 else "bad" if difference > 0 else "neutral"
+        impact = (
+            f"Saves {money(-difference)}"
+            if difference < 0
+            else f"Costs {money(difference)} more"
+            if difference > 0
+            else "No change"
+        )
+        cards.append(
+            f"""
+            <article class="scenario-card {tone}">
+              <span>{html.escape(str(scenario["confidence"]).title())} confidence</span>
+              <h3>{html.escape(scenario["title"])}</h3>
+              <strong>{money(float(scenario["estimated_bill"]))}</strong>
+              <p>{html.escape(impact)} vs actual. {html.escape(scenario["description"])}</p>
+            </article>
+            """
+        )
+    insights = analysis.get("ev_insights", [])
+    insights_html = ""
+    if insights:
+        insights_html = f"""
+        <div class="scenario-insights">
+          <div class="chart-heading"><h3>EV scenario insights</h3><span>Charging behaviour</span></div>
+          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in insights)}</ul>
+        </div>
+        """
+    return f"""
+    <section class="report-section scenario-section">
+      <div class="section-title"><div><span class="eyebrow">What If?</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
+      <div class="scenario-grid">{''.join(cards)}</div>
+      {insights_html}
+    </section>
+    """
+
+
+def whatif_page_html(analysis: dict, plan: dict) -> str:
+    savings = plan["savings"]
+    meaning = (
+        f"The EV Add On plan is ahead by {money(savings)} for this period."
+        if savings > 0
+        else f"The Flat/Home plan is ahead by {money(-savings)} for this period."
+        if savings < 0
+        else "The current and comparison plans are roughly even this period."
+    )
+    best_move = (
+        "Keep charging in the cheapest EV window and watch any Peak sessions."
+        if savings >= 0
+        else "Review whether charging can be shifted into the EV window; if not, the Flat/Home plan may be worth comparing again next bill."
+    )
+    return f"""
+    {scenario_analysis_html(analysis)}
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Decision assistant</span><h2>What this means</h2></div></div>
+      <div class="decision-grid">
+        <div><span>Flat-rate vs EV Add On scenario</span><strong>{html.escape(meaning)}</strong></div>
+        <div><span>Best next move</span><strong>{html.escape(best_move)}</strong></div>
+      </div>
+    </section>
+    """
+
+
+def write_html(
+    today_summary: Summary,
+    period_summary: Summary,
+    trends: list[DailyTrend],
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+    selected_period: Optional[Period] = None,
+    comparison: Optional[dict] = None,
+    output_path: Optional[Path] = REPORT_PATH,
+) -> str:
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    selected_period = selected_period or Period(
+        "current_billing_period", "Current billing period", period_summary.start, period_summary.end
+    )
+    plan = plan_comparison(period_summary, settings)
+    scenarios = scenario_analysis(period_summary, settings)
+    generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
+    document = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="300">
+  <title>PowerMonitor Dashboard</title>
+  <style>
+    :root {{
+      color-scheme:light; --ink:#17221f; --muted:#687873; --line:#dce7e2; --paper:#fff;
+      --wash:#eef4f1; --deep:#102a24; --deep-2:#174b3d; --green:#1c9b6c; --green-soft:#e7f7ef;
+      --sun:#f2b84b; --sun-soft:#fff5da; --red:#dc604e; --red-soft:#fff0ed; --blue:#4a86a8;
+      --blue-soft:#eaf4f8; --shadow:0 16px 44px rgba(29,55,47,.08);
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.5 -apple-system,
+      BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; }}
+    main {{ width:min(1180px, calc(100% - 36px)); margin:24px auto 64px; }}
+    .hero {{ position:relative; overflow:hidden; padding:30px; color:#fff; border-radius:26px;
+      background:linear-gradient(135deg,var(--deep) 0%,var(--deep-2) 100%); box-shadow:0 24px 60px rgba(16,42,36,.24); }}
+    .hero::after {{ content:""; position:absolute; width:380px; height:380px; right:-130px; top:-220px;
+      border:70px solid rgba(255,255,255,.055); border-radius:50%; }}
+    .hero.high-cost {{ background:linear-gradient(135deg,#45251f 0%,#7a382d 100%); }}
+    .hero-alert {{ position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:18px; padding:11px 14px; color:#ffe8e3; background:rgba(255,120,96,.15); border:1px solid rgba(255,190,180,.2); border-radius:12px; }}
+    .hero-alert.amber {{ color:#fff1c7; background:rgba(242,184,75,.14); border-color:rgba(255,223,153,.22); }}
+    .hero-alert span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .hero-alert strong {{ font-size:12px; }}
+    .hero-top,.hero-summary,.section-title,.chart-heading,.bar-label {{ display:flex; align-items:center; justify-content:space-between; gap:18px; }}
+    .brand {{ display:flex; align-items:center; gap:13px; }}
+    .brand-mark {{ display:flex; align-items:end; gap:3px; width:42px; height:42px; padding:10px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.15); border-radius:13px; }}
+    .brand-mark i {{ display:block; width:5px; border-radius:5px; background:#64ddb0; }}
+    .brand-mark i:nth-child(1) {{ height:10px; }} .brand-mark i:nth-child(2) {{ height:18px; }} .brand-mark i:nth-child(3) {{ height:14px; }}
+    .brand span,.generated span,.hero-label {{ display:block; color:rgba(255,255,255,.62); font-size:11px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }}
+    h1 {{ margin:0; font-size:24px; letter-spacing:-.035em; }}
+    .generated {{ position:relative; z-index:1; text-align:right; }} .generated strong {{ font-size:13px; }}
+    .hero-summary {{ position:relative; z-index:1; align-items:end; margin-top:54px; }}
+    .hero-summary strong {{ display:block; margin:6px 0 0; font-size:clamp(48px,8vw,76px); line-height:1; letter-spacing:-.07em; }}
+    .hero-summary p {{ margin:8px 0 0; color:rgba(255,255,255,.68); }}
+    .hero-note {{ max-width:340px; padding:16px 18px; background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.12); border-radius:16px; }}
+    .hero-note span {{ padding:3px 8px; color:#b7f0d7; background:rgba(56,199,144,.15); border-radius:99px; font-size:10px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }}
+    .hero-note p {{ margin:8px 0 0; font-size:12px; line-height:1.45; }}
+    .status-strip {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(5,1fr); gap:1px; margin-top:24px; overflow:hidden; background:rgba(255,255,255,.13); border:1px solid rgba(255,255,255,.12); border-radius:15px; }}
+    .status-strip div {{ padding:12px 14px; background:rgba(255,255,255,.065); }} .status-strip span {{ display:block; color:rgba(255,255,255,.55); font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }}
+    .status-strip strong {{ display:block; margin-top:3px; font-size:11px; }} .status-value::before {{ content:""; display:inline-block; width:6px; height:6px; margin-right:6px; border-radius:50%; background:#f2b84b; }}
+    .status-value.healthy::before {{ background:#64ddb0; }}
+    .top-nav {{ position:sticky; top:10px; z-index:10; display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; padding:10px; background:rgba(255,255,255,.86); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
+    .top-nav a {{ padding:9px 12px; color:var(--deep-2); text-decoration:none; background:#f7faf9; border:1px solid var(--line); border-radius:999px; font-size:12px; font-weight:750; }}
+    .top-nav a:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
+    .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
+    body:has(.page:target) #home {{ display:none; }} body:has(#home:target) #home {{ display:block; }}
+    .page-heading {{ margin-top:18px; padding:18px 22px; background:#fff; border:1px solid var(--line); border-radius:20px; box-shadow:var(--shadow); }}
+    .page-heading h2 {{ margin:0; }} .page-heading p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }}
+    .report-section {{ margin-top:24px; padding:28px; background:rgba(255,255,255,.82); border:1px solid rgba(215,228,222,.9); border-radius:24px; box-shadow:var(--shadow); }}
+    .compact-section {{ margin-top:16px; }}
+    .auth-alert {{ margin-top:18px; padding:20px 22px; color:#812f25; background:linear-gradient(135deg,#fff3ef,#ffe6df); border:1px solid #efbcb2; border-left:6px solid var(--red); border-radius:18px; box-shadow:var(--shadow); }}
+    .auth-alert-heading {{ display:flex; align-items:center; justify-content:space-between; gap:18px; }} .auth-alert-heading span {{ font-size:9px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .auth-alert-heading h2 {{ margin:2px 0 0; color:#8f3327; }} .auth-alert-heading strong {{ font-size:11px; }}
+    .auth-alert ol {{ margin:14px 0 0; padding-left:20px; color:#713d36; font-size:12px; }} .auth-alert li + li {{ margin-top:5px; }}
+    .auth-alert code {{ padding:2px 5px; color:#71352d; background:rgba(255,255,255,.65); border-radius:5px; }} .auth-alert p {{ margin:12px 0 0; font-size:10px; font-weight:700; }}
+    .period-controls {{ margin-top:18px; padding:16px 18px; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); }}
+    .period-controls form {{ display:grid; grid-template-columns:1.4fr 1fr 1fr auto; gap:10px; align-items:end; }}
+    .period-controls label span {{ display:block; margin-bottom:4px; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }}
+    .period-controls select,.period-controls input,.period-controls button {{ width:100%; min-height:39px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
+    .period-controls button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
+    .period-controls p,.scenario-note {{ margin:10px 0 0; color:var(--muted); font-size:11px; }}
+    .section-title {{ margin-bottom:20px; }} .eyebrow {{ color:var(--green); font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }}
+    h2 {{ margin:2px 0 0; font-size:28px; letter-spacing:-.045em; }} .section-title p {{ margin:0; color:var(--muted); font-size:13px; }}
+    .section-title p span {{ margin:0 5px; color:#a0ada9; }}
+    .metrics {{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }}
+    .metric {{ position:relative; min-height:128px; padding:17px; overflow:hidden; background:var(--paper); border:1px solid var(--line); border-radius:16px; }}
+    .metric::before {{ content:""; position:absolute; width:7px; height:7px; right:15px; top:15px; background:#aab8b3; border-radius:50%; box-shadow:0 0 0 5px #f1f5f3; }}
+    .metric span,.metric small {{ display:block; color:var(--muted); }} .metric span {{ max-width:80%; font-size:12px; font-weight:650; }}
+    .metric strong {{ display:block; margin-top:20px; font-size:24px; line-height:1.05; letter-spacing:-.045em; }}
+    .metric small {{ margin-top:7px; font-size:10px; line-height:1.35; }}
+    .metric.primary {{ grid-column:span 2; color:#fff; background:linear-gradient(135deg,#166449,#248b67); border-color:transparent; }}
+    .metric.primary span,.metric.primary small {{ color:rgba(255,255,255,.7); }} .metric.primary strong {{ font-size:38px; }}
+    .metric.primary::before {{ background:#6fe0b5; box-shadow:0 0 0 5px rgba(255,255,255,.11); }}
+    .metric.solar::before {{ background:var(--sun); box-shadow:0 0 0 5px var(--sun-soft); }}
+    .metric.grid::before,.metric.ev::before {{ background:var(--blue); box-shadow:0 0 0 5px var(--blue-soft); }}
+    .metric.cost::before,.metric.supply::before {{ background:var(--green); box-shadow:0 0 0 5px var(--green-soft); }}
+    .metric.export::before,.metric.credit::before {{ background:#8faaa0; }}
+    .metric.good::before {{ background:var(--green); box-shadow:0 0 0 5px var(--green-soft); }} .metric.bad::before {{ background:var(--red); box-shadow:0 0 0 5px var(--red-soft); }}
+    .charts {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }}
+    .ev-breakdown-card {{ grid-column:1 / -1; }}
+    .chart-card {{ padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:18px; }}
+    .chart-heading {{ margin-bottom:18px; }} h3 {{ margin:0; font-size:15px; letter-spacing:-.02em; }} .chart-heading span {{ color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }}
+    .bar-chart {{ display:grid; gap:15px; }} .bar-row {{ display:grid; grid-template-columns:130px 1fr 75px; align-items:center; gap:12px; }}
+    .bar-label {{ justify-content:flex-start; gap:6px; color:var(--muted); font-size:11px; font-weight:650; }}
+    .peak-badge {{ padding:2px 5px; color:var(--red); background:var(--red-soft); border-radius:99px; font-size:7px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }}
+    .bar-track {{ height:9px; overflow:hidden; background:#eef3f1; border-radius:99px; }} .bar-fill {{ display:block; min-width:2px; height:100%; background:linear-gradient(90deg,#48b78d,var(--green)); border-radius:inherit; }}
+    .bar-row.peak .bar-label,.bar-row.peak strong {{ color:var(--red); }} .bar-row.peak .bar-fill {{ background:linear-gradient(90deg,#ed9a8b,var(--red)); }}
+    .bar-row strong {{ text-align:right; font-size:11px; font-variant-numeric:tabular-nums; }}
+    .actual-ev-card {{ margin-top:14px; padding:22px; color:#12382c; background:linear-gradient(135deg,#f1fbf6,#dff5ea); border:1px solid #bee7d1; border-radius:22px; box-shadow:0 14px 34px rgba(36,139,103,.10); }}
+    .actual-ev-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin-bottom:16px; }}
+    .actual-ev-head span {{ display:block; color:#2b8b68; font-size:9px; font-weight:850; letter-spacing:.12em; text-transform:uppercase; }}
+    .actual-ev-head h3 {{ margin:2px 0 0; font-size:24px; letter-spacing:-.04em; }}
+    .actual-ev-head p {{ max-width:430px; margin:0; color:#3d735f; font-size:12px; font-weight:650; }}
+    .actual-ev-metrics {{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }}
+    .actual-ev-metrics div {{ min-height:96px; padding:14px; background:rgba(255,255,255,.72); border:1px solid rgba(65,151,115,.20); border-radius:15px; }}
+    .actual-ev-metrics span {{ display:block; color:#517c6a; font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }}
+    .actual-ev-metrics strong {{ display:block; margin-top:13px; color:#12382c; font-size:22px; line-height:1.05; letter-spacing:-.04em; }}
+    .actual-ev-breakdown {{ margin-top:16px; padding:16px; background:rgba(255,255,255,.58); border:1px solid rgba(65,151,115,.18); border-radius:16px; }}
+    .actual-ev-breakdown-row {{ display:grid; grid-template-columns:210px 1fr 72px; align-items:center; gap:12px; margin-top:11px; }}
+    .actual-ev-breakdown-row div:first-child span,.actual-ev-breakdown-row div:first-child strong {{ display:block; }}
+    .actual-ev-breakdown-row div:first-child span {{ color:#476f60; font-size:10px; font-weight:750; }}
+    .actual-ev-breakdown-row div:first-child strong,.actual-ev-breakdown-row > strong {{ font-size:11px; font-variant-numeric:tabular-nums; }}
+    .actual-ev-breakdown-row > strong {{ text-align:right; color:#315d4c; }}
+    .actual-ev-track {{ height:10px; overflow:hidden; background:#dbeee5; border-radius:99px; }}
+    .actual-ev-track span {{ display:block; min-width:2px; height:100%; background:linear-gradient(90deg,#3bb77e,#1c9b6c); border-radius:inherit; }}
+    .actual-ev-breakdown-row.peak .actual-ev-track span {{ background:linear-gradient(90deg,#ed9a8b,var(--red)); }}
+    .actual-ev-partial {{ display:flex; align-items:center; gap:10px; margin-top:12px; padding:10px 12px; color:#7b5515; background:#fff3cf; border:1px solid #eed99d; border-radius:12px; }}
+    .actual-ev-partial strong {{ font-size:11px; text-transform:uppercase; letter-spacing:.07em; }} .actual-ev-partial span {{ font-size:11px; }}
+    .ev-session-section {{ background:linear-gradient(180deg,rgba(255,255,255,.9),rgba(246,252,249,.9)); }}
+    .ev-overview-metrics {{ margin-bottom:14px; }}
+    .ev-session-grid {{ display:grid; grid-template-columns:.9fr 1.1fr; gap:14px; margin-top:14px; }}
+    .ev-session-card,.ev-session-recommendations,.ev-session-history {{ padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:18px; }}
+    .ev-tariff-list {{ display:grid; gap:12px; }}
+    .ev-tariff-row {{ display:grid; grid-template-columns:230px 1fr 72px; align-items:center; gap:12px; }}
+    .ev-tariff-row div:first-child span,.ev-tariff-row div:first-child strong {{ display:block; }}
+    .ev-tariff-row div:first-child span {{ color:var(--muted); font-size:10px; font-weight:750; }}
+    .ev-tariff-row div:first-child strong,.ev-tariff-row > strong {{ font-size:11px; font-variant-numeric:tabular-nums; }}
+    .ev-tariff-row > strong {{ text-align:right; color:#315d4c; }}
+    .ev-tariff-row.peak .actual-ev-track span {{ background:linear-gradient(90deg,#ed9a8b,var(--red)); }}
+    .ev-insight-metrics {{ grid-template-columns:repeat(2,1fr); }}
+    .ev-insight-metrics .metric {{ min-height:112px; }}
+    .ev-session-recommendations {{ margin-top:14px; background:#fffaf0; border-color:#eeddb0; }}
+    .ev-session-recommendations ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }}
+    .ev-session-recommendations li + li {{ margin-top:6px; }}
+    .ev-session-history {{ margin-top:14px; }}
+    .ev-session-table-wrap {{ overflow-x:auto; }}
+    .ev-session-history table {{ width:100%; border-collapse:collapse; min-width:760px; }}
+    .ev-session-history th,.ev-session-history td {{ padding:10px 9px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; font-variant-numeric:tabular-nums; }}
+    .ev-session-history th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .ev-session-history td:nth-child(5),.ev-session-history td:nth-child(6),.ev-session-history td:nth-child(8) {{ text-align:right; }}
+    .insights {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px; }}
+    .insight {{ padding:17px; border:1px solid var(--line); border-radius:16px; background:#f7faf9; }}
+    .insight-kicker {{ display:block; margin-bottom:8px; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.11em; text-transform:uppercase; }}
+    .insight strong {{ display:block; font-size:17px; letter-spacing:-.025em; }} .insight p {{ margin:5px 0 0; color:var(--muted); font-size:11px; line-height:1.45; }}
+    .peak-insight {{ background:var(--red-soft); border-color:#f6d7d1; }} .peak-insight .insight-kicker,.peak-insight strong {{ color:#ad4436; }}
+    .solar-insight {{ background:var(--sun-soft); border-color:#f1dfb4; }} .solar-insight .insight-kicker,.solar-insight strong {{ color:#8b6519; }}
+    .ev-insight {{ background:var(--blue-soft); border-color:#d5e7ed; }} .ev-insight .insight-kicker,.ev-insight strong {{ color:#376d88; }}
+    .trend-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+    .trend-card {{ padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:18px; }}
+    .trend-card:last-child {{ grid-column:1 / -1; }}
+    .trend-list {{ display:grid; gap:12px; }} .trend-row {{ display:grid; grid-template-columns:52px 1fr 78px; align-items:center; gap:10px; }}
+    .trend-row > strong,.trend-row > span {{ font-size:10px; font-variant-numeric:tabular-nums; }} .trend-row > span {{ color:var(--muted); text-align:right; }}
+    .trend-bars {{ display:grid; gap:3px; }} .trend-track {{ display:block; height:5px; overflow:hidden; background:#edf3f0; border-radius:99px; }}
+    .trend-track i {{ display:block; min-width:2px; height:100%; border-radius:inherit; }}
+    .import-bar {{ background:#80a195; }} .net-bar {{ background:var(--deep-2); }} .credit-bar {{ background:#79cba8; }}
+    .grid-bar {{ background:var(--blue); }} .solar-bar {{ background:var(--sun); }} .ev-bar {{ background:linear-gradient(90deg,#77aac2,var(--blue)); }}
+    .trend-legend {{ display:flex; align-items:center; gap:5px; }} .trend-legend i {{ width:6px; height:6px; border-radius:50%; }}
+    .import-dot {{ background:#80a195; }} .net-dot {{ background:var(--deep-2); }} .credit-dot {{ background:#79cba8; }}
+    .grid-dot {{ background:var(--blue); }} .solar-dot {{ background:var(--sun); }}
+    .recommendation-grid {{ display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }}
+    .recommendation-card {{ position:relative; padding:20px; border:1px solid var(--line); border-radius:18px; background:var(--paper); }}
+    .recommendation-card h3 {{ margin:10px 0 5px; font-size:18px; }} .recommendation-card p {{ margin:0; color:var(--muted); font-size:12px; }}
+    .recommendation-level {{ padding:3px 7px; border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .recommendation-action {{ margin-top:14px; padding:11px 12px; border-radius:10px; font-size:11px; font-weight:650; }}
+    .recommendation-card.green {{ border-color:#cce9dc; background:#f3fbf7; }} .recommendation-card.green .recommendation-level,.recommendation-card.green .recommendation-action {{ color:#226b50; background:#dff4e9; }}
+    .recommendation-card.amber {{ border-color:#eeddb0; background:#fffaf0; }} .recommendation-card.amber .recommendation-level,.recommendation-card.amber .recommendation-action {{ color:#835f15; background:#fff0c8; }}
+    .recommendation-card.red {{ border-color:#f0cec8; background:#fff5f3; }} .recommendation-card.red .recommendation-level,.recommendation-card.red .recommendation-action {{ color:#a74334; background:#ffe3de; }}
+    .recommendation-metrics {{ display:grid; grid-template-columns:repeat(2,1fr); gap:7px; margin-top:13px; }} .recommendation-metrics span {{ padding:8px; background:rgba(255,255,255,.65); border:1px solid rgba(0,0,0,.05); border-radius:9px; }}
+    .recommendation-metrics small,.recommendation-metrics strong {{ display:block; }} .recommendation-metrics small {{ color:var(--muted); font-size:8px; text-transform:capitalize; }} .recommendation-metrics strong {{ margin-top:2px; font-size:11px; }}
+    .action-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
+    .action-card {{ padding:17px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .action-card h3 {{ margin:11px 0 5px; font-size:16px; }} .action-card p {{ margin:0; color:var(--muted); font-size:12px; }}
+    .action-card.green {{ background:#f3fbf7; border-color:#cce9dc; }} .action-card.amber {{ background:#fffaf0; border-color:#eeddb0; }} .action-card.red {{ background:#fff5f3; border-color:#f0cec8; }}
+    .plan-detail-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px; }}
+    .plan-detail-grid div {{ padding:13px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
+    .plan-detail-grid span,.plan-detail-grid strong {{ display:block; }} .plan-detail-grid span {{ color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }}
+    .plan-detail-grid strong {{ margin-top:6px; font-size:16px; letter-spacing:-.025em; }}
+    .scenario-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
+    .scenario-card {{ min-height:188px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
+    .scenario-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .scenario-card h3 {{ margin:12px 0 0; font-size:16px; line-height:1.25; }} .scenario-card strong {{ display:block; margin-top:18px; font-size:26px; letter-spacing:-.045em; }}
+    .scenario-card p {{ margin:7px 0 0; color:var(--muted); font-size:11px; line-height:1.4; }}
+    .scenario-card.good {{ border-color:#cce9dc; background:#f4fbf7; }} .scenario-card.good strong {{ color:#226b50; }}
+    .scenario-card.bad {{ border-color:#f0cec8; background:#fff5f3; }} .scenario-card.bad strong {{ color:#a74334; }}
+    .scenario-insights {{ margin-top:14px; padding:18px; background:#fffaf0; border:1px solid #eeddb0; border-radius:17px; }}
+    .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
+    .decision-grid,.system-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+    .decision-grid div,.system-card {{ padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
+    .decision-grid span,.decision-grid strong,.config-grid span,.config-grid strong {{ display:block; }}
+    .decision-grid span,.config-grid span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .decision-grid strong {{ margin-top:7px; font-size:18px; letter-spacing:-.02em; }}
+    .source-status {{ margin-top:18px; padding:20px 22px; border-radius:18px; border:1px solid var(--line); box-shadow:var(--shadow); }}
+    .source-status span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }} .source-status h2 {{ margin:2px 0 0; }}
+    .source-status p {{ margin:8px 0 0; color:var(--muted); font-size:12px; }}
+    .source-status.green {{ background:#f3fbf7; border-color:#cce9dc; }} .source-status.amber {{ background:#fffaf0; border-color:#eeddb0; }} .source-status.red {{ background:#fff5f3; border-color:#f0cec8; }}
+    .system-grid {{ margin-top:14px; }}
+    .system-card {{ margin-top:14px; }}
+    .system-card table {{ width:100%; border-collapse:collapse; }} .system-card th,.system-card td {{ padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; }}
+    .system-card th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .config-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }} .config-grid div {{ padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
+    .completeness-grid {{ display:grid; gap:9px; }}
+    .completeness-row {{ display:grid; grid-template-columns:1fr auto; gap:4px 10px; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
+    .completeness-row span,.completeness-row strong,.completeness-row small {{ display:block; }}
+    .completeness-row span {{ color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }}
+    .completeness-row strong {{ font-size:12px; }} .completeness-row small {{ grid-column:1 / -1; color:var(--muted); font-size:11px; }}
+    .completeness-row.good {{ border-color:#cce9dc; background:#f3fbf7; }} .completeness-row.good strong {{ color:#226b50; }}
+    .completeness-row.bad {{ border-color:#f0cec8; background:#fff5f3; }} .completeness-row.bad strong {{ color:#a74334; }}
+    .decision-lines {{ display:grid; gap:12px; margin-top:14px; }}
+    .decision-lines p,.action-card p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
+    .decision-lines strong,.action-card p strong {{ display:block; margin-bottom:2px; color:var(--ink); font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
+    :root {{ --ink:#1d1d1f; --muted:#6e6e73; --line:#e7e7ec; --paper:#fff; --wash:#f5f5f7; --deep:#101418; --deep-2:#24312c; --shadow:0 18px 55px rgba(0,0,0,.06); }}
+    body {{ background:radial-gradient(circle at top left,#ffffff 0,#f5f5f7 34%,#eef3f0 100%); }}
+    main {{ width:min(1200px, calc(100% - 48px)); margin:28px auto 72px; }}
+    .hero {{ padding:28px; border-radius:32px; background:linear-gradient(135deg,#111816,#24312c); box-shadow:0 28px 80px rgba(16,20,24,.18); }}
+    .hero-summary {{ margin-top:36px; }} .hero-summary strong {{ font-size:clamp(52px,7vw,82px); }}
+    .hero-note,.status-strip div {{ backdrop-filter:blur(18px); }}
+    .top-nav {{ top:14px; justify-content:center; gap:6px; margin:18px 0 20px; padding:8px; border-radius:999px; background:rgba(255,255,255,.78); }}
+    .top-nav a {{ padding:10px 14px; color:#5f6b67; background:transparent; border-color:transparent; transition:all .15s ease; }}
+    .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
+    body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
+    body:has(#home:target) .top-nav a[href="#home"],
+    body:has(#bills:target) .top-nav a[href="#bills"],
+    body:has(#solar:target) .top-nav a[href="#solar"],
+    body:has(#ev:target) .top-nav a[href="#ev"],
+    body:has(#whatif:target) .top-nav a[href="#whatif"],
+    body:has(#analytics:target) .top-nav a[href="#analytics"],
+    body:has(#system:target) .top-nav a[href="#system"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
+    .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
+    .page-heading h2 {{ font-size:34px; letter-spacing:-.055em; }} .page-heading p {{ max-width:620px; font-size:14px; }}
+    .report-section {{ margin-top:18px; padding:30px; border:0; border-radius:28px; background:rgba(255,255,255,.88); box-shadow:var(--shadow); }}
+    .metrics {{ gap:14px; }} .metric {{ min-height:144px; padding:20px; border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .metric span {{ font-size:12px; font-weight:750; }} .metric strong {{ margin-top:24px; font-size:30px; }} .metric small {{ max-width:94%; font-size:11px; }}
+    .metric.primary {{ background:linear-gradient(135deg,#111816,#1f6b50); }} .metric.primary strong {{ font-size:46px; }}
+    .home-metrics .metric {{ min-height:154px; }} #home .compact-section {{ margin-top:14px; }}
+    .chart-card,.trend-card,.ev-session-card,.ev-session-recommendations,.ev-session-history,.system-card,.decision-grid div,.scenario-card,.action-card,.recommendation-card {{ border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .action-grid {{ gap:14px; }} .action-card {{ padding:20px; }}
+    .action-card h3,.recommendation-card h3 {{ font-size:19px; letter-spacing:-.03em; }}
+    .scenario-card {{ min-height:210px; padding:22px; }} .scenario-card strong {{ font-size:32px; }}
+    .source-status {{ border:0; border-radius:24px; }}
+    code {{ padding:2px 5px; background:#eef4f1; border-radius:6px; }}
+    .notice {{ padding:10px 12px; border-radius:10px; background:var(--sun-soft); color:#765b20; }}
+    .ev-caveat {{ display:flex; align-items:center; justify-content:space-between; gap:24px; margin-top:24px; padding:16px 18px; color:#315f74; background:var(--blue-soft); border:1px solid #d5e7ed; border-radius:16px; }}
+    .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
+    .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
+    footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:620px) {{
+      main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
+      .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}
+      .hero-summary {{ margin-top:38px; }} .hero-note {{ max-width:none; }} .metrics,.insights {{ grid-template-columns:1fr; }}
+      .status-strip {{ grid-template-columns:1fr; }}
+      .period-controls form {{ grid-template-columns:1fr; }}
+      .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
+      .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
+      .top-nav {{ position:static; }} .top-nav a {{ flex:1 1 auto; text-align:center; }}
+      .hero-alert {{ align-items:flex-start; flex-direction:column; }}
+      .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
+      .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}
+      .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}
+      .chart-card {{ padding:16px; }} .chart-heading {{ align-items:flex-start; flex-direction:column; gap:2px; }}
+      .trend-card {{ padding:16px; }} .trend-row {{ grid-template-columns:48px 1fr 68px; gap:7px; }}
+    }}
+    @media print {{
+      @page {{ size:A4; margin:10mm; }} * {{ print-color-adjust:exact; -webkit-print-color-adjust:exact; }}
+      body {{ background:#fff; font-size:11px; }} main {{ width:100%; margin:0; }} .hero {{ padding:20px; border-radius:16px; box-shadow:none; }}
+      .top-nav,.period-controls {{ display:none; }} .page {{ display:block !important; }} .page-heading {{ box-shadow:none; break-before:page; }}
+      .hero-summary {{ margin-top:25px; }} .hero-summary strong {{ font-size:44px; }} .report-section {{ break-inside:avoid; margin-top:12px; padding:16px; border-radius:14px; box-shadow:none; }}
+      .metrics {{ grid-template-columns:repeat(4,1fr); gap:7px; }} .metric {{ min-height:90px; padding:11px; }} .metric strong {{ margin-top:12px; font-size:17px; }}
+      .metric.primary strong {{ font-size:25px; }} .charts {{ gap:8px; }} .chart-card {{ padding:12px; }} .bar-chart {{ gap:8px; }}
+      .bar-row {{ grid-template-columns:95px 1fr 55px; gap:7px; }} .insights {{ gap:7px; }} .insight {{ padding:11px; }} footer {{ padding-top:10px; }}
+      .trend-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .trend-card {{ padding:12px; }} .trend-card:last-child {{ grid-column:1 / -1; }}
+      .trend-list {{ gap:7px; }} .trend-row {{ grid-template-columns:42px 1fr 55px; gap:5px; }}
+      .recommendation-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .recommendation-card {{ padding:12px; break-inside:avoid; }}
+      .scenario-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .scenario-card,.scenario-insights {{ padding:12px; break-inside:avoid; }}
+      .ev-session-grid {{ grid-template-columns:1fr; gap:8px; }} .ev-session-card,.ev-session-recommendations,.ev-session-history {{ padding:12px; break-inside:avoid; }}
+      .ev-session-history th,.ev-session-history td {{ padding:6px; font-size:9px; }}
+      .auth-alert {{ break-inside:avoid; }}
+    }}
+  </style>
+</head>
+<body><main>
+  {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
+  {authentication_alert_html(health)}
+  {period_controls_html(selected_period)}
+  {nav_html()}
+  <section id="home" class="page">
+    <div class="page-heading"><h2>How am I doing today?</h2><p>The essential picture: cost, solar, EV charging, recommended actions, and system health.</p></div>
+    {home_page_html(today_summary, period_summary, settings, health, recommendations)}
+  </section>
+  <section id="bills" class="page">
+    <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
+    {summary_html(selected_period.label, period_summary, settings)}
+    {bill_attribution_html(period_summary, plan, settings)}
+    {comparison_html(comparison) if comparison else ""}
+    {plan_comparison_html(plan, car_comparison(settings))}
+  </section>
+  <section id="solar" class="page">
+    <div class="page-heading"><h2>How well is my solar performing?</h2><p>Generation, self-consumption, exports, and lost opportunity.</p></div>
+    {solar_page_html(period_summary, recommendations)}
+  </section>
+  <section id="ev" class="page">
+    <div class="page-heading"><h2>What did my vehicle cost to charge?</h2><p>Actual session source, charging cost, tariff split, and session history.</p></div>
+    {ev_page_html(period_summary, settings)}
+  </section>
+  <section id="whatif" class="page">
+    <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
+    {whatif_page_html(scenarios, plan)}
+  </section>
+  <section id="analytics" class="page">
+    <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>
+    {trends_html(trends, settings)}
+    {comparison_html(comparison) if comparison else ""}
+  </section>
+  <section id="system" class="page">
+    <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
+    {system_page_html(health, settings, period_summary)}
+  </section>
+  <footer>PowerMonitor local report. Values are estimates based on available 15-minute readings.</footer>
+</main></body></html>
+"""
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(document, encoding="utf-8")
+    return document
+
+
+def build_live_html(
+    period_kind: str = "current_billing_period",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> str:
+    settings = load_settings()
+    current_day = local_today()
+    selected = resolve_period(period_kind, settings, current_day, start, end)
+    compared = (
+        resolve_period("previous_billing_period", settings, current_day)
+        if selected.kind == "current_billing_period"
+        else previous_equivalent(selected)
+    )
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        today_summary = load_summary(conn, current_day, current_day, settings)
+        selected_summary = load_summary(conn, selected.start, selected.end, settings)
+        compared_summary = load_summary(conn, compared.start, compared.end, settings)
+        trends = load_daily_trends(conn, selected.start, selected.end, settings)
+        health = health_data(conn, current_day, settings)
+        recommendations = load_recommendations(conn, selected_summary, settings)
+    return write_html(
+        today_summary,
+        selected_summary,
+        trends,
+        settings,
+        health,
+        recommendations,
+        selected,
+        compare_summaries(selected, selected_summary, compared, compared_summary),
+        output_path=None,
+    )
+
+
+def main() -> None:
+    setup_logging()
+    settings = load_settings()
+    current_day = local_today()
+    period_start, period_end = billing_period(current_day, settings)
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found: {DB_PATH}")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        today_summary = load_summary(conn, current_day, current_day, settings)
+        period_summary = load_summary(conn, period_start, period_end, settings)
+        trends = load_daily_trends(conn, period_start, period_end, settings)
+        health = health_data(conn, current_day, settings)
+        recommendations = load_recommendations(conn, period_summary, settings)
+        previous = resolve_period("previous_billing_period", settings, current_day)
+        previous_summary = load_summary(conn, previous.start, previous.end, settings)
+        comparison = compare_summaries(
+            Period("current_billing_period", "Current billing period", period_start, period_end),
+            period_summary,
+            previous,
+            previous_summary,
+        )
+
+    health["last_successful_report_generation"] = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    health["report_age_minutes"] = 0.0
+    print_summary("Today summary", today_summary, settings)
+    print()
+    print_summary("Current billing period summary", period_summary, settings)
+    write_html(
+        today_summary,
+        period_summary,
+        trends,
+        settings,
+        health,
+        recommendations,
+        Period("current_billing_period", "Current billing period", period_start, period_end),
+        comparison,
+    )
+    logging.info(
+        "Generated report for %s and billing period %s to %s at %s",
+        current_day,
+        period_start,
+        period_end,
+        REPORT_PATH,
+    )
+    print()
+    print(f"HTML report: {REPORT_PATH}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        logging.exception("Report generation failed")
+        raise

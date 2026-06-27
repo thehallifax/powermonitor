@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Databases
+*.sqlite
+*.db
+
+# Logs
+logs/
+*.log
+
+# Generated reports
+reports/
+
+# Secrets
+config/secrets.json
+collector/solaredge_cookie.txt
+*.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary imports/exports
+*.xlsx
+*.csv
