@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-from dataclasses import asdict, dataclass
 from typing import Callable, Optional
 
-CATEGORIES = ("EV", "Solar", "Bills", "Tariffs", "Behaviour", "Battery", "General")
-CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
-FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
+from .models import (
+    CATEGORIES,
+    CONFIDENCE_LEVELS,
+    FINANCIAL_IMPACT_PERIODS,
+    Decision,
+    FinancialImpact,
+)
+
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 BUCKET_LABELS = {
     "overnight": "Overnight",
@@ -20,50 +24,6 @@ EV_BUCKET_LABELS = {
 }
 
 
-@dataclass
-class Decision:
-    id: str
-    title: str
-    summary: str
-    finding: str
-    evidence: dict
-    financial_impact: dict
-    recommendation: str
-    confidence: str
-    priority: str
-    expires_at: Optional[str]
-    data_sources_used: list[str]
-    category: str
-    action_type: str
-
-    @property
-    def severity(self) -> str:
-        return {
-            "low": "green",
-            "medium": "amber",
-            "high": "red",
-        }.get(self.priority.lower(), "amber")
-
-    @property
-    def metrics(self) -> dict:
-        metrics = dict(self.evidence)
-        metrics.update(
-            {
-                key: value
-                for key, value in self.financial_impact.items()
-                if value is not None
-            }
-        )
-        return metrics
-
-    def as_dict(self) -> dict:
-        data = asdict(self)
-        data["severity"] = self.severity
-        data["metrics"] = self.metrics
-        data["action"] = self.recommendation
-        return data
-
-
 Rule = Callable[[dict, dict], Optional[Decision]]
 
 
@@ -71,12 +31,12 @@ def _impact(
     today: Optional[float] = None,
     billing_period: Optional[float] = None,
     yearly: Optional[float] = None,
-) -> dict:
-    return {
-        "today": today,
-        "billing_period": billing_period,
-        "yearly": yearly,
-    }
+) -> FinancialImpact:
+    return FinancialImpact(
+        today=today,
+        billing_period=billing_period,
+        yearly=yearly,
+    )
 
 
 def _money(value: float) -> str:
