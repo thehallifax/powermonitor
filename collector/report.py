@@ -861,27 +861,18 @@ def load_daily_trends(
         (*cost_params, settings.ev_baseline_watts, start.isoformat(), (end + timedelta(days=1)).isoformat()),
     ).fetchall()
     trends = []
+    actual_ev_totals = data_engine(conn).get_daily_ev_session_totals(
+        start,
+        end,
+        sources=actual_ev_sources(settings),
+    )
     for day_text, grid_import, generated, exported, import_cost, ev_charging in rows:
         ev_value = float(ev_charging)
         ev_source = "estimated"
-        actual_sources = actual_ev_sources(settings)
-        if actual_sources:
-            actual_ev = conn.execute(
-                """
-                SELECT source, COALESCE(SUM(energy_kwh), 0)
-                FROM ev_sessions
-                WHERE source IN ({})
-                  AND COALESCE(last_seen, start_time) >= ?
-                  AND start_time < ?
-                GROUP BY source
-                """.format(",".join("?" for _ in actual_sources)),
-                (*actual_sources, day_text, (date.fromisoformat(day_text) + timedelta(days=1)).isoformat()),
-            ).fetchall()
-            if actual_ev:
-                chosen = next((row for row in actual_ev if row[0] == "ocular_export"), actual_ev[0])
-                if float(chosen[1] or 0) > 0:
-                    ev_value = float(chosen[1])
-                    ev_source = chosen[0]
+        actual_ev = actual_ev_totals.get(day_text)
+        if actual_ev and float(actual_ev.get("energy_kwh") or 0) > 0:
+            ev_value = float(actual_ev["energy_kwh"])
+            ev_source = actual_ev["source"]
         export_credit = float(exported) * settings.export_credit_rate
         trends.append(
             DailyTrend(

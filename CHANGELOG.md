@@ -1,5 +1,15 @@
 # Changelog
 
+## Sprint 0.7.5 - Platform Stabilisation
+
+- Added API-safe serialization for shared engine and presentation models before
+  JSON responses are emitted.
+- Stabilized `/api/summary` JSON output when nested decision, timeline, and
+  energy score models are present.
+- Updated EV daily trend chart data to use persisted `ev_sessions` totals
+  grouped by `date(start_time)` through the Data Engine.
+- Added regression tests for API serialization and EV daily trend totals.
+
 ## Sprint 0.7.4 - Energy Score v1
 
 - Added an `EnergyScore` model with score, label, summary, positive/negative

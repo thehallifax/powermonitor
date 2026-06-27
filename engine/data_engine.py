@@ -474,6 +474,60 @@ class DataEngine:
 
         return self._with_connection(query)
 
+    def get_daily_ev_session_totals(
+        self,
+        start: date,
+        end: date,
+        sources: Optional[list[str]] = None,
+        prefer_source: Optional[str] = "ocular_export",
+    ) -> dict[str, dict[str, Any]]:
+        if not sources:
+            return {}
+        start_text = start.isoformat()
+        end_exclusive = (end + timedelta(days=1)).isoformat()
+
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT
+                    date(start_time) AS session_day,
+                    source,
+                    COUNT(*),
+                    COALESCE(SUM(energy_kwh), 0)
+                FROM ev_sessions
+                WHERE source IN ({})
+                  AND start_time >= ?
+                  AND start_time < ?
+                GROUP BY session_day, source
+                ORDER BY session_day, source
+                """.format(",".join("?" for _ in sources)),
+                (*sources, start_text, end_exclusive),
+            ).fetchall()
+            by_day: dict[str, list[tuple[str, int, float]]] = {}
+            for day_text, source, sessions, energy_kwh in rows:
+                by_day.setdefault(day_text, []).append(
+                    (source, int(sessions), float(energy_kwh or 0))
+                )
+
+            totals = {}
+            for day_text, candidates in by_day.items():
+                chosen = None
+                if prefer_source:
+                    chosen = next(
+                        (candidate for candidate in candidates if candidate[0] == prefer_source),
+                        None,
+                    )
+                if chosen is None:
+                    chosen = candidates[0]
+                totals[day_text] = {
+                    "source": chosen[0],
+                    "sessions": chosen[1],
+                    "energy_kwh": chosen[2],
+                }
+            return totals
+
+        return self._with_connection(query)
+
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
         def upsert(conn):
             now = datetime.now().astimezone().isoformat(timespec="seconds")

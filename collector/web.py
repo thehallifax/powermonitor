@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import report
+from engine.models import to_api_safe
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -29,6 +30,10 @@ def live_health() -> dict:
     with sqlite3.connect(report.DB_PATH) as conn:
         report.validate_database(conn)
         return report.health_data(conn, report.local_today(), settings)
+
+
+def api_json_dumps(payload: dict) -> str:
+    return json.dumps(to_api_safe(payload), indent=2, sort_keys=True)
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -113,7 +118,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def send_json(self, payload: dict, status: int = 200) -> None:
-        content = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+        content = api_json_dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))

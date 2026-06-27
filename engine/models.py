@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Shared platform contracts for PowerMonitor intelligence engines."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import date, datetime
 from typing import Any, Optional, Union
 
 CATEGORIES = ("EV", "Solar", "Bills", "Tariffs", "Behaviour", "Battery", "General")
@@ -237,3 +238,19 @@ class EnergyScore:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def to_api_safe(value: Any) -> Any:
+    """Return a JSON-safe representation of platform and presentation models."""
+
+    if hasattr(value, "as_dict") and callable(value.as_dict):
+        return to_api_safe(value.as_dict())
+    if is_dataclass(value):
+        return to_api_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): to_api_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_api_safe(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value

@@ -10,6 +10,7 @@ from .models import (
     Forecast,
     Freshness,
     Insight,
+    to_api_safe,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "Insight",
     "generate_decisions",
     "generate_ev_session_decisions",
+    "to_api_safe",
 ]
