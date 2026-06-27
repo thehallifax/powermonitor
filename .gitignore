@@ -7,9 +7,9 @@ __pycache__/
 .venv/
 venv/
 
-# Databases
-*.sqlite
-*.db
+# Runtime data
+data/power.sqlite
+data/collector_health.json
 
 # Logs
 logs/
@@ -32,4 +32,4 @@ collector/solaredge_cookie.txt
 
 # Temporary imports/exports
 *.xlsx
-*.csv
+*.csvdata/collector_health.json
