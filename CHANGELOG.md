@@ -1,5 +1,20 @@
 # Changelog
 
+## Sprint 0.7.3 - Trend Recency and Decay
+
+- Added recency-aware trend analysis for persisted timeline history consumed by
+  `DecisionEngine`.
+- Added support for last-7-days, last-14-days, and current-billing-period
+  trend windows.
+- Added decayed event scoring so older timeline events contribute less than
+  newer events.
+- Suppressed stale trend decisions when historical events have no recent
+  supporting evidence.
+- Updated trend-aware decisions to include recent count, historical count,
+  recency window, confidence reason, and explanation text for why the trend
+  matters now.
+- Added tests for trend decay and stale trend suppression.
+
 ## Sprint 0.7.2 - Trend-Aware Decisions
 
 - Updated `DecisionEngine` to consume persisted timeline history through

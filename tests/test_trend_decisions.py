@@ -45,9 +45,9 @@ class TimelineDataEngine:
         return self.timeline
 
 
-def timeline_entry(event_type, title, sources=None, impact=None):
+def timeline_entry(event_type, title, sources=None, impact=None, timestamp="2026-06-27"):
     return TimelineEntry(
-        timestamp="2026-06-27",
+        timestamp=timestamp,
         title=title,
         summary=f"{title} summary.",
         financial_impact=impact,
@@ -99,9 +99,13 @@ class TrendAwareDecisionTests(unittest.TestCase):
         ])
 
         decision = decisions["trend_repeated_peak_usage"]
-        self.assertEqual(decision.evidence["high_peak_usage_events"], 2)
+        self.assertEqual(decision.evidence["recent_event_count"], 2)
+        self.assertEqual(decision.evidence["historical_event_count"], 2)
+        self.assertEqual(decision.evidence["recency_window_used"], "last 14 days")
+        self.assertIn("confidence_reason", decision.evidence)
         self.assertIn("PowerMonitor timeline history", decision.data_sources_used)
         self.assertIsNotNone(decision.explanation)
+        self.assertIn("still active", decision.explanation.why_this_matters)
 
     def test_bill_trajectory_generates_improving_or_worsening_decision(self):
         improving = self.ids_for_entries([
@@ -116,6 +120,10 @@ class TrendAwareDecisionTests(unittest.TestCase):
 
         self.assertIn("trend_bill_trajectory_improving", improving)
         self.assertIn("trend_bill_trajectory_worsening", worsening)
+        self.assertEqual(
+            improving["trend_bill_trajectory_improving"].evidence["recency_window_used"],
+            "current billing period",
+        )
 
     def test_recurring_ev_and_solar_wins_generate_maintain_decisions(self):
         decisions = self.ids_for_entries([
@@ -136,8 +144,31 @@ class TrendAwareDecisionTests(unittest.TestCase):
         ])
 
         decision = decisions["trend_repeated_estimated_data_warning"]
-        self.assertEqual(decision.evidence["estimated_ev_timeline_events"], 2)
+        self.assertEqual(decision.evidence["recent_event_count"], 2)
+        self.assertEqual(decision.evidence["recency_window_used"], "last 7 days")
         self.assertIn("Estimated EV charging", decision.data_sources_used)
+
+    def test_stale_trends_are_suppressed_without_recent_events(self):
+        decisions = self.ids_for_entries([
+            timeline_entry("high_peak_usage", "High peak usage", timestamp="2026-05-01"),
+            timeline_entry("high_peak_usage", "High peak usage", timestamp="2026-05-02"),
+            timeline_entry("ev_cheapest_tariff", "EV charged in cheapest tariff", timestamp="2026-05-01"),
+            timeline_entry("ev_cheapest_tariff", "EV charged in cheapest tariff", timestamp="2026-05-02"),
+            timeline_entry("positive_outcome", "Excellent utilisation signal", timestamp="2026-05-01"),
+            timeline_entry("positive_outcome", "Excellent utilisation signal", timestamp="2026-05-02"),
+        ])
+
+        self.assertNotIn("trend_repeated_peak_usage", decisions)
+        self.assertNotIn("trend_recurring_ev_charging_win", decisions)
+        self.assertNotIn("trend_recurring_solar_utilisation_win", decisions)
+
+    def test_stale_estimated_data_warning_is_suppressed(self):
+        decisions = self.ids_for_entries([
+            timeline_entry("ev_charging_reviewed", "EV charging reviewed", ["Estimated EV charging"], timestamp="2026-06-01"),
+            timeline_entry("decision_data_quality", "Estimated data is recurring", ["Estimated EV charging"], timestamp="2026-06-02"),
+        ])
+
+        self.assertNotIn("trend_repeated_estimated_data_warning", decisions)
 
     def test_data_engine_timeline_history_feeds_decision_context(self):
         engine = TimelineDataEngine(

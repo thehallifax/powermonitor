@@ -168,18 +168,6 @@ def _timeline_count(context: dict, event_type: str) -> int:
     return sum(1 for entry in _timeline_entries(context) if entry.event_type == event_type)
 
 
-def _timeline_title_count(context: dict, title: str) -> int:
-    return sum(1 for entry in _timeline_entries(context) if entry.title == title)
-
-
-def _timeline_source_count(context: dict, source: str) -> int:
-    return sum(
-        1
-        for entry in _timeline_entries(context)
-        if source in entry.evidence_sources
-    )
-
-
 def _latest_timeline_impact(context: dict, event_type: str) -> Optional[str]:
     matching = [
         entry for entry in _timeline_entries(context)
@@ -190,6 +178,96 @@ def _latest_timeline_impact(context: dict, event_type: str) -> Optional[str]:
 
 def _trend_sources(*extra_sources: str) -> list[str]:
     return list(dict.fromkeys(("PowerMonitor timeline history", *extra_sources)))
+
+
+def _entry_date(entry) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(entry.timestamp)[:10])
+    except ValueError:
+        return None
+
+
+def _trend_window_start(context: dict, window: str) -> date:
+    end = _as_date(context["current"]["end"])
+    if window == "last_7_days":
+        return end - timedelta(days=6)
+    if window == "current_billing_period":
+        return _as_date(context["current"]["start"])
+    return end - timedelta(days=13)
+
+
+def _window_label(window: str) -> str:
+    return {
+        "last_7_days": "last 7 days",
+        "last_14_days": "last 14 days",
+        "current_billing_period": "current billing period",
+    }.get(window, window.replace("_", " "))
+
+
+def _trend_stats(context: dict, matcher, window: str) -> dict:
+    end = _as_date(context["current"]["end"])
+    start = _trend_window_start(context, window)
+    half_life = float(context.get("trend_decay_half_life_days", 14.0))
+    matched = [entry for entry in _timeline_entries(context) if matcher(entry)]
+    recent = []
+    decayed_score = 0.0
+    for entry in matched:
+        entry_day = _entry_date(entry)
+        if not entry_day:
+            continue
+        age_days = max((end - entry_day).days, 0)
+        decayed_score += 0.5 ** (age_days / max(half_life, 1.0))
+        if start <= entry_day <= end:
+            recent.append(entry)
+    return {
+        "recent_count": len(recent),
+        "historical_count": len(matched),
+        "decayed_event_score": round(decayed_score, 2),
+        "window": _window_label(window),
+    }
+
+
+def _trend_is_active(stats: dict, thresholds: dict) -> bool:
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    recent_trigger = int(thresholds.get("trend_recent_event_count", 1))
+    return (
+        stats["historical_count"] >= trigger
+        and stats["recent_count"] >= recent_trigger
+        and stats["decayed_event_score"] >= recent_trigger
+    )
+
+
+def _trend_evidence(stats: dict, count_key: str) -> dict:
+    return {
+        "recent_event_count": stats["recent_count"],
+        "historical_event_count": stats["historical_count"],
+        "recency_window_used": stats["window"],
+        "decayed_event_score": stats["decayed_event_score"],
+        count_key: stats["historical_count"],
+    }
+
+
+def _trend_explanation(
+    why_now: str,
+    confidence_reason: str,
+    financial_impact: str,
+    evidence: dict,
+    sources: list[str],
+) -> DecisionExplanation:
+    return DecisionExplanation(
+        why_this_matters=why_now,
+        evidence_used=[
+            f"{_evidence_label(key)}: {_evidence_value(value)}"
+            for key, value in evidence.items()
+        ],
+        financial_impact=financial_impact,
+        confidence_reason=confidence_reason,
+        data_sources_used=sources,
+        freshness_completeness_note=(
+            f"Trend analysis used the {evidence['recency_window_used']} window "
+            f"and a decayed event score of {evidence['decayed_event_score']}."
+        ),
+    )
 
 
 def peak_cost_reduction(context: dict, thresholds: dict) -> Optional[Decision]:
@@ -436,56 +514,91 @@ def positive_reinforcement(context: dict, thresholds: dict) -> Optional[Decision
 
 
 def repeated_peak_usage_trend(context: dict, thresholds: dict) -> Optional[Decision]:
-    count = _timeline_count(context, "high_peak_usage")
-    trigger = int(thresholds.get("trend_repeated_event_count", 2))
-    if count < trigger:
+    stats = _trend_stats(
+        context,
+        lambda entry: entry.event_type == "high_peak_usage",
+        "last_14_days",
+    )
+    if not _trend_is_active(stats, thresholds):
         return None
     latest_impact = _latest_timeline_impact(context, "high_peak_usage")
-    finding = f"High peak usage has appeared {count} times in the persisted decision timeline."
+    finding = (
+        f"High peak usage has appeared {stats['recent_count']} times in the "
+        f"{stats['window']} and {stats['historical_count']} times historically."
+    )
+    sources = _trend_sources("Tariff settings")
+    evidence = {
+        **_trend_evidence(stats, "high_peak_usage_events"),
+        "latest_recorded_impact": latest_impact or "not quantified",
+    }
+    confidence_reason = (
+        f"Medium confidence because at least one high-peak event is recent and "
+        f"{stats['historical_count']} matching events exist in persisted history."
+    )
     return Decision(
         id="trend_repeated_peak_usage",
         title="Peak usage is becoming a pattern",
         summary=finding,
         finding=finding,
-        evidence={
-            "high_peak_usage_events": count,
-            "trend_event_threshold": trigger,
-            "latest_recorded_impact": latest_impact or "not quantified",
-        },
+        evidence={**evidence, "confidence_reason": confidence_reason},
         financial_impact=_impact(),
         recommendation="Review flexible loads that repeatedly land in Peak periods and prioritise shifting them to lower-cost windows.",
         confidence="Medium",
         priority="Medium",
         expires_at=context.get("projected_period_end"),
-        data_sources_used=_trend_sources("Tariff settings"),
+        data_sources_used=sources,
         category="Tariffs",
         action_type="trend_review",
+        explanation=_trend_explanation(
+            "This matters now because a recent high-peak event confirms the pattern is still active.",
+            confidence_reason,
+            "Not quantified by the current Decision Engine output.",
+            evidence,
+            sources,
+        ),
     )
 
 
 def bill_trajectory_trend(context: dict, thresholds: dict) -> Optional[Decision]:
-    improved = _timeline_title_count(context, "Bill tracking improved")
-    worsened = _timeline_title_count(context, "Bill tracking worsened")
+    improved_stats = _trend_stats(
+        context,
+        lambda entry: entry.title == "Bill tracking improved",
+        "current_billing_period",
+    )
+    worsened_stats = _trend_stats(
+        context,
+        lambda entry: entry.title == "Bill tracking worsened",
+        "current_billing_period",
+    )
+    improved = improved_stats["historical_count"]
+    worsened = worsened_stats["historical_count"]
     if improved == worsened:
         return None
     direction = "improving" if improved > worsened else "worsening"
-    dominant = max(improved, worsened)
-    trigger = int(thresholds.get("trend_repeated_event_count", 2))
-    if dominant < trigger:
+    dominant_stats = improved_stats if direction == "improving" else worsened_stats
+    if not _trend_is_active(dominant_stats, thresholds):
         return None
     finding = (
-        f"Bill trajectory is {direction}: {improved} improved timeline events "
-        f"and {worsened} worsened timeline events are recorded."
+        f"Bill trajectory is {direction}: {dominant_stats['recent_count']} "
+        f"{direction} events are in the {dominant_stats['window']}, with "
+        f"{improved} improved and {worsened} worsened events recorded historically."
+    )
+    sources = _trend_sources("Period comparison", "FinancialEngine report output")
+    evidence = {
+        **_trend_evidence(dominant_stats, f"bill_tracking_{direction}_events"),
+        "bill_tracking_improved_events": improved,
+        "bill_tracking_worsened_events": worsened,
+    }
+    confidence_reason = (
+        f"Medium confidence because the {direction} bill trend has recent "
+        f"evidence in the {dominant_stats['window']} and more matching events than the opposite direction."
     )
     return Decision(
         id=f"trend_bill_trajectory_{direction}",
         title=f"Bill trajectory is {direction}",
         summary=finding,
         finding=finding,
-        evidence={
-            "bill_tracking_improved_events": improved,
-            "bill_tracking_worsened_events": worsened,
-        },
+        evidence={**evidence, "confidence_reason": confidence_reason},
         financial_impact=_impact(),
         recommendation=(
             "Keep reinforcing the behaviours behind the improvement."
@@ -495,87 +608,142 @@ def bill_trajectory_trend(context: dict, thresholds: dict) -> Optional[Decision]
         confidence="Medium",
         priority="Low" if direction == "improving" else "Medium",
         expires_at=context.get("projected_period_end"),
-        data_sources_used=_trend_sources("Period comparison", "FinancialEngine report output"),
+        data_sources_used=sources,
         category="Bills",
         action_type="trend_review",
+        explanation=_trend_explanation(
+            f"This matters now because the bill trajectory has recent {direction} evidence in the current billing period.",
+            confidence_reason,
+            "Not quantified by the current Decision Engine output.",
+            evidence,
+            sources,
+        ),
     )
 
 
 def recurring_ev_charging_win(context: dict, thresholds: dict) -> Optional[Decision]:
-    count = _timeline_count(context, "ev_cheapest_tariff")
-    trigger = int(thresholds.get("trend_repeated_event_count", 2))
-    if count < trigger:
+    stats = _trend_stats(
+        context,
+        lambda entry: entry.event_type == "ev_cheapest_tariff",
+        "last_14_days",
+    )
+    if not _trend_is_active(stats, thresholds):
         return None
-    finding = f"EV charging has landed in the cheapest tariff window {count} times in the timeline."
+    finding = (
+        f"EV charging has landed in the cheapest tariff window {stats['recent_count']} "
+        f"times in the {stats['window']} and {stats['historical_count']} times historically."
+    )
+    sources = _trend_sources("Actual EV session data", "Tariff settings")
+    evidence = _trend_evidence(stats, "ev_cheapest_tariff_events")
+    confidence_reason = (
+        "High confidence because recurring low-cost EV charging is present in recent "
+        "timeline history and comes from actual session/tariff evidence."
+    )
     return Decision(
         id="trend_recurring_ev_charging_win",
         title="EV charging win is recurring",
         summary=finding,
         finding=finding,
-        evidence={
-            "ev_cheapest_tariff_events": count,
-            "trend_event_threshold": trigger,
-        },
+        evidence={**evidence, "confidence_reason": confidence_reason},
         financial_impact=_impact(),
         recommendation="Keep the EV schedule aligned with the cheapest tariff window and watch for any Peak-session regressions.",
         confidence="High",
         priority="Low",
         expires_at=context.get("projected_period_end"),
-        data_sources_used=_trend_sources("Actual EV session data", "Tariff settings"),
+        data_sources_used=sources,
         category="EV",
         action_type="maintain",
+        explanation=_trend_explanation(
+            "This matters now because the low-cost EV charging pattern is still appearing recently, not only in old history.",
+            confidence_reason,
+            "Not quantified by the current Decision Engine output.",
+            evidence,
+            sources,
+        ),
     )
 
 
 def recurring_solar_utilisation_win(context: dict, thresholds: dict) -> Optional[Decision]:
-    count = _timeline_count(context, "positive_outcome")
-    trigger = int(thresholds.get("trend_repeated_event_count", 2))
-    if count < trigger:
+    stats = _trend_stats(
+        context,
+        lambda entry: entry.event_type == "positive_outcome",
+        "last_14_days",
+    )
+    if not _trend_is_active(stats, thresholds):
         return None
-    finding = f"Positive solar/utilisation outcomes have appeared {count} times in the timeline."
+    finding = (
+        f"Positive solar/utilisation outcomes have appeared {stats['recent_count']} "
+        f"times in the {stats['window']} and {stats['historical_count']} times historically."
+    )
+    sources = _trend_sources("SolarEdge interval data")
+    evidence = _trend_evidence(stats, "positive_outcome_events")
+    confidence_reason = (
+        "High confidence because the utilisation win appears in recent timeline history "
+        "and is backed by interval evidence."
+    )
     return Decision(
         id="trend_recurring_solar_utilisation_win",
         title="Solar utilisation win is recurring",
         summary=finding,
         finding=finding,
-        evidence={
-            "positive_outcome_events": count,
-            "trend_event_threshold": trigger,
-        },
+        evidence={**evidence, "confidence_reason": confidence_reason},
         financial_impact=_impact(),
         recommendation="Keep flexible loads in solar and low-cost windows so the recurring positive pattern continues.",
         confidence="High",
         priority="Low",
         expires_at=context.get("projected_period_end"),
-        data_sources_used=_trend_sources("SolarEdge interval data"),
+        data_sources_used=sources,
         category="Solar",
         action_type="maintain",
+        explanation=_trend_explanation(
+            "This matters now because a positive solar/utilisation pattern is recurring in recent history.",
+            confidence_reason,
+            "Not quantified by the current Decision Engine output.",
+            evidence,
+            sources,
+        ),
     )
 
 
 def repeated_estimated_data_warning(context: dict, thresholds: dict) -> Optional[Decision]:
-    count = _timeline_source_count(context, "Estimated EV charging")
-    trigger = int(thresholds.get("trend_repeated_event_count", 2))
-    if count < trigger:
+    stats = _trend_stats(
+        context,
+        lambda entry: "Estimated EV charging" in entry.evidence_sources,
+        "last_7_days",
+    )
+    if not _trend_is_active(stats, thresholds):
         return None
-    finding = f"Estimated/fallback EV data has been used in {count} timeline events."
+    finding = (
+        f"Estimated/fallback EV data has been used in {stats['recent_count']} "
+        f"timeline events in the {stats['window']} and {stats['historical_count']} times historically."
+    )
+    sources = _trend_sources("Estimated EV charging")
+    evidence = _trend_evidence(stats, "estimated_ev_timeline_events")
+    confidence_reason = (
+        "Medium confidence because estimated/fallback data appears in recent timeline "
+        "history, but the underlying EV sessions are not fully measured."
+    )
     return Decision(
         id="trend_repeated_estimated_data_warning",
         title="Estimated data is recurring",
         summary=finding,
         finding=finding,
-        evidence={
-            "estimated_ev_timeline_events": count,
-            "trend_event_threshold": trigger,
-        },
+        evidence={**evidence, "confidence_reason": confidence_reason},
         financial_impact=_impact(),
         recommendation="Connect or refresh actual EV session data so future decisions rely less on fallback estimates.",
         confidence="Medium",
         priority="Medium",
         expires_at=context.get("projected_period_end"),
-        data_sources_used=_trend_sources("Estimated EV charging"),
+        data_sources_used=sources,
         category="General",
         action_type="data_quality",
+        explanation=_trend_explanation(
+            "This matters now because fallback EV data is still being used in the last 7 days.",
+            confidence_reason,
+            "Not quantified by the current Decision Engine output.",
+            evidence,
+            sources,
+        ),
     )
 
 
