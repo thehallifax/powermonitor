@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from datetime import date, timedelta
 from typing import Callable, Optional
 
 from .models import (
@@ -319,6 +320,66 @@ def generate_decisions(context: dict, thresholds: dict) -> list[Decision]:
         if decision:
             decisions.append(_validate_decision(decision))
     return decisions
+
+
+def build_decision_context(
+    current_summary: dict,
+    settings,
+    data_engine,
+    previous_summary: Optional[dict] = None,
+) -> dict:
+    projected_days = current_summary["supply_days"]
+    projected_end = _as_date(current_summary["end"])
+    start = _as_date(current_summary["start"])
+    end = _as_date(current_summary["end"])
+    overnight_baseload = data_engine.get_overnight_baseload_watts(start, end)
+
+    if settings.current_billing_period_start and settings.current_billing_period_end:
+        projected_end = settings.current_billing_period_end
+        projected_days = (projected_end - settings.current_billing_period_start).days + 1
+    elif (
+        settings.current_billing_period_start
+        and settings.previous_billing_period_start
+        and settings.previous_billing_period_end
+    ):
+        projected_days = (
+            settings.previous_billing_period_end - settings.previous_billing_period_start
+        ).days + 1
+        projected_end = settings.current_billing_period_start + timedelta(days=projected_days - 1)
+
+    return {
+        "current": current_summary,
+        "previous": previous_summary,
+        "import_rates": settings.import_rates,
+        "ev_data_source": current_summary["ev_charging_source"],
+        "ev_baseline_watts": settings.ev_baseline_watts,
+        "overnight_baseload_watts": overnight_baseload,
+        "projected_period_days": projected_days,
+        "projected_period_end": projected_end.isoformat(),
+        "projected_net_cost": current_summary["average_daily_net_cost"] * projected_days,
+    }
+
+
+def _as_date(value) -> date:
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(value)
+
+
+def generate_decisions_from_data_engine(
+    current_summary: dict,
+    settings,
+    data_engine,
+    thresholds: dict,
+    previous_summary: Optional[dict] = None,
+) -> list[Decision]:
+    context = build_decision_context(
+        current_summary,
+        settings,
+        data_engine,
+        previous_summary=previous_summary,
+    )
+    return generate_decisions(context, thresholds)
 
 
 def generate_recommendations(context: dict, thresholds: dict) -> list[dict]:

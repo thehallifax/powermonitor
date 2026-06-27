@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+"""Trusted household data access for PowerMonitor intelligence engines.
+
+The Data Engine owns source retrieval, freshness, completeness, and
+normalisation. It deliberately does not calculate financial outcomes, generate
+recommendations, render HTML, or depend on dashboard/report concepts.
+"""
+
+import json
+import re
+import sqlite3
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from .models import EngineStatus, Evidence, Freshness
+
+BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
+EV_BUCKET_LABELS = {
+    "super_off_peak": "9am-3pm super off-peak / EV solar window",
+    "overnight": "11pm-6am overnight",
+    "off_peak": "off-peak",
+    "peak": "peak",
+}
+EV_TARIFF_COLUMN_PAIRS = {
+    bucket: (f"{bucket}_kwh", f"{bucket}_cost")
+    for bucket in BUCKET_ORDER
+}
+
+
+@dataclass(frozen=True)
+class BillPeriod:
+    kind: str
+    label: str
+    start: date
+    end: date
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "label": self.label,
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class HouseholdSnapshot:
+    generated_at: str
+    latest_measurement_time: Optional[str]
+    freshness: Freshness
+    connector_status: EngineStatus
+    bill_period: Optional[BillPeriod] = None
+    evidence: list[Evidence] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        if self.bill_period:
+            result["bill_period"] = self.bill_period.as_dict()
+        return result
+
+
+@dataclass(frozen=True)
+class DataCompleteness:
+    confidence: str
+    confidence_note: str
+    items: list[dict[str, str]]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class DataEngine:
+    """SQLite-backed source of truth for normalized household data."""
+
+    name = "data_engine"
+
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        connection: Optional[sqlite3.Connection] = None,
+        collect_log_path: Optional[Path] = None,
+        report_path: Optional[Path] = None,
+        health_loader: Optional[Callable[[], dict]] = None,
+    ) -> None:
+        self.db_path = Path(db_path) if db_path else None
+        self.connection = connection
+        self.collect_log_path = Path(collect_log_path) if collect_log_path else None
+        self.report_path = Path(report_path) if report_path else None
+        self.health_loader = health_loader or (lambda: {})
+
+    def status(self) -> EngineStatus:
+        try:
+            self.validate_database()
+        except (FileNotFoundError, RuntimeError, sqlite3.Error) as exc:
+            return EngineStatus(name=self.name, state="failed", message=str(exc))
+        return EngineStatus(name=self.name)
+
+    def _with_connection(self, callback):
+        if self.connection is not None:
+            return callback(self.connection)
+        if not self.db_path:
+            raise FileNotFoundError("No database path configured")
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"Database not found: {self.db_path}")
+        with sqlite3.connect(self.db_path) as conn:
+            return callback(conn)
+
+    def validate_database(self) -> None:
+        return self._with_connection(self.validate_connection)
+
+    @staticmethod
+    def validate_connection(conn: sqlite3.Connection) -> None:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'readings'"
+        ).fetchone()
+        if not table:
+            raise RuntimeError("No readings table found")
+
+        required = {
+            "measurement_time",
+            "tariff_bucket",
+            "production_kwh",
+            "solar_to_home_kwh",
+            "solar_to_grid_kwh",
+            "grid_to_home_w",
+            "grid_to_home_kwh",
+            "import_cost",
+        }
+        present = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+        missing = sorted(required - present)
+        if missing:
+            raise RuntimeError(f"Readings table is missing columns: {', '.join(missing)}")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ev_sessions (
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                energy_kwh REAL NOT NULL,
+                source TEXT NOT NULL,
+                cost_estimate REAL
+            )
+            """
+        )
+        present_ev_columns = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
+        ev_column_sql = {
+            "transaction_id": "ALTER TABLE ev_sessions ADD COLUMN transaction_id TEXT",
+            "last_seen": "ALTER TABLE ev_sessions ADD COLUMN last_seen TEXT",
+            "max_power_kw": "ALTER TABLE ev_sessions ADD COLUMN max_power_kw REAL",
+            "status": "ALTER TABLE ev_sessions ADD COLUMN status TEXT",
+            "tariff_breakdown_json": "ALTER TABLE ev_sessions ADD COLUMN tariff_breakdown_json TEXT",
+            "first_seen_energy_kwh": "ALTER TABLE ev_sessions ADD COLUMN first_seen_energy_kwh REAL",
+            "last_energy_kwh": "ALTER TABLE ev_sessions ADD COLUMN last_energy_kwh REAL",
+            "duration_minutes": "ALTER TABLE ev_sessions ADD COLUMN duration_minutes REAL",
+            "cost_partial": "ALTER TABLE ev_sessions ADD COLUMN cost_partial INTEGER DEFAULT 0",
+            "start_source": "ALTER TABLE ev_sessions ADD COLUMN start_source TEXT",
+            "stop_source": "ALTER TABLE ev_sessions ADD COLUMN stop_source TEXT",
+            "notes_json": "ALTER TABLE ev_sessions ADD COLUMN notes_json TEXT",
+        }
+        for bucket, (kwh_column, cost_column) in EV_TARIFF_COLUMN_PAIRS.items():
+            ev_column_sql[kwh_column] = f"ALTER TABLE ev_sessions ADD COLUMN {kwh_column} REAL DEFAULT 0"
+            ev_column_sql[cost_column] = f"ALTER TABLE ev_sessions ADD COLUMN {cost_column} REAL DEFAULT 0"
+        for column, statement in ev_column_sql.items():
+            if column not in present_ev_columns:
+                conn.execute(statement)
+        DataEngine._backfill_ev_tariff_columns(conn)
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_transaction_id
+            ON ev_sessions(transaction_id)
+            WHERE transaction_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS billing_periods (
+                name TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                actual_bill_amount REAL,
+                plan_name TEXT,
+                notes TEXT
+            )
+            """
+        )
+        conn.commit()
+
+    @staticmethod
+    def _backfill_ev_tariff_columns(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT rowid, tariff_breakdown_json
+            FROM ev_sessions
+            WHERE tariff_breakdown_json IS NOT NULL
+              AND (
+                COALESCE(super_off_peak_kwh, 0) + COALESCE(overnight_kwh, 0) +
+                COALESCE(off_peak_kwh, 0) + COALESCE(peak_kwh, 0)
+              ) = 0
+            """
+        ).fetchall()
+        for rowid, raw_breakdown in rows:
+            try:
+                parsed = json.loads(raw_breakdown) if raw_breakdown else {}
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            values = []
+            assignments = []
+            for bucket in BUCKET_ORDER:
+                bucket_values = parsed.get(bucket, {})
+                if not isinstance(bucket_values, dict):
+                    bucket_values = {}
+                kwh_column, cost_column = EV_TARIFF_COLUMN_PAIRS[bucket]
+                assignments.extend((f"{kwh_column} = ?", f"{cost_column} = ?"))
+                values.extend((
+                    float(bucket_values.get("kwh") or 0),
+                    float(bucket_values.get("cost") or 0),
+                ))
+            conn.execute(
+                f"UPDATE ev_sessions SET {', '.join(assignments)} WHERE rowid = ?",
+                (*values, rowid),
+            )
+
+    def get_bill_period(self, today: date, settings: Any, kind: str = "current_billing_period") -> BillPeriod:
+        if kind == "current_billing_period":
+            start_day = int(settings.billing_period_start_day)
+            period_start = today.replace(day=start_day) if today.day >= start_day else (
+                today.replace(day=1) - timedelta(days=1)
+            ).replace(day=start_day)
+            period_end = today
+            if getattr(settings, "current_billing_period_start", None):
+                period_start = settings.current_billing_period_start
+            return BillPeriod(kind, "Current billing period", period_start, period_end)
+        if kind == "previous_billing_period":
+            if getattr(settings, "previous_billing_period_start", None) and getattr(settings, "previous_billing_period_end", None):
+                return BillPeriod(
+                    kind,
+                    "Previous billing period",
+                    settings.previous_billing_period_start,
+                    settings.previous_billing_period_end,
+                )
+            current = self.get_bill_period(today, settings)
+            days = (current.end - current.start).days + 1
+            end = current.start - timedelta(days=1)
+            return BillPeriod(kind, "Previous billing period", end - timedelta(days=days - 1), end)
+        raise ValueError(f"Unsupported bill period: {kind}")
+
+    def get_current_bill_summary(self, start: date, end: date) -> dict[str, Any]:
+        rows = self.get_grid_intervals(start, end)
+        solar_rows = self.get_solar_intervals(start, end)
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "intervals": len(rows),
+            "reading_days": len({row["measurement_time"][:10] for row in rows}),
+            "grid_import_kwh": sum(row["grid_to_home_kwh"] for row in rows),
+            "solar_generated_kwh": sum(row["production_kwh"] for row in solar_rows),
+            "solar_exported_kwh": sum(row["solar_to_grid_kwh"] for row in solar_rows),
+        }
+
+    def get_grid_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
+        start_text = start.isoformat()
+        end_exclusive = (end + timedelta(days=1)).isoformat()
+
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT measurement_time, tariff_bucket, grid_to_home_w, grid_to_home_kwh
+                FROM readings
+                WHERE measurement_time >= ? AND measurement_time < ?
+                ORDER BY measurement_time
+                """,
+                (start_text, end_exclusive),
+            ).fetchall()
+            return [
+                {
+                    "measurement_time": row[0],
+                    "tariff_bucket": row[1],
+                    "grid_to_home_w": float(row[2] or 0),
+                    "grid_to_home_kwh": float(row[3] or 0),
+                }
+                for row in rows
+            ]
+
+        return self._with_connection(query)
+
+    def get_solar_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
+        start_text = start.isoformat()
+        end_exclusive = (end + timedelta(days=1)).isoformat()
+
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT measurement_time, production_kwh, solar_to_home_kwh, solar_to_grid_kwh
+                FROM readings
+                WHERE measurement_time >= ? AND measurement_time < ?
+                ORDER BY measurement_time
+                """,
+                (start_text, end_exclusive),
+            ).fetchall()
+            return [
+                {
+                    "measurement_time": row[0],
+                    "production_kwh": float(row[1] or 0),
+                    "solar_to_home_kwh": float(row[2] or 0),
+                    "solar_to_grid_kwh": float(row[3] or 0),
+                }
+                for row in rows
+            ]
+
+        return self._with_connection(query)
+
+    def get_ev_sessions(
+        self,
+        start: date,
+        end: date,
+        sources: Optional[list[str]] = None,
+        prefer_source: Optional[str] = "ocular_export",
+    ) -> list[dict[str, Any]]:
+        if not sources:
+            return []
+        start_text = start.isoformat()
+        end_exclusive = (end + timedelta(days=1)).isoformat()
+        tariff_columns = [
+            column
+            for bucket in BUCKET_ORDER
+            for column in EV_TARIFF_COLUMN_PAIRS[bucket]
+        ]
+
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT
+                    transaction_id,
+                    start_time,
+                    end_time,
+                    COALESCE(last_seen, end_time, start_time) AS last_seen_value,
+                    energy_kwh,
+                    cost_estimate,
+                    cost_partial,
+                    source,
+                    duration_minutes,
+                    max_power_kw,
+                    tariff_breakdown_json,
+                    {}
+                FROM ev_sessions
+                WHERE source IN ({})
+                  AND COALESCE(last_seen, end_time, start_time) >= ?
+                  AND start_time < ?
+                ORDER BY start_time
+                """.format(
+                    ", ".join(tariff_columns),
+                    ",".join("?" for _ in sources),
+                ),
+                (*sources, start_text, end_exclusive),
+            ).fetchall()
+            if rows and prefer_source and any(row[7] == prefer_source for row in rows):
+                rows = [row for row in rows if row[7] == prefer_source]
+            return [self._normalise_ev_session(row) for row in rows]
+
+        return self._with_connection(query)
+
+    @staticmethod
+    def _normalise_ev_session(row) -> dict[str, Any]:
+        breakdown = {bucket: {"kwh": 0.0, "cost": 0.0} for bucket in BUCKET_ORDER}
+        stored_total = 0.0
+        column_offset = 11
+        for index, bucket in enumerate(BUCKET_ORDER):
+            kwh_value = float(row[column_offset + index * 2] or 0)
+            cost_value = float(row[column_offset + index * 2 + 1] or 0)
+            breakdown[bucket] = {"kwh": kwh_value, "cost": cost_value}
+            stored_total += abs(kwh_value) + abs(cost_value)
+        if stored_total <= 0:
+            try:
+                parsed = json.loads(row[10]) if row[10] else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                for bucket in BUCKET_ORDER:
+                    values = parsed.get(bucket, {})
+                    if isinstance(values, dict):
+                        breakdown[bucket] = {
+                            "kwh": float(values.get("kwh") or 0),
+                            "cost": float(values.get("cost") or 0),
+                        }
+
+        energy = float(row[4] or 0)
+        cost = sum(values["cost"] for values in breakdown.values())
+        if cost <= 0 and row[5] is not None:
+            cost = float(row[5] or 0)
+        start_dt = parse_iso_datetime(row[1])
+        end_dt = parse_iso_datetime(row[2]) or parse_iso_datetime(row[3])
+        duration = float(row[8]) if row[8] is not None else None
+        if duration is None and start_dt and end_dt:
+            duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
+        max_power = float(row[9]) if row[9] is not None else None
+        if max_power is None and duration and duration > 0:
+            max_power = energy / (duration / 60)
+        dominant = max(BUCKET_ORDER, key=lambda bucket: breakdown[bucket]["kwh"]) if energy > 0 else None
+        return {
+            "transaction_id": row[0],
+            "start_time": row[1],
+            "end_time": row[2],
+            "date": start_dt.date().isoformat() if start_dt else None,
+            "start_time_display": start_dt.strftime("%H:%M") if start_dt else "n/a",
+            "end_time_display": end_dt.strftime("%H:%M") if end_dt else "n/a",
+            "duration_minutes": duration,
+            "duration_display": format_duration(duration),
+            "energy_kwh": energy,
+            "cost": cost,
+            "cost_per_kwh": cost / energy if energy else 0.0,
+            "source": row[7],
+            "cost_partial": bool(row[6]),
+            "max_power_kw": max_power,
+            "dominant_tariff": dominant,
+            "dominant_tariff_label": EV_BUCKET_LABELS.get(dominant, dominant or "n/a"),
+            "tariff_breakdown": breakdown,
+        }
+
+    def get_overnight_baseload_watts(self, start: date, end: date) -> float:
+        values = [
+            row["grid_to_home_w"]
+            for row in self.get_grid_intervals(start, end)
+            if row["tariff_bucket"] == "overnight"
+        ]
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        midpoint = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[midpoint]
+        return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+    def get_ev_source_counts(self) -> list[dict[str, Any]]:
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT source, COUNT(*), COALESCE(SUM(energy_kwh), 0), COALESCE(SUM(cost_estimate), 0)
+                FROM ev_sessions
+                GROUP BY source
+                ORDER BY source
+                """
+            ).fetchall()
+            return [
+                {"source": row[0] or "unknown", "sessions": int(row[1]), "energy_kwh": float(row[2] or 0), "cost": float(row[3] or 0)}
+                for row in rows
+            ]
+
+        return self._with_connection(query)
+
+    def get_data_completeness(
+        self,
+        summary: dict[str, Any],
+        billing_configured: bool,
+        confidence: str,
+        confidence_note: str,
+    ) -> DataCompleteness:
+        solar_present = any(float(summary.get(key) or 0) > 0 for key in ("solar_generated_kwh", "solar_used_kwh", "solar_exported_kwh"))
+        grid_present = int(summary.get("intervals") or 0) > 0
+        ev_actual_present = summary.get("ev_charging_source") in {"ocular_export", "home_assistant_ocpp"}
+        return DataCompleteness(
+            confidence=confidence,
+            confidence_note=confidence_note,
+            items=[
+                {"name": "Solar data", "status": "present" if solar_present else "missing"},
+                {"name": "Grid data", "status": "present" if grid_present else "missing"},
+                {"name": "EV actual sessions", "status": "present" if ev_actual_present else "missing"},
+                {"name": "Billing period", "status": "configured" if billing_configured else "missing"},
+            ],
+        )
+
+    def get_connector_status(
+        self,
+        today: date,
+        bill_period: Optional[BillPeriod] = None,
+    ) -> dict[str, Any]:
+        latest_measurement = self._latest_measurement_time()
+        latest_collect, collect_status = self._latest_collect_log_entry()
+        collector_health = self.health_loader()
+        report_timestamp = collector_health.get("last_successful_report_generation")
+        report_age_minutes = None
+        if self.report_path and self.report_path.exists():
+            report_modified = datetime.fromtimestamp(self.report_path.stat().st_mtime).astimezone()
+            try:
+                recorded_report = datetime.fromisoformat(report_timestamp) if report_timestamp else None
+            except ValueError:
+                recorded_report = None
+            if not recorded_report or report_modified > recorded_report:
+                report_timestamp = report_modified.isoformat(timespec="seconds")
+            report_age_minutes = max(
+                (datetime.now().astimezone() - report_modified).total_seconds() / 60,
+                0.0,
+            )
+
+        status = collector_health.get("status") or collect_status or "collect log unavailable"
+        if not latest_measurement:
+            if status == "ok":
+                status = "no readings"
+        else:
+            try:
+                if status == "ok" and datetime.fromisoformat(latest_measurement).date() < today:
+                    status = "stale"
+            except ValueError:
+                status = "invalid reading timestamp"
+
+        result = {
+            "status": status,
+            "failure_type": collector_health.get("failure_type"),
+            "collector_message": collector_health.get("message"),
+            "last_successful_collection": collector_health.get("last_success_at"),
+            "last_collection_attempt": collector_health.get("last_attempt_at"),
+            "last_collection_failure": collector_health.get("last_failure_at"),
+            "last_successful_report_generation": report_timestamp,
+            "last_report_generation_failure": collector_health.get("last_report_failure_at"),
+            "report_age_minutes": report_age_minutes,
+            "consecutive_failures": collector_health.get("consecutive_failures", 0),
+            "days_since_last_successful_collection": collector_health.get(
+                "days_since_last_successful_collection"
+            ),
+            "failure_notification_sent_at": collector_health.get("notification_sent_at"),
+            "latest_measurement_time": latest_measurement,
+            "latest_collect_log_timestamp": latest_collect,
+        }
+        if bill_period:
+            result["current_billing_period_start"] = bill_period.start.isoformat()
+            result["current_billing_period_end"] = bill_period.end.isoformat()
+        return result
+
+    def get_latest_household_snapshot(
+        self,
+        today: date,
+        bill_period: Optional[BillPeriod] = None,
+    ) -> HouseholdSnapshot:
+        latest = self._latest_measurement_time()
+        status = self.get_connector_status(today, bill_period)
+        freshness = freshness_from_latest(latest, today)
+        return HouseholdSnapshot(
+            generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            latest_measurement_time=latest,
+            freshness=freshness,
+            connector_status=EngineStatus(
+                name="collector",
+                state="ready" if status.get("status") == "ok" else "degraded",
+                message=status.get("status"),
+                freshness=freshness,
+            ),
+            bill_period=bill_period,
+            evidence=[
+                Evidence("latest_measurement_time", latest),
+                Evidence("collector_status", status.get("status")),
+            ],
+        )
+
+    def _latest_measurement_time(self) -> Optional[str]:
+        def query(conn):
+            row = conn.execute("SELECT MAX(measurement_time) FROM readings").fetchone()
+            return row[0] if row else None
+
+        return self._with_connection(query)
+
+    def _latest_collect_log_entry(self) -> tuple[Optional[str], Optional[str]]:
+        if not self.collect_log_path or not self.collect_log_path.exists():
+            return None, None
+        timestamp_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?)")
+        latest_timestamp = None
+        latest_status = None
+        with self.collect_log_path.open("r", encoding="utf-8", errors="replace") as log_file:
+            for line in log_file:
+                match = timestamp_pattern.match(line)
+                if match:
+                    latest_timestamp = match.group(1)
+                    if " ERROR " in line:
+                        latest_status = "error"
+                    elif "Collection succeeded" in line:
+                        latest_status = "ok"
+                    elif "Starting SolarEdge collection" in line:
+                        latest_status = "collecting"
+        return latest_timestamp, latest_status
+
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_duration(minutes: Optional[float]) -> str:
+    if minutes is None:
+        return "n/a"
+    total = max(int(round(minutes)), 0)
+    hours, remainder = divmod(total, 60)
+    return f"{hours}h {remainder:02d}m"
+
+
+def freshness_from_latest(latest_measurement: Optional[str], today: date) -> Freshness:
+    if not latest_measurement:
+        return Freshness(state="unknown")
+    try:
+        observed = datetime.fromisoformat(latest_measurement)
+    except ValueError:
+        return Freshness(state="unknown", observed_at=latest_measurement)
+    state = "fresh" if observed.date() >= today else "stale"
+    return Freshness(state=state, observed_at=latest_measurement)
