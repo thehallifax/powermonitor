@@ -26,6 +26,7 @@ from engine.financial_engine import FinancialEngine
 from engine.models import DecisionTimeline, EnergyScore
 from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
 from presentation.energy_score import build_energy_score
+from presentation.glance import GlanceState, build_glance_state
 from presentation.timeline import build_decision_timeline
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
@@ -239,8 +240,13 @@ def dashboard_data(
         completeness,
         plan,
     )
+    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine().project_bill(
+        billing_summary,
+        settings,
+    )
+    generated_at = datetime.now().astimezone()
     return {
-        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -257,6 +263,16 @@ def dashboard_data(
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": timeline.as_dict(),
+        "glance": build_glance_state(
+            today_summary=today_summary,
+            billing_summary=billing_summary,
+            recommendations=recommendations,
+            energy_score=energy_score,
+            health=health,
+            projected_bill=glance_projected,
+            bill_projection_basis=glance_basis,
+            now=generated_at,
+        ).as_dict(),
         "ev_source_counts": ev_source_counts(),
         "data_completeness": completeness,
         "energy_score": energy_score.as_dict(),
@@ -1640,6 +1656,7 @@ def period_controls_html(selected: Period) -> str:
 def nav_html() -> str:
     pages = (
         ("home", "Home"),
+        ("glance", "Glance"),
         ("recommendations", "Recommendations"),
         ("bills", "Bills & Tariffs"),
         ("solar", "Solar"),
@@ -1659,6 +1676,58 @@ def nav_html() -> str:
 def projected_bill(summary: Summary, settings: Settings) -> tuple[float, date, str]:
     projected, end, basis, _impact = financial_engine().project_bill(summary, settings)
     return projected, end, basis
+
+
+def glance_page_html(glance: GlanceState) -> str:
+    score = str(glance.energy_score) if glance.energy_score is not None else "N/A"
+    return f"""
+    <section class="glance-display glance-{html.escape(glance.tone)}" aria-label="Glance Mode">
+      <div class="glance-topline">
+        <div>
+          <span>Glance Mode</span>
+          <h2>Can I charge right now?</h2>
+        </div>
+        <div class="glance-freshness">
+          <span>Freshness</span>
+          <strong>{html.escape(glance.freshness)}</strong>
+        </div>
+      </div>
+      <div class="glance-status">{html.escape(glance.status)}</div>
+      <p class="glance-reason">{html.escape(glance.reason)}</p>
+      <div class="glance-grid">
+        <div class="glance-panel wide">
+          <span>Current recommendation</span>
+          <strong>{html.escape(glance.current_recommendation)}</strong>
+        </div>
+        <div class="glance-panel">
+          <span>Current tariff/window</span>
+          <strong>{html.escape(glance.current_tariff)}</strong>
+        </div>
+        <div class="glance-panel">
+          <span>Next better/cheaper window</span>
+          <strong>{html.escape(glance.next_window)}</strong>
+        </div>
+        <div class="glance-panel score">
+          <span>Energy Score</span>
+          <strong>{html.escape(score)}</strong>
+          <small>{html.escape(glance.energy_score_label)}</small>
+        </div>
+        <div class="glance-panel bill">
+          <span>Current / projected bill</span>
+          <strong>{money(glance.bill_current)} / {money(glance.bill_projected)}</strong>
+          <small>{html.escape(glance.bill_projection_basis)}</small>
+        </div>
+        <div class="glance-panel solar">
+          <span>Solar/export status</span>
+          <strong>{html.escape(glance.solar_status)}</strong>
+        </div>
+        <div class="glance-panel">
+          <span>Last updated</span>
+          <strong>{html.escape(display_timestamp(glance.last_updated))}</strong>
+        </div>
+      </div>
+    </section>
+    """
 
 
 def confidence_label(summary: Summary) -> tuple[str, str]:
@@ -2508,6 +2577,8 @@ def write_html(
     timeline: Optional[DecisionTimeline] = None,
     recommendation_lifecycle_counts: Optional[dict[str, int]] = None,
     hidden: Optional[list[Decision]] = None,
+    billing_summary: Optional[Summary] = None,
+    glance_only: bool = False,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -2519,7 +2590,81 @@ def write_html(
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
     briefing = build_daily_briefing(recommendations, local_today(), energy_score)
     timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
-    generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
+    billing_summary = billing_summary or period_summary
+    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine().project_bill(
+        billing_summary,
+        settings,
+    )
+    generated_dt = datetime.now().astimezone()
+    generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
+    glance = build_glance_state(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        recommendations=recommendations,
+        energy_score=energy_score,
+        health=health,
+        projected_bill=glance_projected,
+        bill_projection_basis=glance_basis,
+        now=generated_dt,
+    )
+    body_class = ' class="glance-only"' if glance_only else ""
+    chrome_html = "" if glance_only else f"""
+  {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
+  {authentication_alert_html(health)}
+  {period_controls_html(selected_period)}
+  {nav_html()}
+"""
+    pages_html = (
+        f"""<section id="glance" class="page glance-page">
+    {glance_page_html(glance)}
+  </section>"""
+        if glance_only
+        else f"""
+  <section id="glance" class="page glance-page">
+    {glance_page_html(glance)}
+  </section>
+  <section id="home" class="page">
+    {home_page_html(briefing)}
+  </section>
+  <section id="recommendations" class="page">
+    <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [])}
+  </section>
+  <section id="bills" class="page">
+    <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
+    {summary_html(selected_period.label, period_summary, settings)}
+    {bill_attribution_html(period_summary, plan, settings)}
+    {comparison_html(comparison) if comparison else ""}
+    {plan_comparison_html(plan, car_comparison(settings))}
+  </section>
+  <section id="solar" class="page">
+    <div class="page-heading"><h2>How well is my solar performing?</h2><p>Generation, self-consumption, exports, and lost opportunity.</p></div>
+    {solar_page_html(period_summary, recommendations)}
+  </section>
+  <section id="ev" class="page">
+    <div class="page-heading"><h2>What did my vehicle cost to charge?</h2><p>Actual session source, charging cost, tariff split, and session history.</p></div>
+    {ev_page_html(period_summary, settings)}
+  </section>
+  <section id="whatif" class="page">
+    <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
+    {whatif_page_html(scenarios, plan, recommendations)}
+  </section>
+  <section id="timeline" class="page">
+    <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
+    {timeline_html(timeline)}
+  </section>
+  <section id="analytics" class="page">
+    <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>
+    {trends_html(trends, settings)}
+    {comparison_html(comparison) if comparison else ""}
+  </section>
+  <section id="system" class="page">
+    <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
+    {system_page_html(health, settings, period_summary)}
+  </section>
+"""
+    )
+    footer_html = "" if glance_only else "<footer>PowerMonitor local report. Values are estimates based on available 15-minute readings.</footer>"
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2786,6 +2931,34 @@ def write_html(
     .decision-lines {{ display:grid; gap:12px; margin-top:14px; }}
     .decision-lines p,.action-card p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .decision-lines strong,.action-card p strong {{ display:block; margin-bottom:2px; color:var(--ink); font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
+    .glance-page {{ min-height:calc(100vh - 180px); }}
+    .glance-display {{ min-height:calc(100vh - 220px); display:grid; align-content:space-between; gap:clamp(18px,3vh,34px); padding:clamp(26px,5vw,62px); color:#f8fffc; background:#101418; border-radius:32px; box-shadow:0 28px 80px rgba(16,20,24,.22); }}
+    .glance-only {{ min-height:100vh; overflow:hidden; background:#101418; }}
+    .glance-only main {{ width:100vw; min-height:100vh; margin:0; }}
+    .glance-only .page {{ display:block; }}
+    .glance-only .glance-page {{ min-height:100vh; }}
+    .glance-only .glance-display {{ min-height:100vh; border-radius:0; box-shadow:none; }}
+    body:has(#glance:target) .hero,body:has(#glance:target) .period-controls,body:has(#glance:target) .top-nav,body:has(#glance:target) footer {{ display:none; }}
+    body:has(#glance:target) main {{ width:100vw; min-height:100vh; margin:0; }}
+    body:has(#glance:target) .glance-page {{ min-height:100vh; }}
+    body:has(#glance:target) .glance-display {{ min-height:100vh; border-radius:0; box-shadow:none; }}
+    .glance-charge {{ background:linear-gradient(135deg,#08231b,#126145 56%,#1e8d63); }}
+    .glance-wait {{ background:linear-gradient(135deg,#12171c,#1f4961 58%,#326e8a); }}
+    .glance-avoid {{ background:linear-gradient(135deg,#221312,#64291f 58%,#9a392c); }}
+    .glance-unavailable {{ background:linear-gradient(135deg,#171717,#3b3b3b 58%,#5a4c33); }}
+    .glance-topline {{ display:flex; align-items:flex-start; justify-content:space-between; gap:28px; }}
+    .glance-topline span,.glance-panel span,.glance-freshness span {{ display:block; color:rgba(255,255,255,.64); font-size:clamp(12px,1.2vw,18px); font-weight:850; letter-spacing:.11em; text-transform:uppercase; }}
+    .glance-topline h2 {{ margin:6px 0 0; color:#fff; font-size:clamp(28px,3.2vw,58px); line-height:1; letter-spacing:0; }}
+    .glance-freshness {{ min-width:220px; padding:18px 20px; text-align:right; background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.12); border-radius:20px; }}
+    .glance-freshness strong {{ display:block; margin-top:5px; font-size:clamp(22px,2vw,34px); line-height:1.05; }}
+    .glance-status {{ font-size:clamp(74px,13vw,190px); font-weight:900; line-height:.86; letter-spacing:0; text-wrap:balance; }}
+    .glance-reason {{ margin:0; color:rgba(255,255,255,.82); font-size:clamp(28px,4vw,68px); font-weight:800; line-height:1.05; letter-spacing:0; }}
+    .glance-grid {{ display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:clamp(12px,1.5vw,22px); }}
+    .glance-panel {{ min-height:clamp(116px,15vh,190px); padding:clamp(18px,2vw,30px); background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.12); border-radius:22px; backdrop-filter:blur(18px); }}
+    .glance-panel.wide {{ grid-column:span 2; }}
+    .glance-panel strong {{ display:block; margin-top:12px; color:#fff; font-size:clamp(24px,3vw,50px); line-height:1.08; letter-spacing:0; }}
+    .glance-panel small {{ display:block; margin-top:8px; color:rgba(255,255,255,.66); font-size:clamp(13px,1.2vw,18px); font-weight:750; }}
+    .glance-panel.score strong {{ font-size:clamp(54px,6vw,92px); line-height:.9; }}
     :root {{ --ink:#1d1d1f; --muted:#6e6e73; --line:#e7e7ec; --paper:#fff; --wash:#f5f5f7; --deep:#101418; --deep-2:#24312c; --shadow:0 18px 55px rgba(0,0,0,.06); }}
     body {{ background:radial-gradient(circle at top left,#ffffff 0,#f5f5f7 34%,#eef3f0 100%); }}
     main {{ width:min(1200px, calc(100% - 48px)); margin:28px auto 72px; }}
@@ -2797,6 +2970,7 @@ def write_html(
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
+    body:has(#glance:target) .top-nav a[href="#glance"],
     body:has(#recommendations:target) .top-nav a[href="#recommendations"],
     body:has(#bills:target) .top-nav a[href="#bills"],
     body:has(#solar:target) .top-nav a[href="#solar"],
@@ -2842,6 +3016,13 @@ def write_html(
       .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}
       .chart-card {{ padding:16px; }} .chart-heading {{ align-items:flex-start; flex-direction:column; gap:2px; }}
       .trend-card {{ padding:16px; }} .trend-row {{ grid-template-columns:48px 1fr 68px; gap:7px; }}
+      .glance-display {{ gap:18px; padding:22px; }}
+      .glance-topline {{ flex-direction:column; }}
+      .glance-freshness {{ width:100%; text-align:left; }}
+      .glance-grid {{ grid-template-columns:1fr; }}
+      .glance-panel.wide {{ grid-column:auto; }}
+      .glance-status {{ font-size:clamp(58px,18vw,90px); line-height:.9; }}
+      .glance-reason {{ font-size:clamp(24px,8vw,38px); }}
     }}
     @media print {{
       @page {{ size:A4; margin:10mm; }} * {{ print-color-adjust:exact; -webkit-print-color-adjust:exact; }}
@@ -2862,51 +3043,10 @@ def write_html(
     }}
   </style>
 </head>
-<body><main>
-  {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
-  {authentication_alert_html(health)}
-  {period_controls_html(selected_period)}
-  {nav_html()}
-  <section id="home" class="page">
-    {home_page_html(briefing)}
-  </section>
-  <section id="recommendations" class="page">
-    <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [])}
-  </section>
-  <section id="bills" class="page">
-    <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
-    {summary_html(selected_period.label, period_summary, settings)}
-    {bill_attribution_html(period_summary, plan, settings)}
-    {comparison_html(comparison) if comparison else ""}
-    {plan_comparison_html(plan, car_comparison(settings))}
-  </section>
-  <section id="solar" class="page">
-    <div class="page-heading"><h2>How well is my solar performing?</h2><p>Generation, self-consumption, exports, and lost opportunity.</p></div>
-    {solar_page_html(period_summary, recommendations)}
-  </section>
-  <section id="ev" class="page">
-    <div class="page-heading"><h2>What did my vehicle cost to charge?</h2><p>Actual session source, charging cost, tariff split, and session history.</p></div>
-    {ev_page_html(period_summary, settings)}
-  </section>
-  <section id="whatif" class="page">
-    <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
-    {whatif_page_html(scenarios, plan, recommendations)}
-  </section>
-  <section id="timeline" class="page">
-    <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
-    {timeline_html(timeline)}
-  </section>
-  <section id="analytics" class="page">
-    <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>
-    {trends_html(trends, settings)}
-    {comparison_html(comparison) if comparison else ""}
-  </section>
-  <section id="system" class="page">
-    <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary)}
-  </section>
-  <footer>PowerMonitor local report. Values are estimates based on available 15-minute readings.</footer>
+<body{body_class}><main>
+  {chrome_html}
+  {pages_html}
+  {footer_html}
 </main></body></html>
 """
     if output_path is not None:
@@ -2919,10 +3059,12 @@ def build_live_html(
     period_kind: str = "current_billing_period",
     start: Optional[str] = None,
     end: Optional[str] = None,
+    glance_only: bool = False,
 ) -> str:
     settings = load_settings()
     current_day = local_today()
     selected = resolve_period(period_kind, settings, current_day, start, end)
+    billing = resolve_period("current_billing_period", settings, current_day)
     compared = (
         resolve_period("previous_billing_period", settings, current_day)
         if selected.kind == "current_billing_period"
@@ -2932,6 +3074,11 @@ def build_live_html(
         validate_database(conn)
         today_summary = load_summary(conn, current_day, current_day, settings)
         selected_summary = load_summary(conn, selected.start, selected.end, settings)
+        billing_summary = (
+            selected_summary
+            if selected.start == billing.start and selected.end == billing.end
+            else load_summary(conn, billing.start, billing.end, settings)
+        )
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
@@ -2955,6 +3102,8 @@ def build_live_html(
         timeline=timeline,
         recommendation_lifecycle_counts=recommendation_lifecycle_counts,
         hidden=hidden,
+        billing_summary=billing_summary,
+        glance_only=glance_only,
     )
 
 

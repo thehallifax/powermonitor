@@ -47,6 +47,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 self.serve_dashboard(params)
+            elif path == "/glance":
+                self.serve_glance(params)
             elif path == "/reports/index.html":
                 self.serve_static_report()
             elif path == "/api/summary":
@@ -152,6 +154,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             period,
             self.param(params, "start"),
             self.param(params, "end"),
+        ).encode("utf-8")
+        self.send_html(content)
+
+    def serve_glance(self, params: dict) -> None:
+        content = report.build_live_html(
+            "current_billing_period",
+            self.param(params, "start"),
+            self.param(params, "end"),
+            glance_only=True,
         ).encode("utf-8")
         self.send_html(content)
 

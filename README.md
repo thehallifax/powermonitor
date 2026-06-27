@@ -73,7 +73,8 @@ local dashboard. The HTML is self-contained, works offline, and includes print
 styles for saving a clean PDF from the browser.
 
 The dashboard is split into local hash-routed pages with no external assets:
-`#home`, `#bills`, `#solar`, `#ev`, `#whatif`, `#analytics`, and `#system`.
+`#home`, `#glance`, `#recommendations`, `#bills`, `#solar`, `#ev`, `#whatif`,
+`#timeline`, `#analytics`, and `#system`.
 The System page shows collector health, EV source counts grouped by
 `ev_sessions.source`, and a privacy-safe configuration summary. Print/PDF mode
 expands all pages so the complete report can still be saved.
@@ -86,9 +87,10 @@ open http://localhost:8765
 ```
 
 The server binds to `127.0.0.1` only. It serves the generated printable
-dashboard at `/`, live summary JSON at `/api/summary`, and health information
-at `/api/health`. The dashboard reloads every five minutes and remains fully
-offline with no CDN or internet assets.
+dashboard at `/`, a kiosk-friendly Glance Mode at `/glance`, live summary JSON
+at `/api/summary`, and health information at `/api/health`. The dashboard
+reloads every five minutes and remains fully offline with no CDN or internet
+assets.
 
 The live dashboard period selector supports Today, Yesterday, Last 7 days,
 This month, Current billing period, and custom dates. The API also supports

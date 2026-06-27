@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.9.0 - Glance Mode
+
+- Added Glance Mode for garage, study, kitchen, and kiosk/tablet displays.
+- Added `#glance` to the generated static dashboard and `/glance` to the local
+  web app.
+- Rendered a one-screen wall-display view with large `CHARGE NOW`, `WAIT`,
+  `AVOID`, and `DATA UNAVAILABLE` states.
+- Reused existing Decision Engine, Energy Score, Financial Engine, tariff,
+  solar, bill, and freshness outputs with only presentation-layer state
+  mapping.
+- Added tests for Glance status mapping and current tariff-window detection.
+
 ## Sprint 0.8.3 - Recommendation Controls
 
 - Added Recommendation Centre controls to dismiss, snooze, and restore
