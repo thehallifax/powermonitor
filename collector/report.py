@@ -1616,6 +1616,7 @@ def period_controls_html(selected: Period) -> str:
 def nav_html() -> str:
     pages = (
         ("home", "Home"),
+        ("recommendations", "Recommendations"),
         ("bills", "Bills & Tariffs"),
         ("solar", "Solar"),
         ("ev", "EV Charging"),
@@ -1690,6 +1691,106 @@ def recommendation_impact(decision: Decision) -> str:
             except (TypeError, ValueError):
                 return str(decision.evidence[key])
     return "Not quantified"
+
+
+def recommendation_monthly_impact(decision: Decision) -> str:
+    value = decision.evidence.get("estimated_monthly_impact")
+    if value is None:
+        return "Not quantified"
+    try:
+        return money(float(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def recommendation_priority_score(decision: Decision) -> int:
+    try:
+        return int(round(float(decision.evidence.get("priority_score", 0))))
+    except (TypeError, ValueError):
+        return {"High": 67, "Medium": 34, "Low": 0}.get(decision.priority, 0)
+
+
+def recommendation_category(decision: Decision) -> str:
+    return str(decision.evidence.get("recommendation_category") or decision.category).replace("_", " ")
+
+
+def recommendation_difficulty(decision: Decision) -> str:
+    return str(decision.evidence.get("difficulty") or "Medium").title()
+
+
+def recommendation_evidence_html(decision: Decision) -> str:
+    hidden_keys = {
+        "priority_score",
+        "recommendation_category",
+        "estimated_monthly_impact",
+        "difficulty",
+        "confidence_reason",
+    }
+    rows = []
+    for key, value in decision.evidence.items():
+        if key in hidden_keys or value is None:
+            continue
+        label = key.replace("_", " ").capitalize()
+        rows.append(
+            f"<li><strong>{html.escape(label)}</strong><span>{html.escape(str(value))}</span></li>"
+        )
+    if not rows:
+        return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
+    return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
+
+
+def recommendation_centre_html(recommendations: list[Decision]) -> str:
+    ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
+    if not ranked:
+        return """
+        <section class="report-section compact-section">
+          <div class="section-title"><div><span class="eyebrow">Recommendation centre</span><h2>No active opportunities</h2></div></div>
+          <p class="notice">No recommendations are active for this period.</p>
+        </section>
+        """
+    cards = []
+    for decision in ranked:
+        why = (
+            decision.explanation.why_this_matters
+            if decision.explanation
+            else "This recommendation is based on available Recommendation Engine evidence."
+        )
+        cards.append(
+            f"""
+            <article class="recommendation-card recommendation-centre-card {html.escape(decision.severity)}">
+              <div class="recommendation-centre-heading">
+                <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
+                <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
+              </div>
+              <h3>{html.escape(decision.title)}</h3>
+              <div class="recommendation-centre-meta">
+                <span>{html.escape(recommendation_category(decision).title())}</span>
+                <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
+              </div>
+              <div class="recommendation-metrics">
+                <span><small>Period impact</small><strong>{html.escape(recommendation_impact(decision))}</strong></span>
+                <span><small>Monthly impact</small><strong>{html.escape(recommendation_monthly_impact(decision))}</strong></span>
+              </div>
+              <div class="decision-lines">
+                <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
+                <p><strong>Why?</strong>{html.escape(why)}</p>
+              </div>
+              <div class="recommendation-centre-evidence">
+                <strong>Supporting evidence</strong>
+                {recommendation_evidence_html(decision)}
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="report-section recommendation-centre-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Recommendation centre</span><h2>Ranked household opportunities</h2></div>
+        <p>{len(ranked)} active</p>
+      </div>
+      <div class="recommendation-grid">{''.join(cards)}</div>
+    </section>
+    """
 
 
 def top_actions_html(recommendations: list[Decision]) -> str:
@@ -2474,6 +2575,17 @@ def write_html(
     .recommendation-card.red {{ border-color:#f0cec8; background:#fff5f3; }} .recommendation-card.red .recommendation-level,.recommendation-card.red .recommendation-action {{ color:#a74334; background:#ffe3de; }}
     .recommendation-metrics {{ display:grid; grid-template-columns:repeat(2,1fr); gap:7px; margin-top:13px; }} .recommendation-metrics span {{ padding:8px; background:rgba(255,255,255,.65); border:1px solid rgba(0,0,0,.05); border-radius:9px; }}
     .recommendation-metrics small,.recommendation-metrics strong {{ display:block; }} .recommendation-metrics small {{ color:var(--muted); font-size:8px; text-transform:capitalize; }} .recommendation-metrics strong {{ margin-top:2px; font-size:11px; }}
+    .recommendation-centre-heading,.recommendation-centre-meta {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }}
+    .recommendation-centre-heading div {{ text-align:right; }}
+    .recommendation-centre-heading small {{ display:block; color:var(--muted); font-size:8px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .recommendation-centre-heading strong {{ display:block; font-size:28px; line-height:1; letter-spacing:-.05em; }}
+    .recommendation-centre-meta {{ justify-content:flex-start; flex-wrap:wrap; margin-top:8px; }}
+    .recommendation-centre-meta span {{ padding:4px 8px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .recommendation-centre-evidence {{ margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,.08); }}
+    .recommendation-centre-evidence > strong {{ display:block; margin-bottom:8px; font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
+    .recommendation-evidence {{ display:grid; gap:6px; margin:0; padding:0; list-style:none; }}
+    .recommendation-evidence li {{ display:grid; grid-template-columns:145px 1fr; gap:8px; color:var(--muted); font-size:11px; }}
+    .recommendation-evidence strong {{ color:var(--ink); font-size:10px; text-transform:capitalize; }}
     .action-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
     .action-card {{ padding:17px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
     .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
@@ -2574,6 +2686,7 @@ def write_html(
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
+    body:has(#recommendations:target) .top-nav a[href="#recommendations"],
     body:has(#bills:target) .top-nav a[href="#bills"],
     body:has(#solar:target) .top-nav a[href="#solar"],
     body:has(#ev:target) .top-nav a[href="#ev"],
@@ -2645,6 +2758,10 @@ def write_html(
   {nav_html()}
   <section id="home" class="page">
     {home_page_html(briefing)}
+  </section>
+  <section id="recommendations" class="page">
+    <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
+    {recommendation_centre_html(recommendations)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>

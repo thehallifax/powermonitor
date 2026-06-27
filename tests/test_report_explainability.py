@@ -13,13 +13,24 @@ import report
 from engine.models import Decision, DecisionExplanation, FinancialImpact
 
 
-def explained_decision(decision_id: str = "peak_cost_reduction") -> Decision:
+def explained_decision(
+    decision_id: str = "peak_cost_reduction",
+    title: str = "Reduce Peak-period imports",
+    priority_score: int = 72,
+    category: str = "tariff",
+) -> Decision:
     return Decision(
         id=decision_id,
-        title="Reduce Peak-period imports",
+        title=title,
         summary="Peak usage is expensive.",
         finding="Peak usage accounts for 31.4% of import cost.",
-        evidence={"peak_cost": 13.64},
+        evidence={
+            "peak_cost": 13.64,
+            "priority_score": priority_score,
+            "recommendation_category": category,
+            "estimated_monthly_impact": 5.73,
+            "difficulty": "Easy",
+        },
         financial_impact=FinancialImpact(billing_period=4.20),
         recommendation="Move flexible load into the super off-peak window.",
         confidence="Medium",
@@ -57,6 +68,36 @@ class ReportExplainabilityTests(unittest.TestCase):
         self.assertIn("<summary>Why?</summary>", markup)
         self.assertIn("Peak cost: 13.64", markup)
         self.assertIn("SolarEdge interval data, Tariff settings", markup)
+
+    def test_recommendation_centre_sorts_by_priority_and_renders_engine_fields(self):
+        low = explained_decision(
+            "solar_self_consumption",
+            title="Use more solar at home",
+            priority_score=42,
+            category="solar",
+        )
+        high = explained_decision(
+            "peak_cost_reduction",
+            title="Reduce Peak-period imports",
+            priority_score=88,
+            category="tariff",
+        )
+
+        markup = report.recommendation_centre_html([low, high])
+
+        self.assertLess(
+            markup.index("Reduce Peak-period imports"),
+            markup.index("Use more solar at home"),
+        )
+        self.assertIn("Recommendation centre", markup)
+        self.assertIn("Priority score", markup)
+        self.assertIn("<strong>88</strong>", markup)
+        self.assertIn("Tariff", markup)
+        self.assertIn("Easy difficulty", markup)
+        self.assertIn("$5.73", markup)
+        self.assertIn("Supporting evidence", markup)
+        self.assertIn("Recommended action", markup)
+        self.assertIn("Why?", markup)
 
     def test_serialized_decision_includes_explanation_for_api_outputs(self):
         payload = explained_decision().as_dict()

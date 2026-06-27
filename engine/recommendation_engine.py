@@ -636,12 +636,19 @@ def recommendation_to_decision(recommendation: Recommendation, expires_at: Optio
         billing_period=recommendation.estimated_financial_impact.period,
         basis=recommendation.estimated_financial_impact.basis,
     )
+    evidence = {
+        **dict(recommendation.supporting_evidence),
+        "priority_score": recommendation.priority_score,
+        "recommendation_category": recommendation.category,
+        "estimated_monthly_impact": recommendation.estimated_financial_impact.monthly,
+        "difficulty": recommendation.difficulty,
+    }
     decision = Decision(
         id=recommendation.stable_id,
         title=recommendation.title,
         summary=recommendation.explanation,
         finding=recommendation.explanation,
-        evidence=dict(recommendation.supporting_evidence),
+        evidence=evidence,
         financial_impact=impact,
         recommendation=recommendation.recommended_action,
         confidence=recommendation.confidence,

@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.8.1 - Recommendation Centre
+
+- Added a Recommendations dashboard page that ranks all active household
+  opportunities by Recommendation Engine priority score.
+- Rendered category, score, financial impact, confidence, difficulty,
+  supporting evidence, recommended action, and Why? explanation for each
+  recommendation.
+- Kept recommendation generation centralized in the shared Recommendation
+  Engine and reused existing Decision adapter output for presentation.
+- Added regression coverage for Recommendation Centre sorting and rendered
+  fields.
+
 ## Sprint 0.7.5 - Platform Stabilisation
 
 - Added API-safe serialization for shared engine and presentation models before
