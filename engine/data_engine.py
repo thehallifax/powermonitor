@@ -9,12 +9,13 @@ recommendations, render HTML, or depend on dashboard/report concepts.
 import json
 import re
 import sqlite3
+import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .models import EngineStatus, Evidence, Freshness
+from .models import DecisionTimeline, EngineStatus, Evidence, Freshness, TimelineEntry
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 EV_BUCKET_LABELS = {
@@ -183,6 +184,28 @@ class DataEngine:
                 plan_name TEXT,
                 notes TEXT
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_entries (
+                event_key TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                financial_impact TEXT,
+                confidence TEXT NOT NULL,
+                evidence_sources_json TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_timeline_entries_timestamp
+            ON timeline_entries(timestamp)
             """
         )
         conn.commit()
@@ -450,6 +473,114 @@ class DataEngine:
             ]
 
         return self._with_connection(query)
+
+    def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
+        def upsert(conn):
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            for entry in entries:
+                conn.execute(
+                    """
+                    INSERT INTO timeline_entries (
+                        event_key,
+                        timestamp,
+                        title,
+                        summary,
+                        financial_impact,
+                        confidence,
+                        evidence_sources_json,
+                        event_type,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_key) DO UPDATE SET
+                        timestamp = excluded.timestamp,
+                        title = excluded.title,
+                        summary = excluded.summary,
+                        financial_impact = excluded.financial_impact,
+                        confidence = excluded.confidence,
+                        evidence_sources_json = excluded.evidence_sources_json,
+                        event_type = excluded.event_type,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        self._timeline_event_key(entry),
+                        entry.timestamp,
+                        entry.title,
+                        entry.summary,
+                        entry.financial_impact,
+                        entry.confidence,
+                        json.dumps(entry.evidence_sources, sort_keys=True),
+                        entry.event_type,
+                        now,
+                        now,
+                    ),
+                )
+            conn.commit()
+            return self.get_timeline_entries()
+
+        return self._with_connection(upsert)
+
+    def get_timeline_entries(
+        self,
+        start: Optional[date] = None,
+        end: Optional[date] = None,
+        limit: int = 100,
+    ) -> DecisionTimeline:
+        start_text = start.isoformat() if start else None
+        end_text = end.isoformat() if end else None
+
+        def query(conn):
+            conditions = []
+            params: list[Any] = []
+            if start_text:
+                conditions.append("timestamp >= ?")
+                params.append(start_text)
+            if end_text:
+                conditions.append("timestamp <= ?")
+                params.append(end_text)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            rows = conn.execute(
+                f"""
+                SELECT
+                    timestamp,
+                    title,
+                    summary,
+                    financial_impact,
+                    confidence,
+                    evidence_sources_json,
+                    event_type
+                FROM timeline_entries
+                {where}
+                ORDER BY timestamp, title
+                LIMIT ?
+                """,
+                (*params, int(limit)),
+            ).fetchall()
+            entries = []
+            for row in rows:
+                try:
+                    evidence_sources = json.loads(row[5]) if row[5] else []
+                except json.JSONDecodeError:
+                    evidence_sources = []
+                entries.append(
+                    TimelineEntry(
+                        timestamp=row[0],
+                        title=row[1],
+                        summary=row[2],
+                        financial_impact=row[3],
+                        confidence=row[4],
+                        evidence_sources=list(evidence_sources),
+                        event_type=row[6],
+                    )
+                )
+            return DecisionTimeline(entries=entries)
+
+        return self._with_connection(query)
+
+    @staticmethod
+    def _timeline_event_key(entry: TimelineEntry) -> str:
+        raw = "|".join((entry.event_type, entry.timestamp, entry.title))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get_data_completeness(
         self,

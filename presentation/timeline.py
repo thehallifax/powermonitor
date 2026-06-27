@@ -35,6 +35,7 @@ def _billing_period_entry(period_summary: Any) -> TimelineEntry:
         financial_impact=None,
         confidence="High",
         evidence_sources=["Billing period settings"],
+        event_type="billing_period",
     )
 
 
@@ -56,6 +57,7 @@ def _bill_tracking_entry(comparison: Optional[dict[str, Any]]) -> Optional[Timel
         financial_impact=f"{float(delta):+,.2f} AUD vs comparison period",
         confidence="Medium",
         evidence_sources=["Period comparison", "FinancialEngine report output"],
+        event_type="bill_tracking",
     )
 
 
@@ -67,6 +69,7 @@ def _decision_entry(period_summary: Any, decision: Decision) -> TimelineEntry:
         financial_impact=_decision_financial_impact(decision),
         confidence=decision.confidence,
         evidence_sources=list(decision.data_sources_used),
+        event_type=_timeline_event_type(decision),
     )
 
 
@@ -80,6 +83,18 @@ def _timeline_title(decision: Decision) -> str:
         "positive_reinforcement": "Excellent utilisation signal",
     }
     return titles.get(decision.id, decision.title)
+
+
+def _timeline_event_type(decision: Decision) -> str:
+    event_types = {
+        "ev_session_low_cost_window": "ev_cheapest_tariff",
+        "ev_charging_optimisation": "ev_charging_reviewed",
+        "peak_cost_reduction": "high_peak_usage",
+        "high_cost_alert": "high_bill_projection",
+        "solar_self_consumption": "solar_utilisation",
+        "positive_reinforcement": "positive_outcome",
+    }
+    return event_types.get(decision.id, f"decision_{decision.action_type}")
 
 
 def _decision_financial_impact(decision: Decision) -> Optional[str]:

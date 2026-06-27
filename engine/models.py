@@ -205,6 +205,7 @@ class TimelineEntry:
     financial_impact: Optional[str]
     confidence: str
     evidence_sources: list[str]
+    event_type: str
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

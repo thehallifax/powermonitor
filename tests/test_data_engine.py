@@ -5,6 +5,7 @@ from datetime import date
 
 from engine.data_engine import DataEngine
 from engine.decision_engine import generate_decisions_from_data_engine
+from engine.models import TimelineEntry
 
 
 @dataclass
@@ -149,6 +150,64 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertEqual(counts[0]["source"], "ocular_export")
         self.assertEqual(counts[0]["sessions"], 1)
+
+    def test_timeline_entries_are_persisted_idempotently(self):
+        entry = TimelineEntry(
+            timestamp="2026-06-27",
+            title="High peak usage",
+            summary="Peak usage was high.",
+            financial_impact="$4.20 this billing period",
+            confidence="Medium",
+            evidence_sources=["SolarEdge interval data", "Tariff settings"],
+            event_type="high_peak_usage",
+        )
+
+        first = self.engine.persist_timeline_entries([entry])
+        updated = TimelineEntry(
+            timestamp=entry.timestamp,
+            title=entry.title,
+            summary="Peak usage was still high.",
+            financial_impact=entry.financial_impact,
+            confidence=entry.confidence,
+            evidence_sources=entry.evidence_sources,
+            event_type=entry.event_type,
+        )
+        second = self.engine.persist_timeline_entries([updated])
+
+        self.assertEqual(len(first.entries), 1)
+        self.assertEqual(len(second.entries), 1)
+        self.assertEqual(second.entries[0].summary, "Peak usage was still high.")
+        self.assertEqual(second.entries[0].event_type, "high_peak_usage")
+
+    def test_timeline_entries_can_be_queried_by_period(self):
+        entries = [
+            TimelineEntry(
+                timestamp="2026-06-01",
+                title="Old event",
+                summary="Outside selected period.",
+                financial_impact=None,
+                confidence="High",
+                evidence_sources=["test"],
+                event_type="billing_period",
+            ),
+            TimelineEntry(
+                timestamp="2026-06-27",
+                title="Current event",
+                summary="Inside selected period.",
+                financial_impact=None,
+                confidence="High",
+                evidence_sources=["test"],
+                event_type="bill_tracking",
+            ),
+        ]
+
+        self.engine.persist_timeline_entries(entries)
+        timeline = self.engine.get_timeline_entries(
+            date(2026, 6, 20),
+            date(2026, 6, 30),
+        )
+
+        self.assertEqual([entry.title for entry in timeline.entries], ["Current event"])
 
     def test_decision_engine_consumes_data_engine_for_baseload(self):
         settings = Settings()

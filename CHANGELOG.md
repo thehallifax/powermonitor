@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.7.1 - Persistent Timeline
+
+- Added SQLite-backed timeline storage owned by `DataEngine`.
+- Added idempotent timeline entry upserts keyed by stable event identity to
+  avoid duplicate events across report runs.
+- Added historical timeline querying by date range.
+- Preserved timeline timestamp, title, summary, financial impact, confidence,
+  evidence sources, and event type in storage and serialized output.
+- Updated report/API timeline rendering to consume persisted timeline entries
+  after candidate events are derived from existing outputs.
+- Added persistence tests for idempotency and period querying.
+
 ## Sprint 0.7.0 - Decision Timeline
 
 - Added `DecisionTimeline` and `TimelineEntry` shared models for chronological

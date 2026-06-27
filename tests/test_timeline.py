@@ -85,10 +85,12 @@ class DecisionTimelineTests(unittest.TestCase):
                 "financial_impact",
                 "confidence",
                 "evidence_sources",
+                "event_type",
             },
         )
         self.assertEqual(decision_entry["financial_impact"], "$4.20 this billing period")
         self.assertEqual(decision_entry["evidence_sources"], ["SolarEdge interval data", "Tariff settings"])
+        self.assertEqual(decision_entry["event_type"], "solar_utilisation")
 
 
 if __name__ == "__main__":

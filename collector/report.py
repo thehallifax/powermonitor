@@ -224,8 +224,9 @@ def dashboard_data(
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, period_summary, settings)
+        timeline_candidates = build_decision_timeline(period_summary, recommendations)
+        timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
     scenarios = scenario_analysis(period_summary, settings)
-    timeline = build_decision_timeline(period_summary, recommendations)
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -1747,6 +1748,7 @@ def timeline_html(timeline: DecisionTimeline) -> str:
                 <p>{html.escape(entry.summary)}</p>
                 <div class="timeline-meta">
                   {impact}
+                  <small>Type: {html.escape(entry.event_type)}</small>
                   <small>Sources: {html.escape(sources)}</small>
                 </div>
               </div>
@@ -2262,6 +2264,7 @@ def write_html(
     selected_period: Optional[Period] = None,
     comparison: Optional[dict] = None,
     output_path: Optional[Path] = REPORT_PATH,
+    timeline: Optional[DecisionTimeline] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -2270,7 +2273,7 @@ def write_html(
     plan = plan_comparison(period_summary, settings)
     scenarios = scenario_analysis(period_summary, settings)
     briefing = build_daily_briefing(recommendations, local_today())
-    timeline = build_decision_timeline(period_summary, recommendations, comparison)
+    timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
     generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
     document = f"""<!doctype html>
 <html lang="en">
@@ -2657,6 +2660,9 @@ def build_live_html(
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, selected_summary, settings)
+        comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
+        timeline_candidates = build_decision_timeline(selected_summary, recommendations, comparison)
+        timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
     return write_html(
         today_summary,
         selected_summary,
@@ -2665,8 +2671,9 @@ def build_live_html(
         health,
         recommendations,
         selected,
-        compare_summaries(selected, selected_summary, compared, compared_summary),
+        comparison,
         output_path=None,
+        timeline=timeline,
     )
 
 
@@ -2693,6 +2700,8 @@ def main() -> None:
             previous,
             previous_summary,
         )
+        timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
+        timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
 
     health["last_successful_report_generation"] = datetime.now().astimezone().isoformat(
         timespec="seconds"
@@ -2710,6 +2719,7 @@ def main() -> None:
         recommendations,
         Period("current_billing_period", "Current billing period", period_start, period_end),
         comparison,
+        timeline=timeline,
     )
     logging.info(
         "Generated report for %s and billing period %s to %s at %s",
