@@ -81,7 +81,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(insight.evidence[0].name, "peak_kwh")
         self.assertEqual(forecast.confidence.level, "High")
 
-    def test_placeholder_engines_import_and_return_empty_results(self):
+    def test_engines_import_and_report_status(self):
         self.assertEqual(FinancialEngine().evaluate({}), [])
         self.assertEqual(BehaviourEngine().evaluate({}), [])
         self.assertEqual(PredictionEngine().forecast({}), [])

@@ -22,6 +22,7 @@ from engine.decision_engine import (
     generate_decisions_from_data_engine,
     generate_ev_session_decisions,
 )
+from engine.financial_engine import FinancialEngine
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
@@ -46,6 +47,12 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
         report_path=REPORT_PATH,
         health_loader=public_health,
     )
+
+
+def financial_engine() -> FinancialEngine:
+    return FinancialEngine()
+
+
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
 EV_BUCKET_LABELS = {
     "super_off_peak": "9am-3pm super off-peak / EV solar window",
@@ -545,10 +552,11 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         actual_ev_charging = None
         actual_ev_cost = None
     supply_days = (end - start).days + 1
+    finances = financial_engine()
     supply_cost = supply_days * settings.supply_charge_per_day
-    export_credit = float(exported) * settings.export_credit_rate
+    export_credit = finances.calculate_export_credit(float(exported), settings.export_credit_rate)
     total_cost = float(import_cost) + supply_cost
-    net_cost = total_cost - export_credit
+    net_cost = finances.calculate_net_bill(float(import_cost), supply_cost, export_credit)
     self_consumption = used / generated * 100 if generated else 0.0
     export_pct = exported / generated * 100 if generated else 0.0
     peak_cost = buckets["peak"]["cost"]
@@ -580,7 +588,7 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         ev_charging_cost=(
             actual_ev_cost
             if actual_ev_cost is not None
-            else float(estimated_ev_charging) * settings.import_rates["overnight"]
+            else finances.cost_of_ev_session(float(estimated_ev_charging), settings.import_rates["overnight"])
         ),
         ev_charging_source=(
             actual_source if actual_ev_charging is not None else "estimated"
@@ -599,10 +607,11 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
 
 def tariff_scenario(summary: Summary, settings: Settings) -> dict:
     rates = settings.comparison_plan_rates
-    comparison_import = summary.grid_import_kwh * rates["flat_import_rate"]
+    finances = financial_engine()
+    comparison_import = finances.calculate_import_cost(summary.grid_import_kwh, rates["flat_import_rate"])
     comparison_supply = summary.supply_days * rates["supply_charge_per_day"]
-    comparison_credit = summary.solar_exported_kwh * rates["export_credit_rate"]
-    comparison_net = comparison_import + comparison_supply - comparison_credit
+    comparison_credit = finances.calculate_export_credit(summary.solar_exported_kwh, rates["export_credit_rate"])
+    comparison_net = finances.calculate_net_bill(comparison_import, comparison_supply, comparison_credit)
     return {
         "current_plan": settings.current_plan,
         "comparison_plan": settings.comparison_plan,
@@ -614,70 +623,30 @@ def tariff_scenario(summary: Summary, settings: Settings) -> dict:
 
 
 def ev_cost_under_rate(summary: Summary, rate: float) -> float:
-    return summary.ev_charging_kwh * rate
+    return financial_engine().cost_of_ev_session(summary.ev_charging_kwh, rate)
 
 
 def weighted_average_import_rate(summary: Summary) -> float:
-    return summary.import_cost / summary.grid_import_kwh if summary.grid_import_kwh else 0.0
+    return financial_engine().weighted_average_import_rate(summary)
 
 
 def plan_comparison(summary: Summary, settings: Settings) -> dict:
-    rates = settings.comparison_plan_rates
-    flat_rate = rates["flat_import_rate"]
-    comparison_supply_rate = rates.get("supply_charge_per_day", settings.supply_charge_per_day)
-    comparison_export_rate = rates.get("export_credit_rate", settings.export_credit_rate)
-
-    comparison_import_cost = summary.grid_import_kwh * flat_rate
-    comparison_supply_charge = summary.supply_days * comparison_supply_rate
-    comparison_export_credit = summary.solar_exported_kwh * comparison_export_rate
-    comparison_net_bill = comparison_import_cost + comparison_supply_charge - comparison_export_credit
-
-    current_ev_cost = summary.ev_charging_cost
-    comparison_ev_cost = ev_cost_under_rate(summary, flat_rate)
-    current_household_cost = max(summary.import_cost - current_ev_cost, 0.0)
-    comparison_household_kwh = max(summary.grid_import_kwh - summary.ev_charging_kwh, 0.0)
-    comparison_household_cost = comparison_household_kwh * flat_rate
-    export_value_difference = summary.export_credit - comparison_export_credit
-    savings = comparison_net_bill - summary.net_cost
-    monthly_savings = savings / summary.supply_days * 30 if summary.supply_days else savings
-    recommendation = (
-        f"The EV Add On is currently saving approximately {money(monthly_savings)} per month."
-        if savings > 0
-        else "Based on current charging behaviour, the Flat plan would currently be cheaper."
-        if savings < 0
-        else "The EV Add On and Flat plan are currently about even for this period."
+    return financial_engine().compare_tariff_plans(
+        summary,
+        settings.current_plan,
+        settings.comparison_plan,
+        {
+            "flat_import_rate": settings.comparison_plan_rates["flat_import_rate"],
+            "supply_charge_per_day": settings.comparison_plan_rates.get(
+                "supply_charge_per_day",
+                settings.supply_charge_per_day,
+            ),
+            "export_credit_rate": settings.comparison_plan_rates.get(
+                "export_credit_rate",
+                settings.export_credit_rate,
+            ),
+        },
     )
-
-    return {
-        "current_plan": {
-            "name": settings.current_plan,
-            "display_name": "Synergy EV Add On",
-            "grid_import_cost": summary.import_cost,
-            "supply_charge": summary.supply_cost,
-            "export_credit": summary.export_credit,
-            "net_bill": summary.net_cost,
-            "ev_charging_cost": current_ev_cost,
-            "household_usage_cost": current_household_cost,
-        },
-        "comparison_plan": {
-            "name": settings.comparison_plan,
-            "display_name": "Previous Flat/Home Plan",
-            "flat_import_rate": flat_rate,
-            "grid_import_cost": comparison_import_cost,
-            "supply_charge": comparison_supply_charge,
-            "export_credit": comparison_export_credit,
-            "net_bill": comparison_net_bill,
-            "ev_charging_cost": comparison_ev_cost,
-            "household_usage_cost": comparison_household_cost,
-        },
-        "difference": summary.net_cost - comparison_net_bill,
-        "savings": savings,
-        "monthly_savings_estimate": monthly_savings,
-        "ev_charging_cost_difference": current_ev_cost - comparison_ev_cost,
-        "household_usage_cost_difference": current_household_cost - comparison_household_cost,
-        "solar_export_value_difference": export_value_difference,
-        "recommendation": recommendation,
-    }
 
 
 def scenario_confidence(summary: Summary, needs_actual_ev: bool = False) -> str:
@@ -1654,19 +1623,8 @@ def nav_html() -> str:
 
 
 def projected_bill(summary: Summary, settings: Settings) -> tuple[float, date, str]:
-    if settings.current_billing_period_start and settings.current_billing_period_end:
-        end = settings.current_billing_period_end
-        days = (end - settings.current_billing_period_start).days + 1
-        basis = "configured billing end"
-    elif settings.current_billing_period_start and settings.previous_billing_period_start and settings.previous_billing_period_end:
-        days = (settings.previous_billing_period_end - settings.previous_billing_period_start).days + 1
-        end = settings.current_billing_period_start + timedelta(days=days - 1)
-        basis = "previous period length"
-    else:
-        days = summary.supply_days
-        end = summary.end
-        basis = "selected period"
-    return summary.average_daily_net_cost * max(days, 1), end, basis
+    projected, end, basis, _impact = financial_engine().project_bill(summary, settings)
+    return projected, end, basis
 
 
 def confidence_label(summary: Summary) -> tuple[str, str]:

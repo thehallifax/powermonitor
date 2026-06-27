@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.6.3 - Financial Impact Engine
+
+- Added `engine/financial_engine.py` as the owner for bill projection, import
+  cost, export credit, net bill, EV session cost, tariff comparison, and
+  monthly/annual projection arithmetic.
+- Migrated representative financial logic from `collector/report.py` into the
+  Financial Engine while preserving existing dashboard and report values.
+- Updated the Decision Engine to consume `FinancialImpact` objects produced by
+  the Financial Engine for projected bills and representative savings cases.
+- Added basic unit tests for Financial Engine calculations and tariff
+  comparison output shape.
+
 ## Sprint 0.6.2 - Data Engine
 
 - Added `engine/data_engine.py` as the platform owner for SQLite-backed

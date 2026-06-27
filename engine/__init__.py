@@ -1,5 +1,6 @@
 from .decision_engine import generate_decisions, generate_ev_session_decisions
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
+from .financial_engine import FinancialEngine
 from .models import (
     Confidence,
     Decision,
@@ -20,6 +21,7 @@ __all__ = [
     "EngineStatus",
     "Evidence",
     "FinancialImpact",
+    "FinancialEngine",
     "Forecast",
     "Freshness",
     "HouseholdSnapshot",

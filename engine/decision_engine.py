@@ -2,6 +2,7 @@
 from datetime import date, timedelta
 from typing import Callable, Optional
 
+from .financial_engine import FinancialEngine
 from .models import (
     CATEGORIES,
     CONFIDENCE_LEVELS,
@@ -26,6 +27,8 @@ EV_BUCKET_LABELS = {
 
 
 Rule = Callable[[dict, dict], Optional[Decision]]
+
+financial_engine = FinancialEngine()
 
 
 def _impact(
@@ -74,9 +77,12 @@ def peak_cost_reduction(context: dict, thresholds: dict) -> Optional[Decision]:
         return None
     shift_kwh = thresholds["peak_shift_kwh_per_day"]
     shiftable_kwh = min(summary["buckets"]["peak"]["kwh"], shift_kwh * summary["reading_days"])
-    savings = shiftable_kwh * (
-        context["import_rates"]["peak"] - context["import_rates"]["super_off_peak"]
+    savings = financial_engine.calculate_load_shift_savings(
+        shiftable_kwh,
+        context["import_rates"]["peak"],
+        context["import_rates"]["super_off_peak"],
     )
+    impact = financial_engine.financial_impact(billing_period=savings)
     finding = (
         f"Peak usage accounts for {summary['peak_cost_share_pct']:.1f}% of import cost "
         f"and currently costs ${summary['buckets']['peak']['cost']:.2f}."
@@ -92,7 +98,7 @@ def peak_cost_reduction(context: dict, thresholds: dict) -> Optional[Decision]:
             "shift_kwh_per_day": shift_kwh,
             "estimated_period_savings": savings,
         },
-        financial_impact=_impact(billing_period=savings),
+        financial_impact=impact,
         recommendation=f"Moving up to {shift_kwh:.1f} kWh/day from Peak to 9am-3pm could save about ${savings:.2f} this period.",
         confidence="Medium",
         priority="Medium",
@@ -137,8 +143,12 @@ def ev_charging_optimisation(context: dict, thresholds: dict) -> Optional[Decisi
         return None
     actual = context.get("ev_data_source") in {"home_assistant_ocpp", "ocular_export"}
     energy_label = "Actual EV charging" if actual else "Estimated overnight EV charging"
-    peak_cost = summary["ev_charging_kwh"] * context["import_rates"]["peak"]
+    peak_cost = financial_engine.cost_of_ev_session(
+        summary["ev_charging_kwh"],
+        context["import_rates"]["peak"],
+    )
     observed_cost = summary["ev_charging_cost"]
+    savings_vs_peak = financial_engine.calculate_cost_difference(peak_cost, observed_cost)
     if actual:
         breakdown = summary.get("actual_ev_tariff_breakdown") or {}
         dominant = max(
@@ -182,9 +192,9 @@ def ev_charging_optimisation(context: dict, thresholds: dict) -> Optional[Decisi
             "estimated_ev_kwh": summary["ev_charging_kwh"],
             "observed_or_estimated_cost": observed_cost,
             "estimated_peak_cost": peak_cost,
-            "estimated_savings_vs_peak": peak_cost - observed_cost,
+            "estimated_savings_vs_peak": savings_vs_peak,
         },
-        financial_impact=_impact(billing_period=peak_cost - observed_cost),
+        financial_impact=financial_engine.financial_impact(billing_period=savings_vs_peak),
         recommendation=recommendation,
         confidence="Medium",
         priority="Low",
@@ -259,7 +269,7 @@ def high_cost_alert(context: dict, thresholds: dict) -> Optional[Decision]:
             "configured_threshold": threshold,
             "projected_period_days": context["projected_period_days"],
         },
-        financial_impact=_impact(billing_period=projected),
+        financial_impact=context.get("projected_bill_impact") or _impact(billing_period=projected),
         recommendation=(
             f"Projection is based on {reading_days} days of data. "
             "Prioritise Peak-period load shifting and review high-import days before the next meter read."
@@ -347,6 +357,7 @@ def build_decision_context(
         ).days + 1
         projected_end = settings.current_billing_period_start + timedelta(days=projected_days - 1)
 
+    projected_bill = financial_engine.project_bill(current_summary, settings)
     return {
         "current": current_summary,
         "previous": previous_summary,
@@ -356,7 +367,8 @@ def build_decision_context(
         "overnight_baseload_watts": overnight_baseload,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
-        "projected_net_cost": current_summary["average_daily_net_cost"] * projected_days,
+        "projected_net_cost": projected_bill[0],
+        "projected_bill_impact": projected_bill[3],
     }
 
 
@@ -440,7 +452,14 @@ def generate_ev_session_decisions(sessions: list[dict], import_rates: dict) -> l
         target = max(peak_sessions, key=lambda session: session["tariff_breakdown"][peak_bucket]["cost"])
         peak_cost = target["tariff_breakdown"][peak_bucket]["cost"]
         peak_kwh = target["tariff_breakdown"][peak_bucket]["kwh"]
-        savings = max(peak_kwh * (import_rates[peak_bucket] - import_rates[cheapest_bucket]), 0.0)
+        savings = max(
+            financial_engine.calculate_load_shift_savings(
+                peak_kwh,
+                import_rates[peak_bucket],
+                import_rates[cheapest_bucket],
+            ),
+            0.0,
+        )
         recommendation = (
             f"One session incurred {BUCKET_LABELS.get(peak_bucket, peak_bucket)} charges "
             f"costing {_money(peak_cost)}. Shifting that energy to "
@@ -460,7 +479,7 @@ def generate_ev_session_decisions(sessions: list[dict], import_rates: dict) -> l
                     "peak_session_kwh": peak_kwh,
                     "savings_if_shifted": savings,
                 },
-                financial_impact=_impact(billing_period=savings),
+                financial_impact=financial_engine.financial_impact(billing_period=savings),
                 recommendation=recommendation,
                 confidence="High",
                 priority="Medium",
