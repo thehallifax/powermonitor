@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.0.0 - Charging Advisor
+
+- Added a shared `ChargingAdvice` model and reusable `ChargingAdvisor` engine
+  for answering whether EV charging should happen right now.
+- Combined existing tariff-window, solar export, bill-position, recommendation,
+  EV history, and freshness evidence without adding forecasts or new
+  collectors.
+- Refactored Glance Mode to consume `ChargingAdvice` instead of owning
+  charge/wait/avoid decision rules.
+- Added a Home Charging Advisor block and API `charging_advice` payload sourced
+  from the shared advisor object.
+- Added unit coverage for Charging Advisor decision rules and updated Glance
+  adapter tests.
+
 ## Sprint 0.9.0 - Glance Mode
 
 - Added Glance Mode for garage, study, kitchen, and kiosk/tablet displays.

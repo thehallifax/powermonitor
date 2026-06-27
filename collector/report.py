@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from engine.charging_advisor import ChargingAdvisor
 from engine.data_engine import DataEngine
 from engine.decision_engine import (
     Decision,
@@ -23,7 +24,7 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
-from engine.models import DecisionTimeline, EnergyScore
+from engine.models import ChargingAdvice, DecisionTimeline, EnergyScore
 from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -56,6 +57,10 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
 
 def financial_engine() -> FinancialEngine:
     return FinancialEngine()
+
+
+def charging_advisor() -> ChargingAdvisor:
+    return ChargingAdvisor()
 
 
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
@@ -245,6 +250,15 @@ def dashboard_data(
         settings,
     )
     generated_at = datetime.now().astimezone()
+    charging_advice = build_charging_advice(
+        today_summary,
+        billing_summary,
+        settings,
+        health,
+        recommendations,
+        glance_projected,
+        generated_at,
+    )
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -263,12 +277,11 @@ def dashboard_data(
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": timeline.as_dict(),
+        "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
-            today_summary=today_summary,
             billing_summary=billing_summary,
-            recommendations=recommendations,
+            charging_advice=charging_advice,
             energy_score=energy_score,
-            health=health,
             projected_bill=glance_projected,
             bill_projection_basis=glance_basis,
             now=generated_at,
@@ -933,6 +946,26 @@ def load_recommendations(
         settings.recommendation_thresholds,
         previous_summary=previous_summary,
         include_inactive=True,
+    )
+
+
+def build_charging_advice(
+    today_summary: Summary,
+    billing_summary: Summary,
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+    projected_bill: Optional[float],
+    now: datetime,
+) -> ChargingAdvice:
+    return charging_advisor().advise(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=settings,
+        health=health,
+        recommendations=recommendations,
+        projected_bill=projected_bill,
+        now=now,
     )
 
 
@@ -2217,8 +2250,34 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
 
 def home_page_html(
     briefing: DailyBriefing,
+    charging_advice: ChargingAdvice,
 ) -> str:
-    return daily_briefing_html(briefing)
+    return charging_advice_home_html(charging_advice) + daily_briefing_html(briefing)
+
+
+def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
+    tone = {
+        "CHARGE_NOW": "green",
+        "WAIT": "amber",
+        "AVOID": "red",
+        "UNKNOWN": "amber",
+    }[charging_advice.status]
+    benefit = charging_advice.estimated_financial_benefit
+    benefit_text = "Not quantified"
+    if benefit and benefit.today is not None:
+        benefit_text = f"{money(benefit.today)} per kWh"
+    return f"""
+    <section class="source-status {tone}">
+      <div><span>Charging Advisor</span><h2>{html.escape(charging_advice.headline)}</h2></div>
+      <p>{html.escape(charging_advice.explanation)}</p>
+      <div class="metrics">
+        {metric("Status", charging_advice.status.replace("_", " "), "Shared ChargingAdvice", "ev")}
+        {metric("Benefit", benefit_text, benefit.basis if benefit and benefit.basis else "Measured where tariff difference exists", "cost")}
+        {metric("Confidence", charging_advice.confidence, charging_advice.data_freshness, "primary")}
+        {metric("Next window", charging_advice.next_recommended_charging_window or "Unavailable", "Configured tariff schedule", "solar")}
+      </div>
+    </section>
+    """
 
 
 def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> str:
@@ -2597,12 +2656,19 @@ def write_html(
     )
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
+    charging_advice = build_charging_advice(
+        today_summary,
+        billing_summary,
+        settings,
+        health,
+        recommendations,
+        glance_projected,
+        generated_dt,
+    )
     glance = build_glance_state(
-        today_summary=today_summary,
         billing_summary=billing_summary,
-        recommendations=recommendations,
+        charging_advice=charging_advice,
         energy_score=energy_score,
-        health=health,
         projected_bill=glance_projected,
         bill_projection_basis=glance_basis,
         now=generated_dt,
@@ -2624,7 +2690,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing)}
+    {home_page_html(briefing, charging_advice)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>

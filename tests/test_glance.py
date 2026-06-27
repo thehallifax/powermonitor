@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from engine.charging_advisor import ChargingAdvisor
 from engine.models import Decision, EnergyScore, FinancialImpact
 from presentation.glance import build_glance_state, current_tariff_bucket
 
@@ -17,6 +18,23 @@ class Summary:
     solar_exported_kwh: float = 0.0
     solar_export_pct: float = 0.0
     net_cost: float = 12.5
+    ev_charging_kwh: float = 8.0
+    ev_charging_source: str = "ocular_export"
+
+
+@dataclass
+class Settings:
+    import_rates: dict
+
+
+SETTINGS = Settings(
+    import_rates={
+        "super_off_peak": 0.086151,
+        "overnight": 0.193841,
+        "off_peak": 0.236916,
+        "peak": 0.538446,
+    }
+)
 
 
 def decision() -> Decision:
@@ -52,12 +70,21 @@ def energy_score() -> EnergyScore:
 
 
 def build_state(now, today=None, health=None):
-    return build_glance_state(
-        today_summary=today or Summary(),
-        billing_summary=Summary(net_cost=41.25),
-        recommendations=[decision()],
-        energy_score=energy_score(),
+    today_summary = today or Summary()
+    billing_summary = Summary(net_cost=41.25)
+    advice = ChargingAdvisor().advise(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=SETTINGS,
         health=health or {"status": "ok", "report_age_minutes": 5},
+        recommendations=[decision()],
+        projected_bill=82.5,
+        now=now,
+    )
+    return build_glance_state(
+        billing_summary=billing_summary,
+        charging_advice=advice,
+        energy_score=energy_score(),
         projected_bill=82.5,
         bill_projection_basis="configured billing end",
         now=now,
@@ -76,7 +103,7 @@ class GlanceModeTests(unittest.TestCase):
         state = build_state(datetime(2026, 6, 27, 12, 0, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "CHARGE NOW")
-        self.assertEqual(state.reason, "Super off-peak window")
+        self.assertIn("Super off peak", state.reason)
         self.assertEqual(state.current_tariff, "Super off peak")
         self.assertEqual(state.energy_score, 84)
         self.assertEqual(state.bill_current, 41.25)
@@ -89,21 +116,21 @@ class GlanceModeTests(unittest.TestCase):
         )
 
         self.assertEqual(state.status, "CHARGE NOW")
-        self.assertEqual(state.reason, "Solar surplus")
+        self.assertIn("solar export", state.reason)
         self.assertIn("Exporting solar", state.solar_status)
 
     def test_peak_maps_to_avoid(self):
         state = build_state(datetime(2026, 6, 27, 18, 0, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "AVOID")
-        self.assertEqual(state.reason, "Peak period")
-        self.assertEqual(state.current_recommendation, "Move flexible load into a cheaper window.")
+        self.assertIn("Peak", state.reason)
+        self.assertEqual(state.current_recommendation, "Avoid charging during Peak")
 
     def test_off_peak_without_surplus_maps_to_wait(self):
         state = build_state(datetime(2026, 6, 27, 21, 30, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "WAIT")
-        self.assertEqual(state.reason, "A cheaper window is coming")
+        self.assertIn("lower-cost", state.reason)
         self.assertIn("Overnight", state.next_window)
 
     def test_stale_or_missing_data_maps_to_unavailable(self):
@@ -113,7 +140,7 @@ class GlanceModeTests(unittest.TestCase):
         )
 
         self.assertEqual(state.status, "DATA UNAVAILABLE")
-        self.assertEqual(state.reason, "Low confidence / missing data")
+        self.assertIn("fresh enough", state.reason)
         self.assertEqual(state.confidence, "Low")
 
 

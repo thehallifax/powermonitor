@@ -1,0 +1,122 @@
+import unittest
+from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from engine.charging_advisor import ChargingAdvisor, current_tariff_bucket
+from engine.models import Decision, FinancialImpact
+
+
+LOCAL = ZoneInfo("Australia/Perth")
+
+
+@dataclass
+class Summary:
+    intervals: int = 12
+    solar_generated_kwh: float = 4.0
+    solar_exported_kwh: float = 0.0
+    solar_export_pct: float = 0.0
+    ev_charging_kwh: float = 10.0
+    ev_charging_source: str = "ocular_export"
+    net_cost: float = 45.0
+
+
+@dataclass
+class Settings:
+    import_rates: dict
+
+
+SETTINGS = Settings(
+    import_rates={
+        "super_off_peak": 0.086151,
+        "overnight": 0.193841,
+        "off_peak": 0.236916,
+        "peak": 0.538446,
+    }
+)
+
+
+def decision(stable_id="peak_cost_reduction", priority_score=72):
+    return Decision(
+        id=stable_id,
+        title="Reduce Peak imports",
+        summary="Peak import is high.",
+        finding="Peak import is high.",
+        evidence={"priority_score": priority_score},
+        financial_impact=FinancialImpact(billing_period=4.2),
+        recommendation="Move flexible load into a cheaper window.",
+        confidence="Medium",
+        priority="High",
+        expires_at=None,
+        data_sources_used=["SolarEdge interval data"],
+        category="Tariffs",
+        action_type="load_shift",
+    )
+
+
+class ChargingAdvisorTests(unittest.TestCase):
+    def test_super_off_peak_recommends_charge_now_with_measurable_benefit(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[decision()],
+            projected_bill=88.0,
+            now=datetime(2026, 6, 27, 12, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.status, "CHARGE_NOW")
+        self.assertEqual(advice.confidence, "High")
+        self.assertIsNotNone(advice.estimated_financial_benefit)
+        self.assertEqual(advice.supporting_evidence["current_tariff_bucket"], "super_off_peak")
+
+    def test_peak_recommends_avoid_and_explains_bill_pressure(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[decision("high_cost_alert", 80)],
+            projected_bill=220.0,
+            now=datetime(2026, 6, 27, 18, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.status, "AVOID")
+        self.assertIn("highest configured import rate", advice.explanation)
+        self.assertIn("billing position", advice.explanation)
+        self.assertGreater(advice.estimated_financial_benefit.today, 0)
+
+    def test_solar_export_can_support_charge_now_outside_super_off_peak(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(solar_exported_kwh=1.2, solar_export_pct=30.0),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[],
+            projected_bill=80.0,
+            now=datetime(2026, 6, 27, 8, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(current_tariff_bucket(datetime(2026, 6, 27, 8, tzinfo=LOCAL)), "off_peak")
+        self.assertEqual(advice.status, "CHARGE_NOW")
+        self.assertIn("solar export", advice.explanation)
+
+    def test_stale_data_returns_unknown(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 240},
+            recommendations=[],
+            projected_bill=80.0,
+            now=datetime(2026, 6, 27, 12, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.status, "UNKNOWN")
+        self.assertEqual(advice.confidence, "Low")
+        self.assertEqual(advice.data_freshness, "Report age 240 minutes")
+
+
+if __name__ == "__main__":
+    unittest.main()

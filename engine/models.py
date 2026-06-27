@@ -10,6 +10,7 @@ RECOMMENDATION_CATEGORIES = ("billing", "solar", "EV", "tariff", "baseload", "da
 CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
 DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
+CHARGING_ADVICE_STATUSES = ("CHARGE_NOW", "WAIT", "AVOID", "UNKNOWN")
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
 
@@ -253,6 +254,32 @@ class Recommendation:
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["id"] = self.stable_id
+        return data
+
+
+@dataclass
+class ChargingAdvice:
+    """Presentation-agnostic answer to whether EV charging should happen now."""
+
+    status: str
+    headline: str
+    explanation: str
+    estimated_financial_benefit: Optional[FinancialImpact]
+    confidence: str
+    supporting_evidence: dict[str, Any]
+    next_recommended_charging_window: Optional[str]
+    data_freshness: str
+
+    def __post_init__(self) -> None:
+        if self.status not in CHARGING_ADVICE_STATUSES:
+            raise ValueError(f"Unsupported charging advice status: {self.status}")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported charging advice confidence: {self.confidence}")
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if isinstance(self.estimated_financial_benefit, FinancialImpact):
+            data["estimated_financial_benefit"] = self.estimated_financial_benefit.as_dict()
         return data
 
 
