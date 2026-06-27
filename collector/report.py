@@ -23,7 +23,9 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
+from engine.models import DecisionTimeline
 from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
+from presentation.timeline import build_decision_timeline
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
@@ -223,6 +225,7 @@ def dashboard_data(
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, period_summary, settings)
     scenarios = scenario_analysis(period_summary, settings)
+    timeline = build_decision_timeline(period_summary, recommendations)
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -240,6 +243,7 @@ def dashboard_data(
         "plan_comparison": plan_comparison(period_summary, settings),
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
+        "timeline": timeline.as_dict(),
         "ev_source_counts": ev_source_counts(),
         "data_completeness": data_completeness(period_summary, settings),
         "car_comparison": car_comparison(settings),
@@ -1614,6 +1618,7 @@ def nav_html() -> str:
         ("solar", "Solar"),
         ("ev", "EV Charging"),
         ("whatif", "What If?"),
+        ("timeline", "Timeline"),
         ("analytics", "Analytics"),
         ("system", "System"),
     )
@@ -1712,6 +1717,49 @@ def top_actions_html(recommendations: list[Decision]) -> str:
     <section class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Top actions</span><h2>Next best moves</h2></div><p>Top {len(items)}</p></div>
       <div class="action-grid">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def timeline_html(timeline: DecisionTimeline) -> str:
+    if not timeline.entries:
+        return """
+        <section class="report-section timeline-section">
+          <div class="section-title"><div><span class="eyebrow">Decision timeline</span><h2>No timeline yet</h2></div></div>
+          <p class="notice">PowerMonitor has not recorded any timeline events for this period.</p>
+        </section>
+        """
+    rows = []
+    for entry in timeline.entries:
+        impact = (
+            f'<small>{html.escape(entry.financial_impact)}</small>'
+            if entry.financial_impact
+            else "<small>Financial impact not quantified</small>"
+        )
+        sources = ", ".join(entry.evidence_sources) if entry.evidence_sources else "No evidence sources"
+        rows.append(
+            f"""
+            <article class="timeline-entry">
+              <time>{html.escape(entry.timestamp)}</time>
+              <div>
+                <span>{html.escape(entry.confidence)} confidence</span>
+                <h3>{html.escape(entry.title)}</h3>
+                <p>{html.escape(entry.summary)}</p>
+                <div class="timeline-meta">
+                  {impact}
+                  <small>Sources: {html.escape(sources)}</small>
+                </div>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="report-section timeline-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Decision timeline</span><h2>Household memory</h2></div>
+        <p>{len(timeline.entries)} events</p>
+      </div>
+      <div class="timeline-list">{''.join(rows)}</div>
     </section>
     """
 
@@ -2222,6 +2270,7 @@ def write_html(
     plan = plan_comparison(period_summary, settings)
     scenarios = scenario_analysis(period_summary, settings)
     briefing = build_daily_briefing(recommendations, local_today())
+    timeline = build_decision_timeline(period_summary, recommendations, comparison)
     generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
     document = f"""<!doctype html>
 <html lang="en">
@@ -2431,6 +2480,14 @@ def write_html(
     .scenario-card.bad {{ border-color:#f0cec8; background:#fff5f3; }} .scenario-card.bad strong {{ color:#a74334; }}
     .scenario-insights {{ margin-top:14px; padding:18px; background:#fffaf0; border:1px solid #eeddb0; border-radius:17px; }}
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
+    .timeline-list {{ display:grid; gap:12px; }}
+    .timeline-entry {{ display:grid; grid-template-columns:120px 1fr; gap:16px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .timeline-entry time {{ color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.06em; text-transform:uppercase; }}
+    .timeline-entry span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .timeline-entry h3 {{ margin:9px 0 4px; font-size:18px; letter-spacing:-.025em; }}
+    .timeline-entry p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
+    .timeline-meta {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
+    .timeline-meta small {{ padding:6px 8px; color:var(--muted); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font-size:10px; }}
     .decision-grid,.system-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
     .decision-grid div,.system-card {{ padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
     .decision-grid span,.decision-grid strong,.config-grid span,.config-grid strong {{ display:block; }}
@@ -2470,6 +2527,7 @@ def write_html(
     body:has(#solar:target) .top-nav a[href="#solar"],
     body:has(#ev:target) .top-nav a[href="#ev"],
     body:has(#whatif:target) .top-nav a[href="#whatif"],
+    body:has(#timeline:target) .top-nav a[href="#timeline"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
     body:has(#system:target) .top-nav a[href="#system"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
@@ -2479,7 +2537,7 @@ def write_html(
     .metric span {{ font-size:12px; font-weight:750; }} .metric strong {{ margin-top:24px; font-size:30px; }} .metric small {{ max-width:94%; font-size:11px; }}
     .metric.primary {{ background:linear-gradient(135deg,#111816,#1f6b50); }} .metric.primary strong {{ font-size:46px; }}
     .home-metrics .metric {{ min-height:154px; }} #home .compact-section {{ margin-top:14px; }}
-    .chart-card,.trend-card,.ev-session-card,.ev-session-recommendations,.ev-session-history,.system-card,.decision-grid div,.scenario-card,.action-card,.recommendation-card {{ border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .chart-card,.trend-card,.timeline-entry,.ev-session-card,.ev-session-recommendations,.ev-session-history,.system-card,.decision-grid div,.scenario-card,.action-card,.recommendation-card {{ border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .action-grid {{ gap:14px; }} .action-card {{ padding:20px; }}
     .action-card h3,.recommendation-card h3 {{ font-size:19px; letter-spacing:-.03em; }}
     .scenario-card {{ min-height:210px; padding:22px; }} .scenario-card strong {{ font-size:32px; }}
@@ -2499,6 +2557,7 @@ def write_html(
       .period-controls form {{ grid-template-columns:1fr; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
+      .timeline-entry {{ grid-template-columns:1fr; gap:8px; }}
       .top-nav {{ position:static; }} .top-nav a {{ flex:1 1 auto; text-align:center; }}
       .hero-alert {{ align-items:flex-start; flex-direction:column; }}
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
@@ -2521,6 +2580,7 @@ def write_html(
       .trend-list {{ gap:7px; }} .trend-row {{ grid-template-columns:42px 1fr 55px; gap:5px; }}
       .recommendation-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .recommendation-card {{ padding:12px; break-inside:avoid; }}
       .scenario-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .scenario-card,.scenario-insights {{ padding:12px; break-inside:avoid; }}
+      .timeline-entry {{ padding:12px; break-inside:avoid; }}
       .ev-session-grid {{ grid-template-columns:1fr; gap:8px; }} .ev-session-card,.ev-session-recommendations,.ev-session-history {{ padding:12px; break-inside:avoid; }}
       .ev-session-history th,.ev-session-history td {{ padding:6px; font-size:9px; }}
       .auth-alert {{ break-inside:avoid; }}
@@ -2553,6 +2613,10 @@ def write_html(
   <section id="whatif" class="page">
     <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
     {whatif_page_html(scenarios, plan)}
+  </section>
+  <section id="timeline" class="page">
+    <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
+    {timeline_html(timeline)}
   </section>
   <section id="analytics" class="page">
     <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>

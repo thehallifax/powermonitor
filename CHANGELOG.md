@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.7.0 - Decision Timeline
+
+- Added `DecisionTimeline` and `TimelineEntry` shared models for chronological
+  household decision memory.
+- Added `presentation/timeline.py` to build timeline entries from existing
+  billing period metadata, period comparisons, and Decision Engine output.
+- Added a Timeline dashboard page with human-readable entries, financial impact
+  where known, confidence, and evidence sources.
+- Exposed serialized timeline entries in `/api/summary`.
+- Added timeline unit tests for chronological ordering, decision-derived events,
+  bill tracking outcomes, and serialized entry shape.
+
 ## Sprint 0.6.6 - Explainability Everywhere
 
 - Rendered compact `Why?` explanation sections across Decision surfaces,

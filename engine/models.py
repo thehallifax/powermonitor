@@ -193,3 +193,28 @@ class DecisionExplanation:
     confidence_reason: str
     data_sources_used: list[str]
     freshness_completeness_note: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TimelineEntry:
+    """A human-readable event in the household decision timeline."""
+
+    timestamp: str
+    title: str
+    summary: str
+    financial_impact: Optional[str]
+    confidence: str
+    evidence_sources: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DecisionTimeline:
+    """Chronological memory of significant household decisions and outcomes."""
+
+    entries: list[TimelineEntry] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"entries": [entry.as_dict() for entry in self.entries]}
