@@ -70,6 +70,11 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.confidence, "High")
         self.assertIsNotNone(advice.estimated_financial_benefit)
         self.assertEqual(advice.supporting_evidence["current_tariff_bucket"], "super_off_peak")
+        self.assertEqual(advice.current_window, "9am-3pm super off-peak / EV solar window")
+        self.assertEqual(advice.tariff_now_label, "Super off peak")
+        self.assertEqual(advice.tariff_next_label, "Super off peak")
+        self.assertEqual(advice.per_kwh_difference, 0.0)
+        self.assertIn("tariff timing", advice.confidence_reason)
 
     def test_peak_recommends_avoid_and_explains_bill_pressure(self):
         advice = ChargingAdvisor().advise(
@@ -83,9 +88,13 @@ class ChargingAdvisorTests(unittest.TestCase):
         )
 
         self.assertEqual(advice.status, "AVOID")
-        self.assertIn("highest configured import rate", advice.explanation)
+        self.assertIn("tariff-based", advice.explanation)
         self.assertIn("billing position", advice.explanation)
         self.assertGreater(advice.estimated_financial_benefit.today, 0)
+        self.assertEqual(advice.next_window, "Overnight from 11:00 PM")
+        self.assertTrue(advice.next_window_start.endswith("23:00:00+08:00"))
+        self.assertEqual(advice.tariff_next_label, "Overnight")
+        self.assertAlmostEqual(advice.per_kwh_difference, 0.3446)
 
     def test_solar_export_can_support_charge_now_outside_super_off_peak(self):
         advice = ChargingAdvisor().advise(
@@ -100,7 +109,9 @@ class ChargingAdvisorTests(unittest.TestCase):
 
         self.assertEqual(current_tariff_bucket(datetime(2026, 6, 27, 8, tzinfo=LOCAL)), "off_peak")
         self.assertEqual(advice.status, "CHARGE_NOW")
-        self.assertIn("solar export", advice.explanation)
+        self.assertIn("solar/export-based", advice.explanation)
+        self.assertIn("not live instantaneous", advice.explanation)
+        self.assertIn("Today's solar summary", advice.solar_data_status)
 
     def test_stale_data_returns_unknown(self):
         advice = ChargingAdvisor().advise(
@@ -116,6 +127,24 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.status, "UNKNOWN")
         self.assertEqual(advice.confidence, "Low")
         self.assertEqual(advice.data_freshness, "Report age 240 minutes")
+        self.assertIn("Low confidence", advice.confidence_reason)
+
+    def test_medium_confidence_explains_freshness_limit(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(ev_charging_source="estimated"),
+            billing_summary=Summary(ev_charging_source="estimated"),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 90},
+            recommendations=[],
+            projected_bill=80.0,
+            now=datetime(2026, 6, 27, 21, 30, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.status, "WAIT")
+        self.assertEqual(advice.confidence, "Medium")
+        self.assertEqual(advice.charger_data_status, "estimated_fallback")
+        self.assertIn("report freshness", advice.confidence_reason)
+        self.assertEqual(advice.next_window, "Overnight from 11:00 PM")
 
 
 if __name__ == "__main__":

@@ -269,6 +269,18 @@ class ChargingAdvice:
     supporting_evidence: dict[str, Any]
     next_recommended_charging_window: Optional[str]
     data_freshness: str
+    current_window: str
+    next_window: str
+    next_window_start: Optional[str]
+    tariff_now_label: str
+    tariff_now_rate: Optional[float]
+    tariff_next_label: Optional[str]
+    tariff_next_rate: Optional[float]
+    per_kwh_difference: Optional[float]
+    charger_data_status: str
+    ev_session_freshness: str
+    solar_data_status: str
+    confidence_reason: str
 
     def __post_init__(self) -> None:
         if self.status not in CHARGING_ADVICE_STATUSES:

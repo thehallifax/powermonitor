@@ -48,14 +48,24 @@ class ChargingAdvisor:
         tariff_rates = self._import_rates(settings)
         top_priority = self._top_priority(recommendations)
         bill_is_high = any(item.id == "high_cost_alert" for item in recommendations)
+        next_bucket, next_window, next_window_start = next_recommended_window(observed_at, bucket)
+        tariff_now_rate = tariff_rates.get(bucket)
+        tariff_next_rate = tariff_rates.get(next_bucket)
+        per_kwh_difference = self._per_kwh_difference(bucket, next_bucket, tariff_rates)
         per_kwh_benefit = self._per_kwh_benefit(bucket, tariff_rates)
-        next_window = next_better_window(observed_at, bucket)
+        charger_data_status, ev_session_freshness = self._charger_data_status(billing_summary)
+        solar_data_status = self._solar_data_status(today_summary, freshness)
+        confidence_reason = self._confidence_reason(confidence, freshness, charger_data_status, solar_data_status)
 
         evidence = {
             "current_tariff_bucket": bucket,
             "current_tariff_label": TARIFF_LABELS[bucket],
-            "current_import_rate": tariff_rates.get(bucket),
+            "current_import_rate": tariff_now_rate,
             "super_off_peak_rate": tariff_rates.get("super_off_peak"),
+            "next_tariff_bucket": next_bucket,
+            "next_tariff_label": TARIFF_LABELS[next_bucket],
+            "next_import_rate": tariff_next_rate,
+            "per_kwh_difference": per_kwh_difference,
             "solar_generated_kwh_today": self._number(today_summary, "solar_generated_kwh"),
             "solar_exported_kwh_today": self._number(today_summary, "solar_exported_kwh"),
             "solar_export_pct_today": self._number(today_summary, "solar_export_pct"),
@@ -73,32 +83,59 @@ class ChargingAdvisor:
             return ChargingAdvice(
                 status="UNKNOWN",
                 headline="Charging advice needs fresher data",
-                explanation="PowerMonitor does not have fresh enough interval data to make a reliable charging call right now.",
+                explanation=(
+                    "PowerMonitor does not have fresh enough interval data to make a reliable charging call. "
+                    f"The tariff schedule is still known, but solar, billing, and EV evidence are {freshness.lower()}."
+                ),
                 estimated_financial_benefit=None,
                 confidence="Low",
                 supporting_evidence=evidence,
                 next_recommended_charging_window=next_window,
                 data_freshness=freshness,
+                current_window=EV_BUCKET_LABELS[bucket],
+                next_window=next_window,
+                next_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+                tariff_now_label=TARIFF_LABELS[bucket],
+                tariff_now_rate=tariff_now_rate,
+                tariff_next_label=TARIFF_LABELS[next_bucket],
+                tariff_next_rate=tariff_next_rate,
+                per_kwh_difference=per_kwh_difference,
+                charger_data_status=charger_data_status,
+                ev_session_freshness=ev_session_freshness,
+                solar_data_status=solar_data_status,
+                confidence_reason=confidence_reason,
             )
 
         benefit = self._financial_benefit(bucket, per_kwh_benefit)
         if bucket == "super_off_peak":
             headline = "Charge now in the cheapest window"
-            explanation = "The current tariff window is Super off peak, which is the lowest configured import rate."
+            explanation = (
+                f"Advice is tariff-based: the current window is Super off peak at ${tariff_now_rate:.4f}/kWh, "
+                "the lowest configured import rate."
+            )
             if has_solar_surplus:
-                explanation += " Solar is also being exported today, so charging now can use more locally generated energy."
+                explanation += " Daily solar data also shows export today, so charging now is supported by solar utilisation evidence."
             status = "CHARGE_NOW"
         elif has_solar_surplus:
-            headline = "Charge now while solar is exporting"
-            explanation = "PowerMonitor can see solar export today, so charging now is supported by measured surplus solar evidence."
+            headline = "Charge now based on today's solar export"
+            explanation = (
+                "Advice is solar/export-based: today's measured solar export summary shows exported energy. "
+                "This is daily export evidence, not live instantaneous charger or solar telemetry."
+            )
             status = "CHARGE_NOW"
         elif bucket == "peak":
             headline = "Avoid charging during Peak"
-            explanation = "The current tariff window is Peak, the highest configured import rate, so flexible EV charging should wait."
+            explanation = (
+                f"Advice is tariff-based: the current Peak rate is ${tariff_now_rate:.4f}/kWh. "
+                f"The next recommended window is {next_window} at ${tariff_next_rate:.4f}/kWh."
+            )
             status = "AVOID"
         else:
             headline = "Wait for a cheaper charging window"
-            explanation = "A lower-cost charging window is available later based on the configured tariff schedule."
+            explanation = (
+                f"Advice is tariff-based: the current {TARIFF_LABELS[bucket]} rate is ${tariff_now_rate:.4f}/kWh. "
+                f"The next recommended lower-cost window is {next_window} at ${tariff_next_rate:.4f}/kWh."
+            )
             status = "WAIT"
 
         if bill_is_high and status != "CHARGE_NOW":
@@ -115,6 +152,18 @@ class ChargingAdvisor:
             supporting_evidence=evidence,
             next_recommended_charging_window=next_window,
             data_freshness=freshness,
+            current_window=EV_BUCKET_LABELS[bucket],
+            next_window=next_window,
+            next_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+            tariff_now_label=TARIFF_LABELS[bucket],
+            tariff_now_rate=tariff_now_rate,
+            tariff_next_label=TARIFF_LABELS[next_bucket],
+            tariff_next_rate=tariff_next_rate,
+            per_kwh_difference=per_kwh_difference,
+            charger_data_status=charger_data_status,
+            ev_session_freshness=ev_session_freshness,
+            solar_data_status=solar_data_status,
+            confidence_reason=confidence_reason,
         )
 
     def _data_is_available(self, today_summary: Any, billing_summary: Any, health: dict[str, Any]) -> tuple[bool, str, str]:
@@ -165,6 +214,13 @@ class ChargingAdvisor:
             return max(peak - super_off_peak, 0.0)
         return max(current - super_off_peak, 0.0)
 
+    def _per_kwh_difference(self, bucket: str, next_bucket: str, rates: dict[str, float]) -> Optional[float]:
+        current = rates.get(bucket)
+        next_rate = rates.get(next_bucket)
+        if current is None or next_rate is None:
+            return None
+        return round(max(current - next_rate, 0.0), 4)
+
     def _financial_benefit(self, bucket: str, per_kwh_benefit: Optional[float]) -> Optional[FinancialImpact]:
         if per_kwh_benefit is None:
             return None
@@ -176,6 +232,42 @@ class ChargingAdvisor:
             else "per kWh difference between current tariff and Super off peak"
         )
         return FinancialImpact(today=round(per_kwh_benefit, 4), currency="AUD", basis=basis)
+
+    def _charger_data_status(self, billing_summary: Any) -> tuple[str, str]:
+        source = getattr(billing_summary, "ev_charging_source", None)
+        if isinstance(billing_summary, dict):
+            source = billing_summary.get("ev_charging_source")
+        if source in {"ocular_export", "home_assistant_ocpp"}:
+            return "actual_session_data_available", "Actual EV session data is available for the billing period."
+        if source in {"estimated", None, ""}:
+            return "estimated_fallback", "EV charging uses the overnight fallback estimate because actual sessions are unavailable."
+        return str(source), "EV charging data source is configured but not recognised as actual session telemetry."
+
+    def _solar_data_status(self, today_summary: Any, freshness: str) -> str:
+        generated = self._number(today_summary, "solar_generated_kwh")
+        intervals = int(getattr(today_summary, "intervals", 0) or 0)
+        if intervals <= 0:
+            return "No solar interval data is available for today."
+        if generated <= 0:
+            return "Today's solar summary is available but shows no generation yet."
+        return f"Today's solar summary is available from interval data; freshness: {freshness}."
+
+    def _confidence_reason(
+        self,
+        confidence: str,
+        freshness: str,
+        charger_data_status: str,
+        solar_data_status: str,
+    ) -> str:
+        if confidence == "Low":
+            return f"Low confidence because the available source data is {freshness.lower()}."
+        if confidence == "Medium":
+            return f"Medium confidence because tariff data is configured but report freshness is {freshness.lower()}."
+        if charger_data_status == "estimated_fallback":
+            return "High confidence for tariff timing, with EV history limited by estimated charging data."
+        if "No solar interval" in solar_data_status:
+            return "High confidence for tariff timing, with solar context unavailable today."
+        return "High confidence because tariff timing and today's interval data are fresh."
 
 
 def solar_signal(today_summary: Any) -> tuple[str, bool]:
@@ -203,20 +295,25 @@ def current_tariff_bucket(now: datetime) -> str:
 
 
 def next_better_window(now: datetime, current_bucket: str) -> str:
+    return next_recommended_window(now, current_bucket)[1]
+
+
+def next_recommended_window(now: datetime, current_bucket: str) -> tuple[str, str, Optional[datetime]]:
     local_now = now.astimezone()
     if current_bucket == "super_off_peak":
-        return "Now until 3:00 PM"
+        return "super_off_peak", "Now until 3:00 PM", local_now
 
     next_super = local_now.replace(hour=9, minute=0, second=0, microsecond=0)
     if local_now.time() >= time(15, 0):
         next_super += timedelta(days=1)
     elif local_now.time() >= time(9, 0):
-        return "Now until 3:00 PM"
+        return "super_off_peak", "Now until 3:00 PM", local_now
 
     next_overnight = local_now.replace(hour=23, minute=0, second=0, microsecond=0)
     if local_now.time() >= time(23, 0):
         next_overnight += timedelta(days=1)
 
     target = min(next_super, next_overnight)
-    label = "super off-peak" if target == next_super else "overnight"
-    return f"{label.title()} from {target.strftime('%-I:%M %p')}"
+    bucket = "super_off_peak" if target == next_super else "overnight"
+    label = "super off-peak" if bucket == "super_off_peak" else "overnight"
+    return bucket, f"{label.title()} from {target.strftime('%-I:%M %p')}", target

@@ -2266,15 +2266,29 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
     benefit_text = "Not quantified"
     if benefit and benefit.today is not None:
         benefit_text = f"{money(benefit.today)} per kWh"
+    rate_text = (
+        f"{money(charging_advice.tariff_now_rate)} / {money(charging_advice.tariff_next_rate)}"
+        if charging_advice.tariff_now_rate is not None and charging_advice.tariff_next_rate is not None
+        else "Unavailable"
+    )
+    difference_text = (
+        f"{money(charging_advice.per_kwh_difference)} per kWh"
+        if charging_advice.per_kwh_difference is not None
+        else "Unavailable"
+    )
     return f"""
     <section class="source-status {tone}">
       <div><span>Charging Advisor</span><h2>{html.escape(charging_advice.headline)}</h2></div>
       <p>{html.escape(charging_advice.explanation)}</p>
       <div class="metrics">
         {metric("Status", charging_advice.status.replace("_", " "), "Shared ChargingAdvice", "ev")}
+        {metric("Tariff now / next", rate_text, f"{charging_advice.tariff_now_label} to {charging_advice.tariff_next_label}", "cost")}
+        {metric("Difference", difference_text, "Current tariff minus next window tariff", "cost")}
         {metric("Benefit", benefit_text, benefit.basis if benefit and benefit.basis else "Measured where tariff difference exists", "cost")}
-        {metric("Confidence", charging_advice.confidence, charging_advice.data_freshness, "primary")}
-        {metric("Next window", charging_advice.next_recommended_charging_window or "Unavailable", "Configured tariff schedule", "solar")}
+        {metric("Confidence", charging_advice.confidence, charging_advice.confidence_reason, "primary")}
+        {metric("Next window", charging_advice.next_window or "Unavailable", charging_advice.next_window_start or "Configured tariff schedule", "solar")}
+        {metric("EV data", charging_advice.charger_data_status.replace("_", " "), charging_advice.ev_session_freshness, "ev")}
+        {metric("Solar data", charging_advice.solar_data_status, "Daily summary only; no live surplus assumption", "solar")}
       </div>
     </section>
     """

@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.0.1 - Charging Advisor Context
+
+- Expanded `ChargingAdvice` with current and next tariff-window context,
+  tariff labels/rates, next-window start time, per-kWh difference, data-status
+  fields, and confidence reasoning.
+- Improved Charging Advisor explanations for charge, wait, avoid, and unknown
+  states with clearer tariff-based versus daily solar/export-based wording.
+- Kept solar advice grounded in daily interval/export evidence without implying
+  live instantaneous surplus or charger state.
+- Updated Home and Glance Mode to consume the richer shared `ChargingAdvice`
+  object.
+- Added tests for next-window metadata, per-kWh difference, and confidence
+  reasoning.
+
 ## Sprint 1.0.0 - Charging Advisor
 
 - Added a shared `ChargingAdvice` model and reusable `ChargingAdvisor` engine
