@@ -219,3 +219,21 @@ class DecisionTimeline:
 
     def as_dict(self) -> dict[str, Any]:
         return {"entries": [entry.as_dict() for entry in self.entries]}
+
+
+@dataclass(frozen=True)
+class EnergyScore:
+    """Daily household energy decision health score."""
+
+    score: int
+    label: str
+    summary: str
+    top_positive_factors: list[str]
+    top_negative_factors: list[str]
+    potential_score: int
+    confidence: str
+    data_sources_used: list[str]
+    explanation: DecisionExplanation
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)

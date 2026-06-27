@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from engine.models import Decision, DecisionExplanation, FinancialImpact
+from engine.models import Decision, DecisionExplanation, EnergyScore, FinancialImpact
 from presentation.briefing import build_daily_briefing
 
 
@@ -101,6 +101,30 @@ class DailyBriefingTests(unittest.TestCase):
         self.assertIsNone(briefing.todays_win)
         self.assertEqual(briefing.opportunities, [])
         self.assertEqual(briefing.confidence, "Unknown")
+
+    def test_briefing_serializes_energy_score(self):
+        score = EnergyScore(
+            score=86,
+            label="Excellent",
+            summary="Energy Score is 86/100.",
+            top_positive_factors=["Peak exposure is low."],
+            top_negative_factors=[],
+            potential_score=90,
+            confidence="High",
+            data_sources_used=["SolarEdge interval data"],
+            explanation=DecisionExplanation(
+                why_this_matters="Daily health signal.",
+                evidence_used=["Peak exposure: 10.0%"],
+                financial_impact="Uses existing outputs.",
+                confidence_reason="High confidence.",
+                data_sources_used=["SolarEdge interval data"],
+            ),
+        )
+
+        briefing = build_daily_briefing([], date(2026, 6, 27), score)
+
+        self.assertEqual(briefing.energy_score.score, 86)
+        self.assertEqual(briefing.as_dict()["energy_score"]["label"], "Excellent")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,9 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
-from engine.models import DecisionTimeline
+from engine.models import DecisionTimeline, EnergyScore
 from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
+from presentation.energy_score import build_energy_score
 from presentation.timeline import build_decision_timeline
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
@@ -227,6 +228,14 @@ def dashboard_data(
         timeline_candidates = build_decision_timeline(period_summary, recommendations)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
     scenarios = scenario_analysis(period_summary, settings)
+    completeness = data_completeness(period_summary, settings)
+    plan = plan_comparison(period_summary, settings)
+    energy_score = build_energy_score(
+        period_summary,
+        recommendations,
+        completeness,
+        plan,
+    )
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -241,12 +250,13 @@ def dashboard_data(
         "ev_session_analytics": period_summary.ev_session_analytics,
         "daily_trends": [trend_to_dict(trend) for trend in trends],
         "tariff_scenario": tariff_scenario(period_summary, settings),
-        "plan_comparison": plan_comparison(period_summary, settings),
+        "plan_comparison": plan,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": timeline.as_dict(),
         "ev_source_counts": ev_source_counts(),
-        "data_completeness": data_completeness(period_summary, settings),
+        "data_completeness": completeness,
+        "energy_score": energy_score.as_dict(),
         "car_comparison": car_comparison(settings),
         "recommendations": [decision.as_dict() for decision in recommendations],
         "health": health,
@@ -1887,6 +1897,7 @@ def daily_briefing_html(briefing: DailyBriefing) -> str:
         """
     )
     sources = ", ".join(briefing.data_sources_used) if briefing.data_sources_used else "No decision sources"
+    energy = energy_score_html(briefing.energy_score)
     return f"""
     <section class="report-section briefing-section">
       <div class="briefing-hero">
@@ -1901,10 +1912,40 @@ def daily_briefing_html(briefing: DailyBriefing) -> str:
         </div>
       </div>
       <p class="briefing-headline">{html.escape(briefing.headline)}</p>
+      {energy}
       <div class="briefing-grid two-up">{priority}{win}</div>
       {briefing_opportunities_html(briefing.opportunities)}
       <p class="briefing-sources">Sources used: {html.escape(sources)}</p>
     </section>
+    """
+
+
+def energy_score_html(score: Optional[EnergyScore]) -> str:
+    if not score:
+        return ""
+    positives = "".join(
+        f"<li>{html.escape(item)}</li>" for item in score.top_positive_factors
+    ) or "<li>No positive factors are available yet.</li>"
+    negatives = "".join(
+        f"<li>{html.escape(item)}</li>" for item in score.top_negative_factors
+    ) or "<li>No major negative factors are active.</li>"
+    return f"""
+    <article class="energy-score-card">
+      <div class="energy-score-main">
+        <span>Energy Score</span>
+        <strong>{score.score}</strong>
+        <small>{html.escape(score.label)} confidence: {html.escape(score.confidence)}</small>
+      </div>
+      <div class="energy-score-detail">
+        <h3>{html.escape(score.summary)}</h3>
+        <p>Potential score: <strong>{score.potential_score}</strong></p>
+        <div class="energy-score-factors">
+          <div><span>Positive factors</span><ul>{positives}</ul></div>
+          <div><span>Negative factors</span><ul>{negatives}</ul></div>
+        </div>
+        {decision_explanation_html(score.explanation)}
+      </div>
+    </article>
     """
 
 
@@ -2272,7 +2313,9 @@ def write_html(
     )
     plan = plan_comparison(period_summary, settings)
     scenarios = scenario_analysis(period_summary, settings)
-    briefing = build_daily_briefing(recommendations, local_today())
+    completeness = data_completeness(period_summary, settings)
+    energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
+    briefing = build_daily_briefing(recommendations, local_today(), energy_score)
     timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
     generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
     document = f"""<!doctype html>
@@ -2451,6 +2494,17 @@ def write_html(
     .briefing-readtime span {{ color:rgba(255,255,255,.64); }}
     .briefing-readtime strong {{ display:block; margin-top:5px; font-size:20px; letter-spacing:-.035em; }}
     .briefing-headline {{ margin:0; color:#2f453e; font-size:20px; font-weight:750; letter-spacing:-.025em; }}
+    .energy-score-card {{ display:grid; grid-template-columns:180px 1fr; gap:18px; padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .energy-score-main {{ display:grid; align-content:center; min-height:150px; padding:18px; color:#fff; background:linear-gradient(135deg,#111816,#2d6b52); border-radius:18px; }}
+    .energy-score-main span,.energy-score-main small,.energy-score-factors span {{ font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .energy-score-main span,.energy-score-main small {{ color:rgba(255,255,255,.68); }}
+    .energy-score-main strong {{ display:block; margin:8px 0; font-size:58px; line-height:1; letter-spacing:-.06em; }}
+    .energy-score-detail h3 {{ margin:0; font-size:18px; letter-spacing:-.03em; }}
+    .energy-score-detail p {{ margin:6px 0 0; color:var(--muted); font-size:13px; }}
+    .energy-score-factors {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:13px; }}
+    .energy-score-factors div {{ padding:12px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
+    .energy-score-factors span {{ color:var(--ink); }}
+    .energy-score-factors ul {{ margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:12px; line-height:1.4; }}
     .briefing-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
     .briefing-grid.two-up {{ grid-template-columns:1fr 1fr; }}
     .briefing-card {{ padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
@@ -2551,7 +2605,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}

@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.7.4 - Energy Score v1
+
+- Added an `EnergyScore` model with score, label, summary, positive/negative
+  factors, potential score, confidence, sources, and explanation.
+- Added `presentation/energy_score.py` to score existing summary, decision,
+  data completeness, plan comparison, and trend-aware decision outputs.
+- Exposed Energy Score in `/api/summary`.
+- Added a compact Energy Score card to the Home Daily Briefing with factor
+  lists, potential score, and explainability details.
+- Added tests for scoring bands, potential score, confidence, and briefing
+  serialization.
+
 ## Sprint 0.7.3 - Trend Recency and Decay
 
 - Added recency-aware trend analysis for persisted timeline history consumed by

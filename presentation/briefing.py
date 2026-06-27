@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any, Iterable, Optional
 
-from engine.models import Decision, DecisionExplanation
+from engine.models import Decision, DecisionExplanation, EnergyScore
 
 
 PRIORITY_RANK = {
@@ -62,6 +62,7 @@ class DailyBriefing:
     read_time_minutes: int
     confidence: str
     data_sources_used: list[str]
+    energy_score: Optional[EnergyScore] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,12 +77,14 @@ class DailyBriefing:
             "read_time_minutes": self.read_time_minutes,
             "confidence": self.confidence,
             "data_sources_used": self.data_sources_used,
+            "energy_score": self.energy_score.as_dict() if self.energy_score else None,
         }
 
 
 def build_daily_briefing(
     decisions: Iterable[Decision],
     briefing_date: Optional[date] = None,
+    energy_score: Optional[EnergyScore] = None,
 ) -> DailyBriefing:
     """Build a calm Home briefing from Decision Engine output."""
 
@@ -110,6 +113,7 @@ def build_daily_briefing(
         read_time_minutes=1,
         confidence=confidence,
         data_sources_used=data_sources,
+        energy_score=energy_score,
     )
     return DailyBriefing(
         **{
@@ -117,6 +121,7 @@ def build_daily_briefing(
             "todays_priority": briefing.todays_priority,
             "todays_win": briefing.todays_win,
             "opportunities": briefing.opportunities,
+            "energy_score": briefing.energy_score,
             "read_time_minutes": _read_time_minutes(briefing),
         }
     )
@@ -276,6 +281,7 @@ def _read_time_minutes(briefing: DailyBriefing) -> int:
             briefing.greeting,
             briefing.headline,
             briefing.introduction,
+            briefing.energy_score.summary if briefing.energy_score else "",
             briefing.todays_priority.body if briefing.todays_priority else "",
             briefing.todays_win.body if briefing.todays_win else "",
             " ".join(item.body for item in briefing.opportunities),
