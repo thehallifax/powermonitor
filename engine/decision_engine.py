@@ -159,6 +159,39 @@ def _freshness_completeness_note(decision: Decision) -> Optional[str]:
     return " ".join(notes) if notes else None
 
 
+def _timeline_entries(context: dict) -> list:
+    timeline = context.get("timeline_history")
+    return list(getattr(timeline, "entries", []) or [])
+
+
+def _timeline_count(context: dict, event_type: str) -> int:
+    return sum(1 for entry in _timeline_entries(context) if entry.event_type == event_type)
+
+
+def _timeline_title_count(context: dict, title: str) -> int:
+    return sum(1 for entry in _timeline_entries(context) if entry.title == title)
+
+
+def _timeline_source_count(context: dict, source: str) -> int:
+    return sum(
+        1
+        for entry in _timeline_entries(context)
+        if source in entry.evidence_sources
+    )
+
+
+def _latest_timeline_impact(context: dict, event_type: str) -> Optional[str]:
+    matching = [
+        entry for entry in _timeline_entries(context)
+        if entry.event_type == event_type and entry.financial_impact
+    ]
+    return matching[-1].financial_impact if matching else None
+
+
+def _trend_sources(*extra_sources: str) -> list[str]:
+    return list(dict.fromkeys(("PowerMonitor timeline history", *extra_sources)))
+
+
 def peak_cost_reduction(context: dict, thresholds: dict) -> Optional[Decision]:
     summary = context["current"]
     trigger = thresholds["peak_cost_share_pct"]
@@ -402,6 +435,150 @@ def positive_reinforcement(context: dict, thresholds: dict) -> Optional[Decision
     )
 
 
+def repeated_peak_usage_trend(context: dict, thresholds: dict) -> Optional[Decision]:
+    count = _timeline_count(context, "high_peak_usage")
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    if count < trigger:
+        return None
+    latest_impact = _latest_timeline_impact(context, "high_peak_usage")
+    finding = f"High peak usage has appeared {count} times in the persisted decision timeline."
+    return Decision(
+        id="trend_repeated_peak_usage",
+        title="Peak usage is becoming a pattern",
+        summary=finding,
+        finding=finding,
+        evidence={
+            "high_peak_usage_events": count,
+            "trend_event_threshold": trigger,
+            "latest_recorded_impact": latest_impact or "not quantified",
+        },
+        financial_impact=_impact(),
+        recommendation="Review flexible loads that repeatedly land in Peak periods and prioritise shifting them to lower-cost windows.",
+        confidence="Medium",
+        priority="Medium",
+        expires_at=context.get("projected_period_end"),
+        data_sources_used=_trend_sources("Tariff settings"),
+        category="Tariffs",
+        action_type="trend_review",
+    )
+
+
+def bill_trajectory_trend(context: dict, thresholds: dict) -> Optional[Decision]:
+    improved = _timeline_title_count(context, "Bill tracking improved")
+    worsened = _timeline_title_count(context, "Bill tracking worsened")
+    if improved == worsened:
+        return None
+    direction = "improving" if improved > worsened else "worsening"
+    dominant = max(improved, worsened)
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    if dominant < trigger:
+        return None
+    finding = (
+        f"Bill trajectory is {direction}: {improved} improved timeline events "
+        f"and {worsened} worsened timeline events are recorded."
+    )
+    return Decision(
+        id=f"trend_bill_trajectory_{direction}",
+        title=f"Bill trajectory is {direction}",
+        summary=finding,
+        finding=finding,
+        evidence={
+            "bill_tracking_improved_events": improved,
+            "bill_tracking_worsened_events": worsened,
+        },
+        financial_impact=_impact(),
+        recommendation=(
+            "Keep reinforcing the behaviours behind the improvement."
+            if direction == "improving"
+            else "Review recent high-cost days and recurring recommendations before this trend continues."
+        ),
+        confidence="Medium",
+        priority="Low" if direction == "improving" else "Medium",
+        expires_at=context.get("projected_period_end"),
+        data_sources_used=_trend_sources("Period comparison", "FinancialEngine report output"),
+        category="Bills",
+        action_type="trend_review",
+    )
+
+
+def recurring_ev_charging_win(context: dict, thresholds: dict) -> Optional[Decision]:
+    count = _timeline_count(context, "ev_cheapest_tariff")
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    if count < trigger:
+        return None
+    finding = f"EV charging has landed in the cheapest tariff window {count} times in the timeline."
+    return Decision(
+        id="trend_recurring_ev_charging_win",
+        title="EV charging win is recurring",
+        summary=finding,
+        finding=finding,
+        evidence={
+            "ev_cheapest_tariff_events": count,
+            "trend_event_threshold": trigger,
+        },
+        financial_impact=_impact(),
+        recommendation="Keep the EV schedule aligned with the cheapest tariff window and watch for any Peak-session regressions.",
+        confidence="High",
+        priority="Low",
+        expires_at=context.get("projected_period_end"),
+        data_sources_used=_trend_sources("Actual EV session data", "Tariff settings"),
+        category="EV",
+        action_type="maintain",
+    )
+
+
+def recurring_solar_utilisation_win(context: dict, thresholds: dict) -> Optional[Decision]:
+    count = _timeline_count(context, "positive_outcome")
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    if count < trigger:
+        return None
+    finding = f"Positive solar/utilisation outcomes have appeared {count} times in the timeline."
+    return Decision(
+        id="trend_recurring_solar_utilisation_win",
+        title="Solar utilisation win is recurring",
+        summary=finding,
+        finding=finding,
+        evidence={
+            "positive_outcome_events": count,
+            "trend_event_threshold": trigger,
+        },
+        financial_impact=_impact(),
+        recommendation="Keep flexible loads in solar and low-cost windows so the recurring positive pattern continues.",
+        confidence="High",
+        priority="Low",
+        expires_at=context.get("projected_period_end"),
+        data_sources_used=_trend_sources("SolarEdge interval data"),
+        category="Solar",
+        action_type="maintain",
+    )
+
+
+def repeated_estimated_data_warning(context: dict, thresholds: dict) -> Optional[Decision]:
+    count = _timeline_source_count(context, "Estimated EV charging")
+    trigger = int(thresholds.get("trend_repeated_event_count", 2))
+    if count < trigger:
+        return None
+    finding = f"Estimated/fallback EV data has been used in {count} timeline events."
+    return Decision(
+        id="trend_repeated_estimated_data_warning",
+        title="Estimated data is recurring",
+        summary=finding,
+        finding=finding,
+        evidence={
+            "estimated_ev_timeline_events": count,
+            "trend_event_threshold": trigger,
+        },
+        financial_impact=_impact(),
+        recommendation="Connect or refresh actual EV session data so future decisions rely less on fallback estimates.",
+        confidence="Medium",
+        priority="Medium",
+        expires_at=context.get("projected_period_end"),
+        data_sources_used=_trend_sources("Estimated EV charging"),
+        category="General",
+        action_type="data_quality",
+    )
+
+
 RULES: tuple[Rule, ...] = (
     high_cost_alert,
     peak_cost_reduction,
@@ -409,6 +586,11 @@ RULES: tuple[Rule, ...] = (
     ev_charging_optimisation,
     baseload_monitoring,
     positive_reinforcement,
+    repeated_peak_usage_trend,
+    bill_trajectory_trend,
+    recurring_ev_charging_win,
+    recurring_solar_utilisation_win,
+    repeated_estimated_data_warning,
 )
 
 
@@ -432,6 +614,7 @@ def build_decision_context(
     start = _as_date(current_summary["start"])
     end = _as_date(current_summary["end"])
     overnight_baseload = data_engine.get_overnight_baseload_watts(start, end)
+    timeline_history = data_engine.get_timeline_entries(limit=100)
 
     if settings.current_billing_period_start and settings.current_billing_period_end:
         projected_end = settings.current_billing_period_end
@@ -454,6 +637,7 @@ def build_decision_context(
         "ev_data_source": current_summary["ev_charging_source"],
         "ev_baseline_watts": settings.ev_baseline_watts,
         "overnight_baseload_watts": overnight_baseload,
+        "timeline_history": timeline_history,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
         "projected_net_cost": projected_bill[0],

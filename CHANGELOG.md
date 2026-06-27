@@ -1,5 +1,16 @@
 # Changelog
 
+## Sprint 0.7.2 - Trend-Aware Decisions
+
+- Updated `DecisionEngine` to consume persisted timeline history through
+  `DataEngine`.
+- Added trend-aware decisions for repeated high peak usage, improving/worsening
+  bill trajectory, recurring EV charging wins, recurring solar utilisation
+  wins, and repeated estimated/fallback data warnings.
+- Kept trend logic limited to simple counts and comparisons over existing
+  persisted timeline entries.
+- Added tests for trend-aware decisions and DataEngine-backed timeline context.
+
 ## Sprint 0.7.1 - Persistent Timeline
 
 - Added SQLite-backed timeline storage owned by `DataEngine`.
