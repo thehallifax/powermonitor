@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.6.6 - Explainability Everywhere
+
+- Rendered compact `Why?` explanation sections across Decision surfaces,
+  including Daily Briefing cards, Top Actions, and Recommendation cards.
+- Reused Decision Engine-owned `DecisionExplanation` payloads for why a
+  decision matters, evidence, financial impact, confidence reason, data
+  sources, and freshness/completeness notes.
+- Updated `/api/summary` recommendation output to serialize decisions through
+  the shared `Decision.as_dict()` contract, including explanation data.
+- Added report-level tests for rendered explanations and serialized
+  explanation fields.
+
 ## Sprint 0.6.5 - Explainability
 
 - Added Decision explanation payloads for why a decision matters, evidence
