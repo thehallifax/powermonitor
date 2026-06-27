@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 0.6.4 - Daily Briefing
+
+- Added `presentation/briefing.py` as a lightweight Output Layer that consumes
+  Decision Engine `Decision` objects and produces a Home-page Daily Briefing.
+- Updated Home to render a calm narrative briefing with a greeting, today's
+  priority, today's win, up to three opportunities, read time, confidence, and
+  source attribution.
+- Kept briefing selection and wording in the presentation layer without adding
+  data access, financial calculations, connectors, or new recommendation logic.
+- Added unit tests for Daily Briefing selection, formatting, read-time, and
+  source attribution behaviour.
+
 ## Sprint 0.6.3 - Financial Impact Engine
 
 - Added `engine/financial_engine.py` as the owner for bill projection, import

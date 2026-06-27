@@ -23,6 +23,7 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
+from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
@@ -1713,39 +1714,98 @@ def top_actions_html(recommendations: list[Decision]) -> str:
     """
 
 
-def home_page_html(
-    today_summary: Summary,
-    period_summary: Summary,
-    settings: Settings,
-    health: dict,
-    recommendations: list[Decision],
+def briefing_card_html(
+    item: BriefingItem,
+    eyebrow: str,
+    heading: Optional[str] = None,
 ) -> str:
-    projection, projection_end, basis = projected_bill(period_summary, settings)
-    confidence, confidence_note = confidence_label(period_summary)
-    health_note = (
-        f"{collector_status_text(health)}; latest reading {display_timestamp(health.get('latest_measurement_time'))}; "
-        f"report age {health.get('report_age_minutes'):.1f} minutes"
-        if health.get("report_age_minutes") is not None
-        else f"{collector_status_text(health)}; latest reading {display_timestamp(health.get('latest_measurement_time'))}"
-    )
+    return f"""
+    <article class="briefing-card {html.escape(item.severity)}">
+      <div class="briefing-card-heading">
+        <span>{html.escape(eyebrow)}</span>
+        <strong>{html.escape(item.confidence)} confidence</strong>
+      </div>
+      <h3>{html.escape(heading or item.title)}</h3>
+      <p>{html.escape(item.body)}</p>
+      <div class="briefing-meta">
+        <small>{html.escape(item.category)}</small>
+        <small>{html.escape(item.financial_impact)}</small>
+      </div>
+    </article>
+    """
+
+
+def briefing_opportunities_html(items: list[BriefingItem]) -> str:
+    if not items:
+        return """
+        <section class="briefing-block">
+          <div class="section-title"><div><span class="eyebrow">Opportunities</span><h2>Nothing else needs attention</h2></div></div>
+          <p class="notice">No additional Decision Engine opportunities are active for this briefing.</p>
+        </section>
+        """
     cards = "".join(
-        [
-            metric("Current bill estimate", money(period_summary.net_cost), f"{period_summary.start:%d %b} to {period_summary.end:%d %b}", "primary"),
-            metric("Projected bill", money(projection), f"To {projection_end:%d %b %Y}, {basis}; {confidence} confidence", "cost"),
-            metric("Today's cost", money(today_summary.net_cost), "Net estimated cost today", "cost"),
-            metric("Energy Score", "Soon", "Placeholder for a future daily score", "good"),
-            metric("Solar today", kwh(today_summary.solar_generated_kwh), "Generated today", "solar"),
-            metric("EV charging today", kwh(today_summary.ev_charging_kwh), ev_note(settings, today_summary), "ev"),
-            metric("System health", collector_status_text(health), health_note, "grid"),
-        ]
+        briefing_card_html(item, "Opportunity")
+        for item in items
     )
     return f"""
-    <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Home</span><h2>How am I doing today?</h2></div><p>{confidence} confidence</p></div>
-      <div class="metrics home-metrics">{cards}</div>
+    <section class="briefing-block">
+      <div class="section-title"><div><span class="eyebrow">Opportunities</span><h2>Worth a quick look</h2></div><p>Up to three</p></div>
+      <div class="briefing-grid">{cards}</div>
     </section>
-    {top_actions_html(recommendations)}
     """
+
+
+def daily_briefing_html(briefing: DailyBriefing) -> str:
+    priority = (
+        briefing_card_html(briefing.todays_priority, "Today's priority")
+        if briefing.todays_priority
+        else """
+        <article class="briefing-card green">
+          <div class="briefing-card-heading"><span>Today's priority</span><strong>No action</strong></div>
+          <h3>Nothing urgent</h3>
+          <p>The Decision Engine has not found an active priority for this period.</p>
+          <div class="briefing-meta"><small>General</small><small>Not quantified</small></div>
+        </article>
+        """
+    )
+    win = (
+        briefing_card_html(briefing.todays_win, "Today's win")
+        if briefing.todays_win
+        else """
+        <article class="briefing-card">
+          <div class="briefing-card-heading"><span>Today's win</span><strong>Watching</strong></div>
+          <h3>No specific win yet</h3>
+          <p>There is not enough positive Decision Engine output to call out a win today.</p>
+          <div class="briefing-meta"><small>General</small><small>Not quantified</small></div>
+        </article>
+        """
+    )
+    sources = ", ".join(briefing.data_sources_used) if briefing.data_sources_used else "No decision sources"
+    return f"""
+    <section class="report-section briefing-section">
+      <div class="briefing-hero">
+        <div>
+          <span class="eyebrow">Daily briefing</span>
+          <h2>{html.escape(briefing.greeting)}</h2>
+          <p>{html.escape(briefing.introduction)}</p>
+        </div>
+        <div class="briefing-readtime">
+          <span>{html.escape(briefing.confidence)} confidence</span>
+          <strong>{briefing.read_time_minutes} min read</strong>
+        </div>
+      </div>
+      <p class="briefing-headline">{html.escape(briefing.headline)}</p>
+      <div class="briefing-grid two-up">{priority}{win}</div>
+      {briefing_opportunities_html(briefing.opportunities)}
+      <p class="briefing-sources">Sources used: {html.escape(sources)}</p>
+    </section>
+    """
+
+
+def home_page_html(
+    briefing: DailyBriefing,
+) -> str:
+    return daily_briefing_html(briefing)
 
 
 def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> str:
@@ -2105,6 +2165,7 @@ def write_html(
     )
     plan = plan_comparison(period_summary, settings)
     scenarios = scenario_analysis(period_summary, settings)
+    briefing = build_daily_briefing(recommendations, local_today())
     generated_at = datetime.now().astimezone().strftime("%d %b %Y, %H:%M %Z")
     document = f"""<!doctype html>
 <html lang="en">
@@ -2273,6 +2334,27 @@ def write_html(
     .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
     .action-card h3 {{ margin:11px 0 5px; font-size:16px; }} .action-card p {{ margin:0; color:var(--muted); font-size:12px; }}
     .action-card.green {{ background:#f3fbf7; border-color:#cce9dc; }} .action-card.amber {{ background:#fffaf0; border-color:#eeddb0; }} .action-card.red {{ background:#fff5f3; border-color:#f0cec8; }}
+    .briefing-section {{ display:grid; gap:18px; }}
+    .briefing-hero {{ display:flex; align-items:flex-start; justify-content:space-between; gap:28px; padding:26px; color:#fff; background:linear-gradient(135deg,#111816,#285140); border-radius:24px; }}
+    .briefing-hero h2 {{ max-width:760px; color:#fff; font-size:34px; }}
+    .briefing-hero p {{ max-width:700px; margin:8px 0 0; color:rgba(255,255,255,.74); }}
+    .briefing-readtime {{ flex:0 0 150px; padding:14px; text-align:right; background:rgba(255,255,255,.1); border-radius:16px; }}
+    .briefing-readtime span,.briefing-card-heading span,.briefing-meta small,.briefing-sources {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .briefing-readtime span {{ color:rgba(255,255,255,.64); }}
+    .briefing-readtime strong {{ display:block; margin-top:5px; font-size:20px; letter-spacing:-.035em; }}
+    .briefing-headline {{ margin:0; color:#2f453e; font-size:20px; font-weight:750; letter-spacing:-.025em; }}
+    .briefing-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
+    .briefing-grid.two-up {{ grid-template-columns:1fr 1fr; }}
+    .briefing-card {{ padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .briefing-card-heading,.briefing-meta {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
+    .briefing-card-heading strong {{ padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .briefing-card h3 {{ margin:13px 0 7px; font-size:20px; letter-spacing:-.035em; }}
+    .briefing-card p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.5; }}
+    .briefing-meta {{ margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }}
+    .briefing-card.green {{ background:#f3fbf7; }} .briefing-card.amber {{ background:#fffaf0; }} .briefing-card.red {{ background:#fff5f3; }}
+    .briefing-block {{ display:grid; gap:14px; }}
+    .briefing-block .section-title {{ margin:0; }}
+    .briefing-sources {{ margin:0; color:#8a9692; }}
     .plan-detail-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:14px; }}
     .plan-detail-grid div {{ padding:13px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
     .plan-detail-grid span,.plan-detail-grid strong {{ display:block; }} .plan-detail-grid span {{ color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }}
@@ -2345,7 +2427,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}
@@ -2358,6 +2440,8 @@ def write_html(
       .hero-alert {{ align-items:flex-start; flex-direction:column; }}
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
       .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}
+      .briefing-hero {{ flex-direction:column; padding:20px; }} .briefing-readtime {{ flex:0 0 auto; width:100%; text-align:left; }}
+      .briefing-grid,.briefing-grid.two-up {{ grid-template-columns:1fr; }}
       .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}
       .chart-card {{ padding:16px; }} .chart-heading {{ align-items:flex-start; flex-direction:column; gap:2px; }}
       .trend-card {{ padding:16px; }} .trend-row {{ grid-template-columns:48px 1fr 68px; gap:7px; }}
@@ -2386,8 +2470,7 @@ def write_html(
   {period_controls_html(selected_period)}
   {nav_html()}
   <section id="home" class="page">
-    <div class="page-heading"><h2>How am I doing today?</h2><p>The essential picture: cost, solar, EV charging, recommended actions, and system health.</p></div>
-    {home_page_html(today_summary, period_summary, settings, health, recommendations)}
+    {home_page_html(briefing)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
