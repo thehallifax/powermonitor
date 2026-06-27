@@ -8,6 +8,7 @@ from .models import (
     CONFIDENCE_LEVELS,
     FINANCIAL_IMPACT_PERIODS,
     Decision,
+    DecisionExplanation,
     FinancialImpact,
 )
 
@@ -67,7 +68,95 @@ def _validate_decision(decision: Decision) -> Decision:
         raise ValueError(f"Unsupported decision confidence: {decision.confidence}")
     for period in FINANCIAL_IMPACT_PERIODS:
         decision.financial_impact.setdefault(period, None)
+    if decision.explanation is None:
+        decision.explanation = _decision_explanation(decision)
     return decision
+
+
+def _decision_explanation(decision: Decision) -> DecisionExplanation:
+    return DecisionExplanation(
+        why_this_matters=_why_this_matters(decision),
+        evidence_used=_evidence_used(decision),
+        financial_impact=_financial_impact_text(decision),
+        confidence_reason=_confidence_reason(decision),
+        data_sources_used=list(decision.data_sources_used),
+        freshness_completeness_note=_freshness_completeness_note(decision),
+    )
+
+
+def _why_this_matters(decision: Decision) -> str:
+    if decision.category == "Bills":
+        return "This can affect the current bill and should be reviewed before the billing period closes."
+    if decision.category == "Tariffs":
+        return "This points to usage that may cost more than it needs to under the current tariff."
+    if decision.category == "Solar":
+        return "This affects how much solar is used at home instead of exported at a lower credit."
+    if decision.category == "EV":
+        return "EV charging is a flexible load, so timing can materially change charging cost."
+    if decision.category == "Behaviour":
+        return "Always-on or overnight load can quietly add cost across the whole billing period."
+    if decision.action_type == "maintain":
+        return "This is a positive signal worth keeping in place."
+    return "This decision highlights an energy pattern that may be worth acting on."
+
+
+def _evidence_used(decision: Decision) -> list[str]:
+    if not decision.evidence:
+        return [decision.finding]
+    return [
+        f"{_evidence_label(key)}: {_evidence_value(value)}"
+        for key, value in decision.evidence.items()
+    ]
+
+
+def _evidence_label(key: str) -> str:
+    return key.replace("_", " ").capitalize()
+
+
+def _evidence_value(value) -> str:
+    if isinstance(value, float):
+        return f"{value:,.2f}"
+    return str(value)
+
+
+def _financial_impact_text(decision: Decision) -> str:
+    labels = {
+        "today": "today",
+        "billing_period": "this billing period",
+        "yearly": "per year",
+    }
+    for key in FINANCIAL_IMPACT_PERIODS:
+        value = decision.financial_impact.get(key)
+        if value is not None:
+            return f"{_money(float(value))} {labels[key]}"
+    return "Not quantified by the current Decision Engine output."
+
+
+def _confidence_reason(decision: Decision) -> str:
+    projection_days = decision.evidence.get("projection_reading_days")
+    if projection_days is not None:
+        return (
+            f"{decision.confidence} confidence because the projection uses "
+            f"{projection_days} reading days and the available source metadata."
+        )
+    if any("Actual" in source or "Ocular" in source for source in decision.data_sources_used):
+        return f"{decision.confidence} confidence because actual session/source data is available."
+    if "Estimated EV charging" in decision.data_sources_used:
+        return f"{decision.confidence} confidence because part of the result uses estimated EV charging."
+    return f"{decision.confidence} confidence based on the available interval data and configured assumptions."
+
+
+def _freshness_completeness_note(decision: Decision) -> Optional[str]:
+    notes = []
+    reading_days = decision.evidence.get("projection_reading_days")
+    projected_days = decision.evidence.get("projected_period_days")
+    if reading_days is not None and projected_days is not None:
+        notes.append(f"Uses {reading_days} of {projected_days} projected period days.")
+    elif reading_days is not None:
+        notes.append(f"Uses {reading_days} reading days.")
+    if decision.expires_at:
+        notes.append(f"Decision expires at {decision.expires_at}.")
+    return " ".join(notes) if notes else None
 
 
 def peak_cost_reduction(context: dict, thresholds: dict) -> Optional[Decision]:

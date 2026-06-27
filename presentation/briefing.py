@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any, Iterable, Optional
 
-from engine.models import Decision
+from engine.models import Decision, DecisionExplanation
 
 
 PRIORITY_RANK = {
@@ -13,6 +13,21 @@ PRIORITY_RANK = {
     "medium": 1,
     "low": 2,
 }
+
+
+@dataclass(frozen=True)
+class BriefingExplanation:
+    """Presentation-ready explanation for a briefing item."""
+
+    why_this_matters: str
+    evidence_used: list[str]
+    financial_impact: str
+    confidence_reason: str
+    data_sources_used: list[str]
+    freshness_completeness_note: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -28,6 +43,7 @@ class BriefingItem:
     financial_impact: str
     data_sources_used: list[str]
     decision_id: Optional[str] = None
+    explanation: Optional[BriefingExplanation] = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -184,6 +200,7 @@ def _briefing_item(decision: Decision) -> BriefingItem:
         severity=decision.severity,
         financial_impact=_financial_impact_text(decision),
         data_sources_used=list(decision.data_sources_used),
+        explanation=_briefing_explanation(decision),
     )
 
 
@@ -205,6 +222,34 @@ def _financial_impact_text(decision: Decision) -> str:
         if value is not None:
             return f"${float(value):,.2f} {label}"
     return "Not quantified"
+
+
+def _briefing_explanation(decision: Decision) -> BriefingExplanation:
+    explanation = decision.explanation or _fallback_decision_explanation(decision)
+    return BriefingExplanation(
+        why_this_matters=explanation.why_this_matters,
+        evidence_used=list(explanation.evidence_used),
+        financial_impact=explanation.financial_impact,
+        confidence_reason=explanation.confidence_reason,
+        data_sources_used=list(explanation.data_sources_used),
+        freshness_completeness_note=explanation.freshness_completeness_note,
+    )
+
+
+def _fallback_decision_explanation(decision: Decision) -> DecisionExplanation:
+    return DecisionExplanation(
+        why_this_matters=decision.finding,
+        evidence_used=[
+            f"{key.replace('_', ' ').capitalize()}: {value}"
+            for key, value in decision.evidence.items()
+        ] or [decision.finding],
+        financial_impact=_financial_impact_text(decision),
+        confidence_reason=f"{decision.confidence} confidence from Decision Engine output.",
+        data_sources_used=list(decision.data_sources_used),
+        freshness_completeness_note=(
+            f"Decision expires at {decision.expires_at}." if decision.expires_at else None
+        ),
+    )
 
 
 def _overall_confidence(decisions: list[Decision]) -> str:

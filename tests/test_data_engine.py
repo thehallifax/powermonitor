@@ -176,6 +176,13 @@ class DataEngineTests(unittest.TestCase):
         )
 
         self.assertIn("baseload_monitoring", [decision.id for decision in decisions])
+        baseload = next(decision for decision in decisions if decision.id == "baseload_monitoring")
+        self.assertIsNotNone(baseload.explanation)
+        self.assertEqual(
+            baseload.explanation.data_sources_used,
+            ["SolarEdge interval data", "Estimated EV charging"],
+        )
+        self.assertIn("overnight load", baseload.explanation.why_this_matters)
 
 
 if __name__ == "__main__":

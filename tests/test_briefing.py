@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from engine.models import Decision, FinancialImpact
+from engine.models import Decision, DecisionExplanation, FinancialImpact
 from presentation.briefing import build_daily_briefing
 
 
@@ -53,6 +53,45 @@ class DailyBriefingTests(unittest.TestCase):
         self.assertEqual(
             briefing.data_sources_used,
             ["SolarEdge interval data", "Tariff settings"],
+        )
+        self.assertIsNotNone(briefing.todays_priority.explanation)
+        self.assertEqual(
+            briefing.todays_priority.explanation.data_sources_used,
+            ["SolarEdge interval data", "Tariff settings"],
+        )
+
+    def test_briefing_preserves_decision_explanation_output(self):
+        explained = decision(
+            "high_cost_alert",
+            "Projected billing cost is high",
+            "High",
+            "review",
+            310.25,
+        )
+        explained.explanation = DecisionExplanation(
+            why_this_matters="The bill projection is above the configured threshold.",
+            evidence_used=["Projected net cost: 310.25", "Configured threshold: 300.00"],
+            financial_impact="$310.25 this billing period",
+            confidence_reason="Medium confidence because the projection uses 14 reading days.",
+            data_sources_used=["SolarEdge interval data", "Billing period settings"],
+            freshness_completeness_note="Uses 14 of 30 projected period days.",
+        )
+
+        briefing = build_daily_briefing([explained], date(2026, 6, 27))
+
+        explanation = briefing.todays_priority.explanation
+        self.assertEqual(
+            explanation.why_this_matters,
+            "The bill projection is above the configured threshold.",
+        )
+        self.assertEqual(
+            explanation.evidence_used,
+            ["Projected net cost: 310.25", "Configured threshold: 300.00"],
+        )
+        self.assertEqual(explanation.financial_impact, "$310.25 this billing period")
+        self.assertEqual(
+            explanation.freshness_completeness_note,
+            "Uses 14 of 30 projected period days.",
         )
 
     def test_empty_decisions_produce_no_action_briefing(self):

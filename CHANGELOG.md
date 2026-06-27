@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 0.6.5 - Explainability
+
+- Added Decision explanation payloads for why a decision matters, evidence
+  used, financial impact, confidence reason, data sources, and
+  freshness/completeness notes where available.
+- Updated the Decision Engine to populate explanations from existing decision
+  output without adding new calculations or new decision logic.
+- Extended the Daily Briefing presentation model so priorities and
+  opportunities can expose explanation details.
+- Updated the Home Daily Briefing priority card with a compact `Why?`
+  expandable explanation section.
+- Added unit tests for explanation serialization and Daily Briefing explanation
+  output.
+
 ## Sprint 0.6.4 - Daily Briefing
 
 - Added `presentation/briefing.py` as a lightweight Output Layer that consumes

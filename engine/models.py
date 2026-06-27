@@ -146,6 +146,7 @@ class Decision:
     data_sources_used: list[str]
     category: str
     action_type: str
+    explanation: Optional["DecisionExplanation"] = None
 
     @property
     def severity(self) -> str:
@@ -180,3 +181,15 @@ class Decision:
         data["metrics"] = self.metrics
         data["action"] = self.recommendation
         return data
+
+
+@dataclass(frozen=True)
+class DecisionExplanation:
+    """Explainability payload owned by the Decision Engine."""
+
+    why_this_matters: str
+    evidence_used: list[str]
+    financial_impact: str
+    confidence_reason: str
+    data_sources_used: list[str]
+    freshness_completeness_note: Optional[str] = None

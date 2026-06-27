@@ -1718,7 +1718,9 @@ def briefing_card_html(
     item: BriefingItem,
     eyebrow: str,
     heading: Optional[str] = None,
+    show_explanation: bool = False,
 ) -> str:
+    explanation = briefing_explanation_html(item) if show_explanation else ""
     return f"""
     <article class="briefing-card {html.escape(item.severity)}">
       <div class="briefing-card-heading">
@@ -1731,7 +1733,61 @@ def briefing_card_html(
         <small>{html.escape(item.category)}</small>
         <small>{html.escape(item.financial_impact)}</small>
       </div>
+      {explanation}
     </article>
+    """
+
+
+def briefing_explanation_html(item: BriefingItem) -> str:
+    explanation = item.explanation
+    if not explanation:
+        return ""
+    evidence_items = "".join(
+        f"<li>{html.escape(evidence)}</li>"
+        for evidence in explanation.evidence_used
+    )
+    sources = (
+        ", ".join(explanation.data_sources_used)
+        if explanation.data_sources_used
+        else "No decision sources"
+    )
+    freshness = (
+        f"""
+        <div>
+          <span>Freshness/completeness</span>
+          <p>{html.escape(explanation.freshness_completeness_note)}</p>
+        </div>
+        """
+        if explanation.freshness_completeness_note
+        else ""
+    )
+    return f"""
+      <details class="briefing-explanation">
+        <summary>Why?</summary>
+        <div class="briefing-explanation-grid">
+          <div>
+            <span>Why this matters</span>
+            <p>{html.escape(explanation.why_this_matters)}</p>
+          </div>
+          <div>
+            <span>Financial impact</span>
+            <p>{html.escape(explanation.financial_impact)}</p>
+          </div>
+          <div>
+            <span>Confidence reason</span>
+            <p>{html.escape(explanation.confidence_reason)}</p>
+          </div>
+          {freshness}
+          <div>
+            <span>Evidence used</span>
+            <ul>{evidence_items}</ul>
+          </div>
+          <div>
+            <span>Data sources used</span>
+            <p>{html.escape(sources)}</p>
+          </div>
+        </div>
+      </details>
     """
 
 
@@ -1757,7 +1813,7 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
 
 def daily_briefing_html(briefing: DailyBriefing) -> str:
     priority = (
-        briefing_card_html(briefing.todays_priority, "Today's priority")
+        briefing_card_html(briefing.todays_priority, "Today's priority", show_explanation=True)
         if briefing.todays_priority
         else """
         <article class="briefing-card green">
@@ -2351,6 +2407,13 @@ def write_html(
     .briefing-card h3 {{ margin:13px 0 7px; font-size:20px; letter-spacing:-.035em; }}
     .briefing-card p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.5; }}
     .briefing-meta {{ margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }}
+    .briefing-explanation {{ margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,.08); }}
+    .briefing-explanation summary {{ cursor:pointer; color:var(--ink); font-size:12px; font-weight:850; }}
+    .briefing-explanation-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:11px; margin-top:12px; }}
+    .briefing-explanation-grid div {{ min-width:0; }}
+    .briefing-explanation-grid span {{ display:block; margin-bottom:3px; color:var(--ink); font-size:8px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .briefing-explanation-grid p,.briefing-explanation-grid li {{ color:var(--muted); font-size:12px; line-height:1.4; }}
+    .briefing-explanation-grid ul {{ margin:0; padding-left:18px; }}
     .briefing-card.green {{ background:#f3fbf7; }} .briefing-card.amber {{ background:#fffaf0; }} .briefing-card.red {{ background:#fff5f3; }}
     .briefing-block {{ display:grid; gap:14px; }}
     .briefing-block .section-title {{ margin:0; }}
@@ -2427,7 +2490,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.briefing-explanation-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}

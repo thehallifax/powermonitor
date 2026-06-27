@@ -5,6 +5,7 @@ from engine.financial_engine import FinancialEngine
 from engine.models import (
     Confidence,
     Decision,
+    DecisionExplanation,
     EngineStatus,
     Evidence,
     FinancialImpact,
@@ -47,6 +48,37 @@ class ModelTests(unittest.TestCase):
             set(payload["financial_impact"]),
             {"today", "billing_period", "yearly"},
         )
+
+    def test_decision_serializes_explanation_output(self):
+        decision = Decision(
+            id="test_decision",
+            title="Test decision",
+            summary="Summary",
+            finding="Finding",
+            evidence={"peak_cost": 12.5},
+            financial_impact=FinancialImpact(billing_period=4.2),
+            recommendation="Act",
+            confidence="Medium",
+            priority="High",
+            expires_at="2026-06-30",
+            data_sources_used=["SolarEdge interval data"],
+            category="Tariffs",
+            action_type="load_shift",
+            explanation=DecisionExplanation(
+                why_this_matters="Peak imports cost more.",
+                evidence_used=["Peak cost: 12.50"],
+                financial_impact="$4.20 this billing period",
+                confidence_reason="Medium confidence from interval data.",
+                data_sources_used=["SolarEdge interval data"],
+                freshness_completeness_note="Decision expires at 2026-06-30.",
+            ),
+        )
+
+        payload = decision.as_dict()
+
+        self.assertEqual(payload["explanation"]["why_this_matters"], "Peak imports cost more.")
+        self.assertEqual(payload["explanation"]["evidence_used"], ["Peak cost: 12.50"])
+        self.assertEqual(payload["explanation"]["data_sources_used"], ["SolarEdge interval data"])
 
     def test_model_validation_rejects_unknown_states(self):
         with self.assertRaises(ValueError):
