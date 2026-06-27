@@ -32,6 +32,4 @@ collector/solaredge_cookie.txt
 
 # Temporary imports/exports
 *.xlsx
-*.csvdata/collector_health.json
-data/collector_health.json
-data/collector_health.json
+*.csv
