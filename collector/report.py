@@ -2260,7 +2260,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     """
 
 
-def whatif_page_html(analysis: dict, plan: dict) -> str:
+def whatif_page_html(analysis: dict, plan: dict, recommendations: list[Decision]) -> str:
     savings = plan["savings"]
     meaning = (
         f"The EV Add On plan is ahead by {money(savings)} for this period."
@@ -2269,11 +2269,14 @@ def whatif_page_html(analysis: dict, plan: dict) -> str:
         if savings < 0
         else "The current and comparison plans are roughly even this period."
     )
-    best_move = (
-        "Keep charging in the cheapest EV window and watch any Peak sessions."
-        if savings >= 0
-        else "Review whether charging can be shifted into the EV window; if not, the Flat/Home plan may be worth comparing again next bill."
+    shared_recommendation = next(
+        (
+            item for item in recommendations
+            if item.category in {"EV", "Tariffs", "Bills"} and item.action_type != "maintain"
+        ),
+        recommendations[0] if recommendations else None,
     )
+    best_move = shared_recommendation.recommendation if shared_recommendation else "No active recommendation for this scenario."
     return f"""
     {scenario_analysis_html(analysis)}
     <section class="report-section compact-section">
@@ -2660,7 +2663,7 @@ def write_html(
   </section>
   <section id="whatif" class="page">
     <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
-    {whatif_page_html(scenarios, plan)}
+    {whatif_page_html(scenarios, plan, recommendations)}
   </section>
   <section id="timeline" class="page">
     <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>

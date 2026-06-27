@@ -11,6 +11,12 @@ from .models import (
     DecisionExplanation,
     FinancialImpact,
 )
+from .recommendation_engine import (
+    generate_ev_session_recommendations,
+    generate_recommendations as generate_shared_recommendations,
+    generate_recommendations_from_data_engine as generate_shared_recommendations_from_data_engine,
+    recommendations_to_decisions,
+)
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 BUCKET_LABELS = {
@@ -763,12 +769,14 @@ RULES: tuple[Rule, ...] = (
 
 
 def generate_decisions(context: dict, thresholds: dict) -> list[Decision]:
-    decisions = []
-    for rule in RULES:
-        decision = rule(context, thresholds)
-        if decision:
-            decisions.append(_validate_decision(decision))
-    return decisions
+    recommendations = generate_shared_recommendations(context, thresholds)
+    return [
+        _validate_decision(decision)
+        for decision in recommendations_to_decisions(
+            recommendations,
+            expires_at=context.get("projected_period_end"),
+        )
+    ]
 
 
 def build_decision_context(
@@ -826,13 +834,15 @@ def generate_decisions_from_data_engine(
     thresholds: dict,
     previous_summary: Optional[dict] = None,
 ) -> list[Decision]:
-    context = build_decision_context(
+    recommendations = generate_shared_recommendations_from_data_engine(
         current_summary,
         settings,
         data_engine,
+        thresholds,
         previous_summary=previous_summary,
     )
-    return generate_decisions(context, thresholds)
+    expires_at = current_summary.get("end")
+    return [_validate_decision(decision) for decision in recommendations_to_decisions(recommendations, expires_at=str(expires_at))]
 
 
 def generate_recommendations(context: dict, thresholds: dict) -> list[dict]:
@@ -840,95 +850,9 @@ def generate_recommendations(context: dict, thresholds: dict) -> list[dict]:
 
 
 def generate_ev_session_decisions(sessions: list[dict], import_rates: dict) -> list[Decision]:
-    if not sessions:
-        return []
-
-    total_kwh = sum(session["energy_kwh"] for session in sessions)
-    tariff_usage = {
-        bucket: {
-            "kwh": sum(session["tariff_breakdown"][bucket]["kwh"] for session in sessions),
-            "cost": sum(session["tariff_breakdown"][bucket]["cost"] for session in sessions),
-        }
-        for bucket in BUCKET_ORDER
-    }
-    for bucket in BUCKET_ORDER:
-        tariff_usage[bucket]["pct"] = tariff_usage[bucket]["kwh"] / total_kwh * 100 if total_kwh else 0.0
-
-    decisions = []
-    cheapest_bucket = min(BUCKET_ORDER, key=lambda bucket: import_rates.get(bucket, 0))
-    peak_bucket = max(BUCKET_ORDER, key=lambda bucket: import_rates.get(bucket, 0))
-    cheap_pct = tariff_usage[cheapest_bucket]["pct"]
-    if cheap_pct >= 90:
-        recommendation = (
-            f"{cheap_pct:.0f}% of charging occurred during "
-            f"{EV_BUCKET_LABELS[cheapest_bucket]}."
+    return [
+        _validate_decision(decision)
+        for decision in recommendations_to_decisions(
+            generate_ev_session_recommendations(sessions, import_rates)
         )
-        decisions.append(
-            Decision(
-                id="ev_session_low_cost_window",
-                title="EV charging is mostly in the low-cost window",
-                summary=recommendation,
-                finding=recommendation,
-                evidence={
-                    "cheap_window_pct": cheap_pct,
-                    "cheap_window_kwh": tariff_usage[cheapest_bucket]["kwh"],
-                    "total_session_kwh": total_kwh,
-                },
-                financial_impact=_impact(),
-                recommendation=recommendation,
-                confidence="High",
-                priority="Low",
-                expires_at=None,
-                data_sources_used=["Actual EV session data", "Tariff settings"],
-                category="EV",
-                action_type="maintain",
-            )
-        )
-
-    peak_sessions = [
-        session for session in sessions
-        if session["tariff_breakdown"][peak_bucket]["cost"] > 0
     ]
-    if peak_sessions:
-        target = max(peak_sessions, key=lambda session: session["tariff_breakdown"][peak_bucket]["cost"])
-        peak_cost = target["tariff_breakdown"][peak_bucket]["cost"]
-        peak_kwh = target["tariff_breakdown"][peak_bucket]["kwh"]
-        savings = max(
-            financial_engine.calculate_load_shift_savings(
-                peak_kwh,
-                import_rates[peak_bucket],
-                import_rates[cheapest_bucket],
-            ),
-            0.0,
-        )
-        recommendation = (
-            f"One session incurred {BUCKET_LABELS.get(peak_bucket, peak_bucket)} charges "
-            f"costing {_money(peak_cost)}. Shifting that energy to "
-            f"{EV_BUCKET_LABELS[cheapest_bucket]} would have saved about {_money(savings)}."
-        )
-        decisions.append(
-            Decision(
-                id="ev_session_peak_shift",
-                title="Shift Peak EV session energy",
-                summary=recommendation,
-                finding=(
-                    f"One EV session used {peak_kwh:.2f} kWh in the "
-                    f"{BUCKET_LABELS.get(peak_bucket, peak_bucket)} bucket."
-                ),
-                evidence={
-                    "peak_session_cost": peak_cost,
-                    "peak_session_kwh": peak_kwh,
-                    "savings_if_shifted": savings,
-                },
-                financial_impact=financial_engine.financial_impact(billing_period=savings),
-                recommendation=recommendation,
-                confidence="High",
-                priority="Medium",
-                expires_at=None,
-                data_sources_used=["Actual EV session data", "Tariff settings"],
-                category="EV",
-                action_type="load_shift",
-            )
-        )
-
-    return [_validate_decision(decision) for decision in decisions]

@@ -6,7 +6,9 @@ from datetime import date, datetime
 from typing import Any, Optional, Union
 
 CATEGORIES = ("EV", "Solar", "Bills", "Tariffs", "Behaviour", "Battery", "General")
+RECOMMENDATION_CATEGORIES = ("billing", "solar", "EV", "tariff", "baseload", "data_quality")
 CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
+DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
@@ -181,6 +183,71 @@ class Decision:
         data["severity"] = self.severity
         data["metrics"] = self.metrics
         data["action"] = self.recommendation
+        return data
+
+
+@dataclass
+class RecommendationImpact:
+    """Estimated recommendation value for the active period and monthly view."""
+
+    period: Optional[float] = None
+    monthly: Optional[float] = None
+    currency: str = "AUD"
+    basis: Optional[str] = None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RecommendationDismissal:
+    """Future-compatible state for hiding or suppressing recommendations."""
+
+    dismissible: bool = True
+    dismissed: bool = False
+    dismissed_at: Optional[str] = None
+    dismissed_until: Optional[str] = None
+    reason: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Recommendation:
+    """Presentation-agnostic recommendation emitted by the Recommendation Engine."""
+
+    stable_id: str
+    category: str
+    title: str
+    explanation: str
+    estimated_financial_impact: RecommendationImpact
+    confidence: str
+    difficulty: str
+    priority_score: int
+    supporting_evidence: dict[str, Any]
+    recommended_action: str
+    dismissible_state: RecommendationDismissal = field(default_factory=RecommendationDismissal)
+
+    def __post_init__(self) -> None:
+        if self.category not in RECOMMENDATION_CATEGORIES:
+            raise ValueError(f"Unsupported recommendation category: {self.category}")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported recommendation confidence: {self.confidence}")
+        if self.difficulty not in DIFFICULTY_LEVELS:
+            raise ValueError(f"Unsupported recommendation difficulty: {self.difficulty}")
+        self.priority_score = max(0, min(100, int(round(self.priority_score))))
+
+    @property
+    def id(self) -> str:
+        return self.stable_id
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["id"] = self.stable_id
         return data
 
 

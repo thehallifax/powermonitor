@@ -10,8 +10,12 @@ from .models import (
     Forecast,
     Freshness,
     Insight,
+    Recommendation,
+    RecommendationDismissal,
+    RecommendationImpact,
     to_api_safe,
 )
+from .recommendation_engine import RecommendationEngine
 
 __all__ = [
     "Confidence",
@@ -27,6 +31,10 @@ __all__ = [
     "Freshness",
     "HouseholdSnapshot",
     "Insight",
+    "Recommendation",
+    "RecommendationDismissal",
+    "RecommendationEngine",
+    "RecommendationImpact",
     "generate_decisions",
     "generate_ev_session_decisions",
     "to_api_safe",

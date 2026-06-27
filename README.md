@@ -508,10 +508,11 @@ stored fields drive the EV Charging analytics section:
 
 ## Recommendations
 
-The Decision Engine lives in `engine/decision_engine.py`. It evaluates the
-current billing-period and EV session data and only returns structured
-decisions that are relevant. The same decision-backed recommendations appear in
-the generated HTML dashboard and the `/api/summary` JSON response.
+The Recommendation Engine lives in `engine/recommendation_engine.py`. It
+evaluates current billing-period, solar, EV, tariff, baseload, trend, and data
+quality observations and returns ranked structured recommendations. The
+Decision Engine adapts those recommendations for the existing dashboard and
+`/api/summary` contracts.
 
 Recommendation thresholds are configured under `recommendation_thresholds` in
 `config/settings.json`. The projected-cost alert uses the previous configured
