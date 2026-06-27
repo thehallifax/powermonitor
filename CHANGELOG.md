@@ -1,5 +1,18 @@
 # Changelog
 
+## Sprint 0.8.2 - Recommendation Lifecycle v1
+
+- Added SQLite-backed recommendation lifecycle state keyed by stable
+  recommendation ID.
+- Added active, dismissed, and snoozed-until lifecycle handling owned by
+  `DataEngine`.
+- Updated the Recommendation Engine to apply lifecycle state and filter
+  dismissed/currently snoozed recommendations from active outputs by default.
+- Added Recommendation Centre hidden counts for dismissed and snoozed
+  recommendations.
+- Added tests for lifecycle persistence, filtering, expired snoozes, and Centre
+  hidden-count rendering.
+
 ## Sprint 0.8.1 - Recommendation Centre
 
 - Added a Recommendations dashboard page that ranks all active household

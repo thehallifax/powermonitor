@@ -209,6 +209,34 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertEqual([entry.title for entry in timeline.entries], ["Current event"])
 
+    def test_recommendation_lifecycle_is_persisted_and_counted(self):
+        dismissed = self.engine.set_recommendation_lifecycle(
+            "peak_cost_reduction",
+            "dismissed",
+            reason="Not relevant this week",
+        )
+        snoozed = self.engine.set_recommendation_lifecycle(
+            "solar_self_consumption",
+            "snoozed_until",
+            snoozed_until="2999-01-01",
+        )
+
+        lifecycle = self.engine.get_recommendation_lifecycle()
+        counts = self.engine.get_recommendation_lifecycle_counts()
+
+        self.assertEqual(dismissed["state"], "dismissed")
+        self.assertEqual(snoozed["snoozed_until"], "2999-01-01")
+        self.assertEqual(lifecycle["peak_cost_reduction"]["reason"], "Not relevant this week")
+        self.assertEqual(counts["dismissed"], 1)
+        self.assertEqual(counts["snoozed_until"], 1)
+
+    def test_recommendation_lifecycle_validates_state(self):
+        with self.assertRaises(ValueError):
+            self.engine.set_recommendation_lifecycle("peak_cost_reduction", "hidden")
+
+        with self.assertRaises(ValueError):
+            self.engine.set_recommendation_lifecycle("peak_cost_reduction", "snoozed_until")
+
     def test_decision_engine_consumes_data_engine_for_baseload(self):
         settings = Settings()
         summary = {

@@ -225,6 +225,7 @@ def dashboard_data(
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, period_summary, settings)
+        recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         timeline_candidates = build_decision_timeline(period_summary, recommendations)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
     scenarios = scenario_analysis(period_summary, settings)
@@ -259,6 +260,7 @@ def dashboard_data(
         "energy_score": energy_score.as_dict(),
         "car_comparison": car_comparison(settings),
         "recommendations": [decision.as_dict() for decision in recommendations],
+        "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
     }
 
@@ -1739,13 +1741,26 @@ def recommendation_evidence_html(decision: Decision) -> str:
     return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
 
 
-def recommendation_centre_html(recommendations: list[Decision]) -> str:
+def recommendation_centre_html(
+    recommendations: list[Decision],
+    lifecycle_counts: Optional[dict[str, int]] = None,
+) -> str:
     ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
+    lifecycle_counts = lifecycle_counts or {"dismissed": 0, "snoozed_until": 0}
+    inactive_count = int(lifecycle_counts.get("dismissed", 0)) + int(lifecycle_counts.get("snoozed_until", 0))
+    lifecycle_note = (
+        f'<p class="notice">{inactive_count} hidden: '
+        f'{int(lifecycle_counts.get("dismissed", 0))} dismissed, '
+        f'{int(lifecycle_counts.get("snoozed_until", 0))} snoozed.</p>'
+        if inactive_count
+        else ""
+    )
     if not ranked:
-        return """
+        return f"""
         <section class="report-section compact-section">
           <div class="section-title"><div><span class="eyebrow">Recommendation centre</span><h2>No active opportunities</h2></div></div>
           <p class="notice">No recommendations are active for this period.</p>
+          {lifecycle_note}
         </section>
         """
     cards = []
@@ -1788,6 +1803,7 @@ def recommendation_centre_html(recommendations: list[Decision]) -> str:
         <div><span class="eyebrow">Recommendation centre</span><h2>Ranked household opportunities</h2></div>
         <p>{len(ranked)} active</p>
       </div>
+      {lifecycle_note}
       <div class="recommendation-grid">{''.join(cards)}</div>
     </section>
     """
@@ -2401,6 +2417,7 @@ def write_html(
     comparison: Optional[dict] = None,
     output_path: Optional[Path] = REPORT_PATH,
     timeline: Optional[DecisionTimeline] = None,
+    recommendation_lifecycle_counts: Optional[dict[str, int]] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -2761,7 +2778,7 @@ def write_html(
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations)}
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
@@ -2825,6 +2842,7 @@ def build_live_html(
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, selected_summary, settings)
+        recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(selected_summary, recommendations, comparison)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
@@ -2839,6 +2857,7 @@ def build_live_html(
         comparison,
         output_path=None,
         timeline=timeline,
+        recommendation_lifecycle_counts=recommendation_lifecycle_counts,
     )
 
 
@@ -2857,6 +2876,7 @@ def main() -> None:
         trends = load_daily_trends(conn, period_start, period_end, settings)
         health = health_data(conn, current_day, settings)
         recommendations = load_recommendations(conn, period_summary, settings)
+        recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         previous = resolve_period("previous_billing_period", settings, current_day)
         previous_summary = load_summary(conn, previous.start, previous.end, settings)
         comparison = compare_summaries(
@@ -2885,6 +2905,7 @@ def main() -> None:
         Period("current_billing_period", "Current billing period", period_start, period_end),
         comparison,
         timeline=timeline,
+        recommendation_lifecycle_counts=recommendation_lifecycle_counts,
     )
     logging.info(
         "Generated report for %s and billing period %s to %s at %s",

@@ -6,7 +6,7 @@ presentation-agnostic recommendation model. It evaluates measured observations
 only; it does not render HTML and it does not infer appliance-specific causes.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from .financial_engine import FinancialEngine
@@ -73,7 +73,12 @@ class RecommendationEngine:
     def __init__(self, financial_engine: Optional[FinancialEngine] = None) -> None:
         self.financial_engine = financial_engine or FinancialEngine()
 
-    def generate(self, observations: dict[str, Any], thresholds: dict[str, Any]) -> list[Recommendation]:
+    def generate(
+        self,
+        observations: dict[str, Any],
+        thresholds: dict[str, Any],
+        include_inactive: bool = False,
+    ) -> list[Recommendation]:
         recommendations = [
             item
             for item in (
@@ -88,7 +93,35 @@ class RecommendationEngine:
             if item is not None
         ]
         recommendations.extend(self._trend_recommendations(observations, thresholds))
-        return self.rank(recommendations)
+        return self.apply_lifecycle(
+            self.rank(recommendations),
+            observations.get("recommendation_lifecycle", {}),
+            include_inactive=include_inactive,
+        )
+
+    def apply_lifecycle(
+        self,
+        recommendations: list[Recommendation],
+        lifecycle: dict[str, dict[str, Any]],
+        include_inactive: bool = False,
+    ) -> list[Recommendation]:
+        now = datetime.now().astimezone()
+        active = []
+        for recommendation in recommendations:
+            state = lifecycle.get(recommendation.stable_id, {})
+            lifecycle_state = state.get("state") or "active"
+            snoozed_until = state.get("snoozed_until")
+            is_snoozed = lifecycle_state == "snoozed_until" and _is_future(snoozed_until, now)
+            is_dismissed = lifecycle_state == "dismissed"
+            recommendation.dismissible_state = RecommendationDismissal(
+                state=lifecycle_state if is_dismissed or is_snoozed else "active",
+                dismissed=is_dismissed,
+                dismissed_until=snoozed_until if is_snoozed else None,
+                reason=state.get("reason"),
+            )
+            if include_inactive or not (is_dismissed or is_snoozed):
+                active.append(recommendation)
+        return active
 
     def rank(self, recommendations: list[Recommendation]) -> list[Recommendation]:
         for recommendation in recommendations:
@@ -493,8 +526,12 @@ class RecommendationEngine:
         return self.financial_engine.projected_monthly_cost(value, int(days or 0))
 
 
-def generate_recommendations(context: dict[str, Any], thresholds: dict[str, Any]) -> list[Recommendation]:
-    return RecommendationEngine().generate(context, thresholds)
+def generate_recommendations(
+    context: dict[str, Any],
+    thresholds: dict[str, Any],
+    include_inactive: bool = False,
+) -> list[Recommendation]:
+    return RecommendationEngine().generate(context, thresholds, include_inactive=include_inactive)
 
 
 def generate_recommendations_from_data_engine(
@@ -503,6 +540,7 @@ def generate_recommendations_from_data_engine(
     data_engine,
     thresholds: dict[str, Any],
     previous_summary: Optional[dict[str, Any]] = None,
+    include_inactive: bool = False,
 ) -> list[Recommendation]:
     context = build_recommendation_context(
         current_summary,
@@ -510,7 +548,7 @@ def generate_recommendations_from_data_engine(
         data_engine,
         previous_summary=previous_summary,
     )
-    return generate_recommendations(context, thresholds)
+    return generate_recommendations(context, thresholds, include_inactive=include_inactive)
 
 
 def build_recommendation_context(
@@ -526,6 +564,11 @@ def build_recommendation_context(
     end = _as_date(current_summary["end"])
     overnight_baseload = data_engine.get_overnight_baseload_watts(start, end)
     timeline_history = data_engine.get_timeline_entries(limit=100)
+    recommendation_lifecycle = (
+        data_engine.get_recommendation_lifecycle()
+        if hasattr(data_engine, "get_recommendation_lifecycle")
+        else {}
+    )
 
     if settings.current_billing_period_start and settings.current_billing_period_end:
         projected_end = settings.current_billing_period_end
@@ -549,6 +592,7 @@ def build_recommendation_context(
         "ev_baseline_watts": settings.ev_baseline_watts,
         "overnight_baseload_watts": overnight_baseload,
         "timeline_history": timeline_history,
+        "recommendation_lifecycle": recommendation_lifecycle,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
         "projected_net_cost": projected_bill[0],
@@ -741,6 +785,22 @@ def _as_date(value) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value))
+
+
+def _is_future(value: Optional[str], now: datetime) -> bool:
+    if not value:
+        return False
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.combine(date.fromisoformat(text), datetime.max.time())
+        except ValueError:
+            return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=now.tzinfo)
+    return parsed > now
 
 
 def _entry_date(entry) -> Optional[date]:

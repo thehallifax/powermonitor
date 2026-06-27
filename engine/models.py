@@ -206,11 +206,16 @@ class RecommendationImpact:
 class RecommendationDismissal:
     """Future-compatible state for hiding or suppressing recommendations."""
 
+    state: str = "active"
     dismissible: bool = True
     dismissed: bool = False
     dismissed_at: Optional[str] = None
     dismissed_until: Optional[str] = None
     reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.state not in {"active", "dismissed", "snoozed_until"}:
+            raise ValueError(f"Unsupported recommendation lifecycle state: {self.state}")
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

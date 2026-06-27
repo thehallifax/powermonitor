@@ -83,7 +83,10 @@ class ReportExplainabilityTests(unittest.TestCase):
             category="tariff",
         )
 
-        markup = report.recommendation_centre_html([low, high])
+        markup = report.recommendation_centre_html(
+            [low, high],
+            {"dismissed": 1, "snoozed_until": 2},
+        )
 
         self.assertLess(
             markup.index("Reduce Peak-period imports"),
@@ -98,6 +101,7 @@ class ReportExplainabilityTests(unittest.TestCase):
         self.assertIn("Supporting evidence", markup)
         self.assertIn("Recommended action", markup)
         self.assertIn("Why?", markup)
+        self.assertIn("3 hidden: 1 dismissed, 2 snoozed.", markup)
 
     def test_serialized_decision_includes_explanation_for_api_outputs(self):
         payload = explained_decision().as_dict()

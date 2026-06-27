@@ -152,6 +152,39 @@ class RecommendationEngineTests(unittest.TestCase):
 
         self.assertNotIn("data_quality_actual_ev_sessions", ids)
 
+    def test_dismissed_and_snoozed_recommendations_are_filtered(self):
+        context = base_context()
+        context["recommendation_lifecycle"] = {
+            "peak_cost_reduction": {"state": "dismissed", "reason": "Handled"},
+            "solar_self_consumption": {
+                "state": "snoozed_until",
+                "snoozed_until": "2999-01-01",
+            },
+        }
+
+        active = generate_recommendations(context, THRESHOLDS)
+        inactive_included = generate_recommendations(context, THRESHOLDS, include_inactive=True)
+        active_ids = {item.stable_id for item in active}
+        included = {item.stable_id: item for item in inactive_included}
+
+        self.assertNotIn("peak_cost_reduction", active_ids)
+        self.assertNotIn("solar_self_consumption", active_ids)
+        self.assertTrue(included["peak_cost_reduction"].dismissible_state.dismissed)
+        self.assertEqual(included["solar_self_consumption"].dismissible_state.state, "snoozed_until")
+
+    def test_expired_snooze_returns_recommendation_to_active_results(self):
+        context = base_context()
+        context["recommendation_lifecycle"] = {
+            "peak_cost_reduction": {
+                "state": "snoozed_until",
+                "snoozed_until": "2000-01-01",
+            },
+        }
+
+        ids = {item.stable_id for item in generate_recommendations(context, THRESHOLDS)}
+
+        self.assertIn("peak_cost_reduction", ids)
+
     def test_data_engine_entrypoint_and_decision_adapter(self):
         recommendations = generate_recommendations_from_data_engine(
             base_context()["current"],

@@ -208,6 +208,24 @@ class DataEngine:
             ON timeline_entries(timestamp)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_lifecycle (
+                stable_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'active',
+                snoozed_until TEXT,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recommendation_lifecycle_state
+            ON recommendation_lifecycle(state)
+            """
+        )
         conn.commit()
 
     @staticmethod
@@ -525,6 +543,96 @@ class DataEngine:
                     "energy_kwh": chosen[2],
                 }
             return totals
+
+        return self._with_connection(query)
+
+    def set_recommendation_lifecycle(
+        self,
+        stable_id: str,
+        state: str,
+        snoozed_until: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if state not in {"active", "dismissed", "snoozed_until"}:
+            raise ValueError(f"Unsupported recommendation lifecycle state: {state}")
+        if state == "snoozed_until" and not snoozed_until:
+            raise ValueError("snoozed_until is required for snoozed recommendations")
+        if state != "snoozed_until":
+            snoozed_until = None
+
+        def upsert(conn):
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO recommendation_lifecycle (
+                    stable_id,
+                    state,
+                    snoozed_until,
+                    reason,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stable_id) DO UPDATE SET
+                    state = excluded.state,
+                    snoozed_until = excluded.snoozed_until,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at
+                """,
+                (stable_id, state, snoozed_until, reason, now, now),
+            )
+            conn.commit()
+            return self.get_recommendation_lifecycle([stable_id]).get(stable_id, {})
+
+        return self._with_connection(upsert)
+
+    def get_recommendation_lifecycle(
+        self,
+        stable_ids: Optional[list[str]] = None,
+    ) -> dict[str, dict[str, Any]]:
+        def query(conn):
+            if stable_ids:
+                rows = conn.execute(
+                    """
+                    SELECT stable_id, state, snoozed_until, reason, updated_at
+                    FROM recommendation_lifecycle
+                    WHERE stable_id IN ({})
+                    """.format(",".join("?" for _ in stable_ids)),
+                    tuple(stable_ids),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT stable_id, state, snoozed_until, reason, updated_at
+                    FROM recommendation_lifecycle
+                    """
+                ).fetchall()
+            return {
+                row[0]: {
+                    "stable_id": row[0],
+                    "state": row[1],
+                    "snoozed_until": row[2],
+                    "reason": row[3],
+                    "updated_at": row[4],
+                }
+                for row in rows
+            }
+
+        return self._with_connection(query)
+
+    def get_recommendation_lifecycle_counts(self) -> dict[str, int]:
+        def query(conn):
+            rows = conn.execute(
+                """
+                SELECT state, COUNT(*)
+                FROM recommendation_lifecycle
+                GROUP BY state
+                """
+            ).fetchall()
+            counts = {"active": 0, "dismissed": 0, "snoozed_until": 0}
+            for state, count in rows:
+                if state in counts:
+                    counts[state] = int(count)
+            return counts
 
         return self._with_connection(query)
 
