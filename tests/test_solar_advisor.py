@@ -54,6 +54,7 @@ class SolarAdvisorTests(unittest.TestCase):
         self.assertIn("excellent", advisor.headline)
         self.assertIn("75.0%", advisor.summary)
         self.assertIn("Timeline", [item.source for item in advisor.evidence_trail.items])
+        self.assertEqual(advisor.evidence_summary.evidence_quality.value, "HIGH")
 
     def test_missed_opportunity_when_exports_are_high(self):
         advisor = SolarAdvisor().advise(
@@ -97,6 +98,8 @@ class SolarAdvisorTests(unittest.TestCase):
         self.assertEqual(advisor.status, "UNKNOWN")
         self.assertEqual(advisor.confidence, "Low")
         self.assertIsNone(advisor.estimated_financial_impact)
+        self.assertEqual(advisor.evidence_summary.evidence_quality.value, "LOW")
+        self.assertIn("Missing inverter/provider solar data", advisor.evidence_summary.reason)
 
 
 if __name__ == "__main__":

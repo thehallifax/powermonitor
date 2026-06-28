@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date, datetime
 from typing import Any, Optional, Union
 
+from .evidence_quality import AdvisorEvidenceSummary
+
 CATEGORIES = ("EV", "Solar", "Bills", "Tariffs", "Behaviour", "Battery", "General")
 RECOMMENDATION_CATEGORIES = ("billing", "solar", "EV", "tariff", "baseload", "data_quality")
 CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
@@ -611,6 +613,7 @@ class Advisor:
     freshness: str
     supporting_data_sources: list[str]
     next_review_time: Optional[str] = None
+    evidence_summary: Optional[AdvisorEvidenceSummary] = None
 
     def __post_init__(self) -> None:
         if self.status not in ADVISOR_STATUSES:
@@ -624,6 +627,20 @@ class Advisor:
             data["estimated_financial_impact"] = self.estimated_financial_impact.as_dict()
         if isinstance(self.evidence_trail, EvidenceTrail):
             data["evidence_trail"] = self.evidence_trail.as_dict()
+        if isinstance(self.evidence_summary, AdvisorEvidenceSummary):
+            summary = self.evidence_summary.as_dict()
+            data["evidence_summary"] = summary
+            data["evidence_quality"] = summary["evidence_quality"]
+            data["required_evidence"] = summary["required_evidence"]
+            data["available_evidence"] = summary["available_evidence"]
+            data["missing_evidence"] = summary["missing_evidence"]
+            data["unavailable_evidence"] = summary["unavailable_evidence"]
+        else:
+            data["evidence_quality"] = None
+            data["required_evidence"] = []
+            data["available_evidence"] = []
+            data["missing_evidence"] = []
+            data["unavailable_evidence"] = []
         return data
 
 
@@ -866,6 +883,10 @@ class ChargingAdvice:
         data = asdict(self)
         if isinstance(self.estimated_financial_benefit, FinancialImpact):
             data["estimated_financial_benefit"] = self.estimated_financial_benefit.as_dict()
+        if isinstance(self.evidence_trail, EvidenceTrail):
+            data["evidence_trail"] = self.evidence_trail.as_dict()
+        if isinstance(self.advisor, Advisor):
+            data["advisor"] = self.advisor.as_dict()
         return data
 
 

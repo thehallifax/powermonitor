@@ -27,6 +27,8 @@ class GlanceState:
     freshness: str
     last_updated: str
     confidence: str
+    evidence_quality: str
+    evidence_reason: str
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,6 +57,9 @@ def build_glance_state(
         "AVOID": "avoid",
         "UNKNOWN": "unavailable",
     }[advisor.status]
+    evidence_summary = getattr(advisor, "evidence_summary", None)
+    evidence_quality = evidence_summary.evidence_quality.value if evidence_summary else "UNKNOWN"
+    evidence_reason = evidence_summary.reason if evidence_summary else advisor.confidence_reason
 
     return GlanceState(
         status=status,
@@ -73,4 +78,6 @@ def build_glance_state(
         freshness=advisor.freshness,
         last_updated=now.astimezone().isoformat(timespec="seconds"),
         confidence=advisor.confidence,
+        evidence_quality=evidence_quality,
+        evidence_reason=evidence_reason,
     )

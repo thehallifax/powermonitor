@@ -101,6 +101,44 @@ class EvidenceTrailTests(unittest.TestCase):
         self.assertIn("<summary>Why?</summary>", markup)
         self.assertIn("Current tariff", markup)
         self.assertIn("Recommendation", markup)
+        self.assertIn("Evidence", markup)
+
+    def test_export_only_solar_does_not_trigger_charge_now(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(solar_generated_kwh=8.0, solar_exported_kwh=5.3, solar_export_pct=40.0),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 4},
+            recommendations=[],
+            projected_bill=88.0,
+            now=datetime(2026, 6, 27, 18, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.status, "WAIT")
+        self.assertEqual(advice.confidence, "Low")
+        self.assertEqual(advice.advisor.evidence_summary.evidence_quality.value, "LOW")
+        self.assertIn("Live solar unavailable", advice.advisor.evidence_summary.reason)
+        self.assertIn("cannot prove surplus solar exists right now", advice.explanation)
+
+    def test_charging_advisor_serializes_evidence_quality_fields(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 4},
+            recommendations=[],
+            projected_bill=88.0,
+            now=datetime(2026, 6, 27, 12, tzinfo=LOCAL),
+        )
+
+        advisor = advice.as_dict()["advisor"]
+
+        self.assertIn("evidence_quality", advisor)
+        self.assertIn("evidence_summary", advisor)
+        self.assertIn("required_evidence", advisor)
+        self.assertIn("available_evidence", advisor)
+        self.assertIn("missing_evidence", advisor)
+        self.assertEqual(advisor["evidence_quality"], "HIGH")
 
 
 if __name__ == "__main__":

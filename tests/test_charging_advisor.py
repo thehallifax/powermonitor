@@ -96,7 +96,7 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.tariff_next_label, "Overnight")
         self.assertAlmostEqual(advice.per_kwh_difference, 0.3446)
 
-    def test_solar_export_can_support_charge_now_outside_super_off_peak(self):
+    def test_solar_export_alone_waits_outside_super_off_peak(self):
         advice = ChargingAdvisor().advise(
             today_summary=Summary(solar_exported_kwh=1.2, solar_export_pct=30.0),
             billing_summary=Summary(),
@@ -108,9 +108,10 @@ class ChargingAdvisorTests(unittest.TestCase):
         )
 
         self.assertEqual(current_tariff_bucket(datetime(2026, 6, 27, 8, tzinfo=LOCAL)), "off_peak")
-        self.assertEqual(advice.status, "CHARGE_NOW")
-        self.assertIn("solar/export-based", advice.explanation)
-        self.assertIn("not live instantaneous", advice.explanation)
+        self.assertEqual(advice.status, "WAIT")
+        self.assertIn("cannot prove surplus solar exists right now", advice.explanation)
+        self.assertEqual(advice.confidence, "Low")
+        self.assertEqual(advice.advisor.evidence_summary.evidence_quality.value, "LOW")
         self.assertIn("Today's solar summary", advice.solar_data_status)
 
     def test_stale_data_returns_unknown(self):

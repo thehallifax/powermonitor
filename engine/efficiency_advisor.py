@@ -4,6 +4,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
+from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
 from .financial_engine import FinancialEngine
 from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
@@ -38,6 +39,15 @@ class EfficiencyAdvisor:
         observed_at = now or datetime.now().astimezone()
         freshness = self._freshness(summary, health)
         confidence = self._confidence(summary, health, overnight_baseload_watts)
+        evidence_summary = self._evidence_summary(
+            summary=summary,
+            previous_summary=previous_summary,
+            health=health,
+            overnight_baseload_watts=overnight_baseload_watts,
+            confidence=confidence,
+            freshness=freshness,
+        )
+        confidence = evidence_summary.confidence
         expected_baseload = self._number(settings, "ev_baseline_watts")
         threshold_pct = self._threshold(settings)
         trigger = expected_baseload * (1 + threshold_pct / 100) if expected_baseload else 0.0
@@ -48,7 +58,7 @@ class EfficiencyAdvisor:
         impact = self._financial_impact(summary, excess_watts)
 
         if confidence == "Low" and not overnight_baseload_watts:
-            return self._unknown(freshness, observed_at)
+            return self._unknown(freshness, observed_at, evidence_summary)
 
         status = self._status(
             overnight_baseload_watts=float(overnight_baseload_watts),
@@ -96,9 +106,10 @@ class EfficiencyAdvisor:
                 "Decision timeline",
             ],
             next_review_time=observed_at.date().isoformat(),
+            evidence_summary=evidence_summary,
         )
 
-    def _unknown(self, freshness: str, observed_at: datetime) -> Advisor:
+    def _unknown(self, freshness: str, observed_at: datetime, evidence_summary: AdvisorEvidenceSummary) -> Advisor:
         trail = EvidenceTrail(
             [
                 EvidenceItem(
@@ -124,6 +135,7 @@ class EfficiencyAdvisor:
             freshness=freshness,
             supporting_data_sources=["Overnight baseload analysis"],
             next_review_time=observed_at.date().isoformat(),
+            evidence_summary=evidence_summary,
         )
 
     def _status(
@@ -209,6 +221,81 @@ class EfficiencyAdvisor:
         if coverage >= 0.35:
             return "Medium"
         return "Low"
+
+    def _evidence_summary(
+        self,
+        *,
+        summary: Any,
+        previous_summary: Optional[Any],
+        health: dict[str, Any],
+        overnight_baseload_watts: float,
+        confidence: str,
+        freshness: str,
+    ) -> AdvisorEvidenceSummary:
+        status_ok = str(health.get("status") or "").lower() == "ok"
+        intervals = self._number(summary, "intervals")
+        supply_days = max(int(self._number(summary, "supply_days")), 1)
+        reading_days = self._number(summary, "reading_days")
+        coverage = reading_days / supply_days
+        baseload_available = bool(overnight_baseload_watts)
+        previous_available = previous_summary is not None and self._number(previous_summary, "average_daily_grid_import_kwh") > 0
+        required = [
+            EvidenceRequirement(
+                "Collector health",
+                EvidenceSource.LIVE_TELEMETRY if status_ok else EvidenceSource.MISSING,
+                status_ok,
+                quality=EvidenceQuality.HIGH if status_ok else EvidenceQuality.LOW,
+                reason=f"Collector status: {health.get('status') or 'unknown'}.",
+            ),
+            EvidenceRequirement(
+                "Overnight baseload estimate",
+                EvidenceSource.SMART_METER if baseload_available else EvidenceSource.MISSING,
+                baseload_available,
+                quality=EvidenceQuality.HIGH if baseload_available and coverage >= 0.8 else EvidenceQuality.MEDIUM if baseload_available else EvidenceQuality.LOW,
+                reason="Efficiency advice depends on complete overnight measurement windows.",
+            ),
+            EvidenceRequirement(
+                "Billing-period interval coverage",
+                EvidenceSource.SMART_METER if intervals > 0 else EvidenceSource.MISSING,
+                intervals > 0,
+                quality=EvidenceQuality.HIGH if coverage >= 0.8 else EvidenceQuality.MEDIUM if coverage >= 0.35 else EvidenceQuality.LOW,
+                reason=f"{reading_days:.0f} of {supply_days} billing days have readings.",
+            ),
+        ]
+        optional = [
+            EvidenceRequirement(
+                "Previous-period daily import trend",
+                EvidenceSource.IMPORTED_HISTORY if previous_available else EvidenceSource.MISSING,
+                previous_available,
+                required=False,
+                quality=EvidenceQuality.HIGH if previous_available else EvidenceQuality.LOW,
+                reason="Used to explain whether household efficiency is improving or worsening.",
+            )
+        ]
+        if not status_ok:
+            quality = EvidenceQuality.LOW
+            reason = "Collector gaps are present, so efficiency confidence is reduced."
+        elif not baseload_available:
+            quality = EvidenceQuality.LOW
+            reason = "Baseload estimation is incomplete."
+        elif coverage < 0.35:
+            quality = EvidenceQuality.LOW
+            reason = "Large missing measurement windows are present in the billing period."
+        elif coverage < 0.8 or not previous_available:
+            quality = EvidenceQuality.MEDIUM
+            reason = "Efficiency evidence is useful but incomplete."
+        else:
+            quality = EvidenceQuality.HIGH
+            reason = "Collector health, baseload, and comparison evidence are available."
+        capped = cap_confidence_for_evidence(confidence, quality)
+        return AdvisorEvidenceSummary(
+            required_evidence=required,
+            optional_evidence=optional,
+            evidence_quality=quality,
+            confidence=capped,
+            reason=reason,
+            confidence_reason=f"{capped} confidence because {reason} Freshness: {freshness}.",
+        )
 
     def _confidence_reason(self, confidence: str, summary: Any, freshness: str, overnight_baseload_watts: float) -> str:
         return (

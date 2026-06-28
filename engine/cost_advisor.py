@@ -4,6 +4,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
+from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
 from .financial_engine import FinancialEngine
 from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
@@ -40,9 +41,17 @@ class CostAdvisor:
         )
         freshness = self._freshness(current_summary, health)
         confidence = self._confidence(current_summary, previous_summary, health)
+        evidence_summary = self._evidence_summary(
+            current_summary=current_summary,
+            previous_summary=previous_summary,
+            health=health,
+            projection_basis=projection_basis,
+            confidence=confidence,
+        )
+        confidence = evidence_summary.confidence
 
         if confidence == "Low" and previous_summary is None:
-            return self._unknown(projected, projected_end, projection_basis, freshness, observed_at)
+            return self._unknown(projected, projected_end, projection_basis, freshness, observed_at, evidence_summary)
 
         previous_cost = self._number(previous_summary, "net_cost") if previous_summary is not None else None
         if previous_cost is None or previous_cost <= 0:
@@ -94,6 +103,7 @@ class CostAdvisor:
                 "Configured tariff rates",
             ],
             next_review_time=projected_end.isoformat(),
+            evidence_summary=evidence_summary,
         )
 
     def _unknown(
@@ -103,6 +113,7 @@ class CostAdvisor:
         projection_basis: str,
         freshness: str,
         observed_at: datetime,
+        evidence_summary: AdvisorEvidenceSummary,
     ) -> Advisor:
         evidence_trail = EvidenceTrail(
             [
@@ -137,6 +148,7 @@ class CostAdvisor:
             freshness=freshness,
             supporting_data_sources=["Financial Engine", "Current billing period"],
             next_review_time=projected_end.isoformat(),
+            evidence_summary=evidence_summary,
         )
 
     def _status(self, difference: float, pct_difference: float, recommendations: list[Decision]) -> str:
@@ -207,6 +219,64 @@ class CostAdvisor:
         if coverage >= 0.35:
             return "Medium"
         return "Low"
+
+    def _evidence_summary(
+        self,
+        *,
+        current_summary: Any,
+        previous_summary: Optional[Any],
+        health: dict[str, Any],
+        projection_basis: str,
+        confidence: str,
+    ) -> AdvisorEvidenceSummary:
+        status_ok = str(health.get("status") or "").lower() == "ok"
+        supply_days = max(int(self._number(current_summary, "supply_days")), 1)
+        reading_days = self._number(current_summary, "reading_days")
+        coverage = reading_days / supply_days
+        previous_available = previous_summary is not None and self._number(previous_summary, "net_cost") > 0
+        complete_period = coverage >= 0.8
+        required = [
+            EvidenceRequirement(
+                "Current billing-period smart-meter data",
+                EvidenceSource.SMART_METER,
+                status_ok and reading_days > 0,
+                quality=EvidenceQuality.HIGH if complete_period else EvidenceQuality.MEDIUM if coverage >= 0.35 else EvidenceQuality.LOW,
+                reason=f"{reading_days:.0f} of {supply_days} billing days have readings.",
+            ),
+            EvidenceRequirement(
+                "Financial Engine projection",
+                EvidenceSource.DAILY_SUMMARY,
+                True,
+                quality=EvidenceQuality.HIGH if complete_period else EvidenceQuality.MEDIUM,
+                reason=f"Projection basis: {projection_basis}.",
+            ),
+            EvidenceRequirement(
+                "Previous billing-period comparison",
+                EvidenceSource.IMPORTED_HISTORY,
+                previous_available,
+                quality=EvidenceQuality.HIGH if previous_available else EvidenceQuality.LOW,
+                reason="Needed to determine whether this period is improving or worsening.",
+            ),
+        ]
+        quality = EvidenceQuality.LOW
+        if status_ok and previous_available and complete_period:
+            quality = EvidenceQuality.HIGH
+        elif status_ok and previous_available and coverage >= 0.35:
+            quality = EvidenceQuality.MEDIUM
+        capped = cap_confidence_for_evidence(confidence, quality)
+        if not complete_period:
+            reason = f"Billing period is incomplete: {reading_days:.0f} of {supply_days} days have readings."
+        elif not previous_available:
+            reason = "Previous billing-period comparison evidence is unavailable."
+        else:
+            reason = "Current and previous billing-period evidence are available."
+        return AdvisorEvidenceSummary(
+            required_evidence=required,
+            evidence_quality=quality,
+            confidence=capped,
+            reason=reason,
+            confidence_reason=f"{capped} confidence because {reason}",
+        )
 
     def _confidence_reason(self, confidence: str, current_summary: Any, freshness: str, projection_basis: str) -> str:
         supply_days = max(int(self._number(current_summary, "supply_days")), 1)

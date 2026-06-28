@@ -81,6 +81,21 @@ class CostAdvisorTests(unittest.TestCase):
         self.assertGreater(advisor.estimated_financial_impact.billing_period, 0)
         self.assertIn("Tariff contribution", [item.source for item in advisor.evidence_trail.items])
 
+    def test_incomplete_billing_period_reduces_evidence_quality(self):
+        advisor = CostAdvisor().advise(
+            current_summary=Summary(average_daily_net_cost=5.0, supply_days=30, reading_days=12),
+            previous_summary=Summary(net_cost=100.0),
+            settings=Settings(),
+            recommendations=[],
+            timeline=None,
+            health={"status": "ok", "report_age_minutes": 4},
+            comparison={"deltas": {}},
+        )
+
+        self.assertEqual(advisor.evidence_summary.evidence_quality.value, "MEDIUM")
+        self.assertEqual(advisor.confidence, "Medium")
+        self.assertIn("Billing period is incomplete", advisor.evidence_summary.reason)
+
     def test_unknown_without_previous_period(self):
         advisor = CostAdvisor().advise(
             current_summary=Summary(),

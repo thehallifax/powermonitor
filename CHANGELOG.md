@@ -1,5 +1,17 @@
 # Changelog
 
+## PB-006 - Advisor Evidence Quality
+
+- Added shared Evidence Quality contracts for advisor evidence source,
+  requirement, unavailable evidence, overall quality, and confidence capping.
+- Added evidence summaries to Charging, Cost, Solar, and Efficiency Advisors,
+  including required, optional, available, and missing evidence declarations.
+- Prevented Charging Advisor from recommending `CHARGE_NOW` from historical
+  solar export alone; it now waits when live solar surplus evidence is missing.
+- Surfaced advisor evidence quality in Home cards, Glance Mode, Recommendation
+  Centre, and advisor API serialization without changing existing API fields.
+- Added evidence-quality, advisor regression, Glance, and serialization tests.
+
 ## PB-005 - Setup Engine
 
 - Added reusable `SetupEngine` and shared setup checklist, section, task,

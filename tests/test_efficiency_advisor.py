@@ -77,6 +77,7 @@ class EfficiencyAdvisorTests(unittest.TestCase):
         self.assertIn("Overnight baseload", sources)
         self.assertIn("Recommendation context", sources)
         self.assertIn("Timeline evidence", sources)
+        self.assertEqual(advisor.evidence_summary.evidence_quality.value, "HIGH")
 
     def test_excellent_when_daily_import_improves(self):
         advisor = EfficiencyAdvisor().advise(
@@ -111,6 +112,8 @@ class EfficiencyAdvisorTests(unittest.TestCase):
         self.assertEqual(advisor.status, "UNKNOWN")
         self.assertEqual(advisor.confidence, "Low")
         self.assertIsNone(advisor.estimated_financial_impact)
+        self.assertEqual(advisor.evidence_summary.evidence_quality.value, "LOW")
+        self.assertIn("Baseload estimation is incomplete", advisor.evidence_summary.reason)
 
 
 if __name__ == "__main__":

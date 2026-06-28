@@ -4,6 +4,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
+from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
 from .financial_engine import FinancialEngine
 from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
@@ -34,6 +35,8 @@ class SolarAdvisor:
         observed_at = now or datetime.now().astimezone()
         freshness = self._freshness(summary, health)
         confidence = self._confidence(summary, health)
+        evidence_summary = self._evidence_summary(summary=summary, health=health, confidence=confidence, freshness=freshness)
+        confidence = evidence_summary.confidence
         generated = self._number(summary, "solar_generated_kwh")
         used = self._number(summary, "solar_used_kwh")
         exported = self._number(summary, "solar_exported_kwh")
@@ -49,7 +52,7 @@ class SolarAdvisor:
         net_opportunity = max(potential_import_offset - export_credit, 0.0)
 
         if confidence == "Low" and generated <= 0:
-            return self._unknown(freshness, observed_at)
+            return self._unknown(freshness, observed_at, evidence_summary)
 
         status = self._status(self_consumption, export_pct, exported, recommendations)
         headline = self._headline(status, self_consumption, exported)
@@ -94,9 +97,10 @@ class SolarAdvisor:
                 "Decision timeline",
             ],
             next_review_time=observed_at.date().isoformat(),
+            evidence_summary=evidence_summary,
         )
 
-    def _unknown(self, freshness: str, observed_at: datetime) -> Advisor:
+    def _unknown(self, freshness: str, observed_at: datetime, evidence_summary: AdvisorEvidenceSummary) -> Advisor:
         evidence_trail = EvidenceTrail(
             [
                 EvidenceItem(
@@ -122,6 +126,7 @@ class SolarAdvisor:
             freshness=freshness,
             supporting_data_sources=["SolarEdge interval data"],
             next_review_time=observed_at.date().isoformat(),
+            evidence_summary=evidence_summary,
         )
 
     def _status(
@@ -197,6 +202,76 @@ class SolarAdvisor:
         if coverage >= 0.35:
             return "Medium"
         return "Low"
+
+    def _evidence_summary(
+        self,
+        *,
+        summary: Any,
+        health: dict[str, Any],
+        confidence: str,
+        freshness: str,
+    ) -> AdvisorEvidenceSummary:
+        status_ok = str(health.get("status") or "").lower() == "ok"
+        intervals = self._number(summary, "intervals")
+        generated = self._number(summary, "solar_generated_kwh")
+        used = self._number(summary, "solar_used_kwh")
+        exported = self._number(summary, "solar_exported_kwh")
+        supply_days = max(int(self._number(summary, "supply_days")), 1)
+        reading_days = self._number(summary, "reading_days")
+        coverage = reading_days / supply_days
+        measured = status_ok and intervals > 0 and generated > 0
+        required = [
+            EvidenceRequirement(
+                "Measured solar generation",
+                EvidenceSource.PROVIDER_API if measured else EvidenceSource.MISSING,
+                measured,
+                quality=EvidenceQuality.HIGH if coverage >= 0.8 and measured else EvidenceQuality.MEDIUM if measured else EvidenceQuality.LOW,
+                reason="Generation must be measured before utilisation can be assessed.",
+            ),
+            EvidenceRequirement(
+                "Solar used and exported totals",
+                EvidenceSource.SMART_METER if measured else EvidenceSource.MISSING,
+                measured and (used > 0 or exported > 0),
+                quality=EvidenceQuality.HIGH if coverage >= 0.8 and measured else EvidenceQuality.MEDIUM if measured else EvidenceQuality.LOW,
+                reason="Used/exported totals distinguish self-consumption from exported energy.",
+            ),
+        ]
+        optional = [
+            EvidenceRequirement(
+                "Imported solar history",
+                EvidenceSource.IMPORTED_HISTORY,
+                False,
+                required=False,
+                quality=EvidenceQuality.UNKNOWN,
+                reason="No separate imported solar-history source is attached to this advisor output.",
+            ),
+            EvidenceRequirement(
+                "Estimated solar values",
+                EvidenceSource.ESTIMATED,
+                False,
+                required=False,
+                quality=EvidenceQuality.UNKNOWN,
+                reason="Solar Advisor does not substitute estimates for missing inverter/provider data.",
+            ),
+        ]
+        if not measured:
+            quality = EvidenceQuality.LOW
+            reason = "Missing inverter/provider solar data prevents a measured solar call."
+        elif coverage >= 0.8:
+            quality = EvidenceQuality.HIGH
+            reason = "Measured solar generation and smart-meter totals are available."
+        else:
+            quality = EvidenceQuality.MEDIUM
+            reason = f"Measured solar data is available, but the billing period is incomplete at {reading_days:.0f} of {supply_days} days."
+        capped = cap_confidence_for_evidence(confidence, quality)
+        return AdvisorEvidenceSummary(
+            required_evidence=required,
+            optional_evidence=optional,
+            evidence_quality=quality,
+            confidence=capped,
+            reason=reason,
+            confidence_reason=f"{capped} confidence because {reason} Freshness: {freshness}.",
+        )
 
     def _confidence_reason(self, confidence: str, summary: Any, freshness: str) -> str:
         return (

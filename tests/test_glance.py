@@ -109,14 +109,15 @@ class GlanceModeTests(unittest.TestCase):
         self.assertEqual(state.bill_current, 41.25)
         self.assertEqual(state.bill_projected, 82.5)
 
-    def test_solar_surplus_maps_to_charge_now_outside_super_off_peak(self):
+    def test_export_only_solar_maps_to_wait_outside_super_off_peak(self):
         state = build_state(
             datetime(2026, 6, 27, 7, 30, tzinfo=LOCAL),
             today=Summary(solar_generated_kwh=5.0, solar_exported_kwh=1.4, solar_export_pct=28.0),
         )
 
-        self.assertEqual(state.status, "CHARGE NOW")
-        self.assertIn("solar export", state.reason)
+        self.assertEqual(state.status, "WAIT")
+        self.assertIn("cannot prove surplus solar exists right now", state.reason)
+        self.assertEqual(state.evidence_quality, "LOW")
         self.assertIn("Exporting solar", state.solar_status)
 
     def test_peak_maps_to_avoid(self):
@@ -142,6 +143,7 @@ class GlanceModeTests(unittest.TestCase):
         self.assertEqual(state.status, "DATA UNAVAILABLE")
         self.assertIn("fresh enough", state.reason)
         self.assertEqual(state.confidence, "Low")
+        self.assertEqual(state.evidence_quality, "LOW")
 
 
 if __name__ == "__main__":

@@ -1970,6 +1970,11 @@ def glance_page_html(glance: GlanceState) -> str:
           <strong>{html.escape(glance.current_recommendation)}</strong>
         </div>
         <div class="glance-panel">
+          <span>Evidence quality</span>
+          <strong>{html.escape(glance.evidence_quality.title())}</strong>
+          <small>{html.escape(glance.evidence_reason)}</small>
+        </div>
+        <div class="glance-panel">
           <span>Current tariff/window</span>
           <strong>{html.escape(glance.current_tariff)}</strong>
         </div>
@@ -2263,6 +2268,11 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
         return ""
     cards = []
     for advisor in advisors:
+        evidence_summary = getattr(advisor, "evidence_summary", None)
+        evidence_quality = evidence_summary.evidence_quality.value.title() if evidence_summary else "Unknown"
+        missing = ", ".join(item.name for item in evidence_summary.missing_evidence) if evidence_summary else ""
+        missing_text = missing or "No required evidence gaps declared."
+        confidence_reduced = evidence_summary.confidence_reason if evidence_summary else advisor.confidence_reason
         cards.append(
             f"""
             <article class="recommendation-card recommendation-centre-card">
@@ -2278,6 +2288,9 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
               <div class="decision-lines">
                 <p><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
                 <p><strong>Why?</strong>{html.escape(advisor.confidence_reason)}</p>
+                <p><strong>Evidence Quality</strong>{html.escape(evidence_quality)}</p>
+                <p><strong>Missing evidence</strong>{html.escape(missing_text)}</p>
+                <p><strong>Why confidence is reduced</strong>{html.escape(confidence_reduced)}</p>
               </div>
             </article>
             """
@@ -2728,6 +2741,9 @@ def advisor_home_html(advisor: Advisor) -> str:
     impact_text = "Not quantified"
     if impact and impact.billing_period is not None:
         impact_text = money(impact.billing_period)
+    evidence_summary = getattr(advisor, "evidence_summary", None)
+    evidence_quality = evidence_summary.evidence_quality.value.title() if evidence_summary else "Unknown"
+    evidence_reason = evidence_summary.reason if evidence_summary else "Evidence summary unavailable."
     return f"""
     <section class="source-status {tone}">
       <div><span>{html.escape(advisor.advisor_type.replace("_", " ").title())} Advisor</span><h2>{html.escape(advisor.headline)}</h2></div>
@@ -2736,6 +2752,7 @@ def advisor_home_html(advisor: Advisor) -> str:
         {metric("Status", advisor.status.replace("_", " "), "Shared Advisor", "cost")}
         {metric("Projection impact", impact_text, impact.basis if impact and impact.basis else "Financial Engine", "cost")}
         {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
+        {metric("Evidence", evidence_quality, evidence_reason, "primary")}
         {metric("Next review", advisor.next_review_time or "Unavailable", advisor.freshness, "solar")}
       </div>
       {evidence_trail_html(advisor)}
@@ -2766,6 +2783,9 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         else "Unavailable"
     )
     reasoning = evidence_trail_html(advisor)
+    evidence_summary = getattr(advisor, "evidence_summary", None)
+    evidence_quality = evidence_summary.evidence_quality.value.title() if evidence_summary else "Unknown"
+    evidence_reason = evidence_summary.reason if evidence_summary else "Evidence summary unavailable."
     return f"""
     <section class="source-status {tone}">
       <div><span>Charging Advisor</span><h2>{html.escape(advisor.headline)}</h2></div>
@@ -2776,6 +2796,7 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         {metric("Difference", difference_text, "Current tariff minus next window tariff", "cost")}
         {metric("Benefit", benefit_text, benefit.basis if benefit and benefit.basis else "Measured where tariff difference exists", "cost")}
         {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
+        {metric("Evidence", evidence_quality, evidence_reason, "primary")}
         {metric("Next window", charging_advice.next_window or "Unavailable", charging_advice.next_window_start or "Configured tariff schedule", "solar")}
         {metric("EV data", charging_advice.charger_data_status.replace("_", " "), charging_advice.ev_session_freshness, "ev")}
         {metric("Solar data", charging_advice.solar_data_status, "Daily summary only; no live surplus assumption", "solar")}

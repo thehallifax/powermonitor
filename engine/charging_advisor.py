@@ -9,6 +9,13 @@ markup and it does not forecast future appliance behaviour.
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
+from .evidence_quality import (
+    AdvisorEvidenceSummary,
+    EvidenceQuality,
+    EvidenceRequirement,
+    EvidenceSource,
+    cap_confidence_for_evidence,
+)
 from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
 TARIFF_LABELS = {
@@ -58,7 +65,20 @@ class ChargingAdvisor:
         per_kwh_benefit = self._per_kwh_benefit(bucket, tariff_rates)
         charger_data_status, ev_session_freshness = self._charger_data_status(billing_summary)
         solar_data_status = self._solar_data_status(today_summary, freshness)
-        confidence_reason = self._confidence_reason(confidence, freshness, charger_data_status, solar_data_status)
+        evidence_summary = self._evidence_summary(
+            today_summary=today_summary,
+            billing_summary=billing_summary,
+            health=health,
+            tariff_rates=tariff_rates,
+            confidence=confidence,
+            freshness=freshness,
+            charger_data_status=charger_data_status,
+            solar_data_status=solar_data_status,
+            current_bucket=bucket,
+            daily_export_supports_current_surplus=has_solar_surplus,
+        )
+        confidence = evidence_summary.confidence
+        confidence_reason = evidence_summary.confidence_reason or self._confidence_reason(confidence, freshness, charger_data_status, solar_data_status)
 
         evidence = {
             "current_tariff_bucket": bucket,
@@ -117,6 +137,7 @@ class ChargingAdvisor:
                 freshness=freshness,
                 supporting_data_sources=self._supporting_data_sources(charger_data_status, solar_data_status),
                 next_review_time=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+                evidence_summary=evidence_summary,
             )
             return ChargingAdvice(
                 status="UNKNOWN",
@@ -154,12 +175,12 @@ class ChargingAdvisor:
                 explanation += " Daily solar data also shows export today, so charging now is supported by solar utilisation evidence."
             status = "CHARGE_NOW"
         elif has_solar_surplus:
-            headline = "Charge now based on today's solar export"
+            headline = "Wait for live solar evidence or a cheaper tariff window"
             explanation = (
-                "Advice is solar/export-based: today's measured solar export summary shows exported energy. "
-                "This is daily export evidence, not live instantaneous charger or solar telemetry."
+                "Today's export shows solar was available earlier, but it cannot prove surplus solar exists right now. "
+                f"Because the current tariff is {TARIFF_LABELS[bucket]}, wait for live solar evidence or the next lower-cost window."
             )
-            status = "CHARGE_NOW"
+            status = "WAIT"
         elif bucket == "peak":
             headline = "Avoid charging during Peak"
             explanation = (
@@ -208,6 +229,7 @@ class ChargingAdvisor:
             freshness=freshness,
             supporting_data_sources=self._supporting_data_sources(charger_data_status, solar_data_status),
             next_review_time=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+            evidence_summary=evidence_summary,
         )
 
         return ChargingAdvice(
@@ -362,6 +384,7 @@ class ChargingAdvisor:
         freshness: str,
         supporting_data_sources: list[str],
         next_review_time: Optional[str],
+        evidence_summary: AdvisorEvidenceSummary,
     ) -> Advisor:
         return Advisor(
             advisor_id="charging_advisor",
@@ -377,6 +400,92 @@ class ChargingAdvisor:
             freshness=freshness,
             supporting_data_sources=supporting_data_sources,
             next_review_time=next_review_time,
+            evidence_summary=evidence_summary,
+        )
+
+    def _evidence_summary(
+        self,
+        *,
+        today_summary: Any,
+        billing_summary: Any,
+        health: dict[str, Any],
+        tariff_rates: dict[str, float],
+        confidence: str,
+        freshness: str,
+        charger_data_status: str,
+        solar_data_status: str,
+        current_bucket: str,
+        daily_export_supports_current_surplus: bool,
+    ) -> AdvisorEvidenceSummary:
+        intervals = int(self._number(today_summary, "intervals"))
+        billing_intervals = int(self._number(billing_summary, "intervals"))
+        health_ok = str(health.get("status") or "").lower() == "ok"
+        tariff_available = bool(tariff_rates.get("peak") and tariff_rates.get("super_off_peak"))
+        live_solar_available = False
+        ev_actual = charger_data_status == "actual_session_data_available"
+        required = [
+            EvidenceRequirement(
+                "Configured tariff schedule",
+                EvidenceSource.USER_CONFIGURATION,
+                tariff_available,
+                quality=EvidenceQuality.HIGH if tariff_available else EvidenceQuality.UNKNOWN,
+                reason="Current and next tariff windows drive charging timing.",
+            ),
+            EvidenceRequirement(
+                "Fresh smart-meter interval data",
+                EvidenceSource.SMART_METER,
+                health_ok and (intervals > 0 or billing_intervals > 0),
+                quality=EvidenceQuality.HIGH if freshness == "Fresh" else EvidenceQuality.MEDIUM if "Report age" in freshness else EvidenceQuality.LOW,
+                reason=f"Freshness: {freshness}.",
+            ),
+        ]
+        optional = [
+            EvidenceRequirement(
+                "Live solar surplus",
+                EvidenceSource.LIVE_TELEMETRY if live_solar_available else EvidenceSource.MISSING,
+                live_solar_available,
+                required=False,
+                quality=EvidenceQuality.HIGH if live_solar_available else EvidenceQuality.LOW,
+                reason="Live solar is required before today's export can justify charging immediately.",
+            ),
+            EvidenceRequirement(
+                "EV charging sessions",
+                EvidenceSource.IMPORTED_HISTORY if ev_actual else EvidenceSource.ESTIMATED,
+                ev_actual,
+                required=False,
+                quality=EvidenceQuality.HIGH if ev_actual else EvidenceQuality.MEDIUM,
+                reason=solar_data_status if not ev_actual else "Actual EV session history is available.",
+            ),
+        ]
+        quality = EvidenceQuality.HIGH
+        if not tariff_available or not health_ok or intervals <= 0:
+            quality = EvidenceQuality.LOW
+        elif daily_export_supports_current_surplus and current_bucket != "super_off_peak" and not live_solar_available:
+            quality = EvidenceQuality.LOW
+        elif freshness != "Fresh" or not ev_actual:
+            quality = EvidenceQuality.MEDIUM
+        capped = cap_confidence_for_evidence(confidence, quality)
+        if daily_export_supports_current_surplus and current_bucket != "super_off_peak" and not live_solar_available:
+            reason = "Live solar unavailable. Recommendation is not allowed to assume current surplus from historical export only."
+        elif quality == EvidenceQuality.LOW:
+            reason = "Required charging evidence is incomplete or stale."
+        elif quality == EvidenceQuality.MEDIUM:
+            reason = "Tariff timing is known, with some supporting evidence estimated or not live."
+        else:
+            reason = "Tariff timing and fresh smart-meter evidence are available."
+        if capped == "Medium" and "Report age" in freshness:
+            confidence_reason = f"Medium confidence because tariff data is configured but report freshness is {freshness.lower()}."
+        elif quality == EvidenceQuality.HIGH:
+            confidence_reason = f"{capped} confidence because tariff timing and fresh smart-meter evidence are available."
+        else:
+            confidence_reason = f"{capped} confidence because {reason}"
+        return AdvisorEvidenceSummary(
+            required_evidence=required,
+            optional_evidence=optional,
+            evidence_quality=quality,
+            confidence=capped,
+            reason=reason,
+            confidence_reason=confidence_reason,
         )
 
     def _evidence_trail(
