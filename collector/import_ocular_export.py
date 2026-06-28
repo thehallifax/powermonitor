@@ -7,9 +7,21 @@ import sys
 import zipfile
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Optional
 from xml.etree import ElementTree as ET
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.import_framework import (
+    ImportPreview,
+    ImportResult,
+    ImportSource,
+    ImportValidationIssue,
+)
+from engine.models import HouseholdContext
+
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 LOG_PATH = PROJECT_ROOT / "logs" / "ocular_export.log"
@@ -342,7 +354,19 @@ def row_dicts(rows: list[list]) -> list[dict]:
     return records
 
 
-def import_record(conn: sqlite3.Connection, record: dict) -> bool:
+OCULAR_IMPORT_SOURCE = ImportSource(
+    source_id=SOURCE,
+    display_name="Ocular EV charging history",
+    supported_extensions=(".xlsx", ".xlsm"),
+    description="Ocular charger history workbook export",
+)
+
+
+def import_record(
+    conn: sqlite3.Connection,
+    record: dict,
+    household_id: str = DEFAULT_HOUSEHOLD_ID,
+) -> bool:
     transaction_id = str(record["record_number"]).strip()
     if not transaction_id:
         return False
@@ -407,7 +431,7 @@ def import_record(conn: sqlite3.Connection, record: dict) -> bool:
             {", ".join(tariff_updates)}
         """,
         (
-            DEFAULT_HOUSEHOLD_ID,
+            household_id,
             transaction_id,
             start.isoformat(timespec="seconds"),
             end.isoformat(timespec="seconds"),
@@ -429,26 +453,158 @@ def import_record(conn: sqlite3.Connection, record: dict) -> bool:
     return True
 
 
-def import_file(path: Path) -> tuple[int, int]:
-    rows = read_xlsx(path)
-    records = row_dicts(rows)
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+def parse_file(path: Path) -> list[dict]:
+    return row_dicts(read_xlsx(path))
+
+
+def validate_records(records: list[dict]) -> list[ImportValidationIssue]:
+    issues = []
+    seen_ids = set()
+    for index, record in enumerate(records, start=2):
+        transaction_id = str(record.get("record_number") or "").strip()
+        if not transaction_id:
+            issues.append(ImportValidationIssue("error", "Missing record number", row=index, field="record_number"))
+            continue
+        if transaction_id in seen_ids:
+            issues.append(ImportValidationIssue("warning", "Duplicate record number in upload", row=index, field="record_number"))
+        seen_ids.add(transaction_id)
+        try:
+            start = parse_datetime_value(record.get("start_time"))
+            end = parse_datetime_value(record.get("end_time"))
+            if end < start:
+                raise ValueError("Stop time is before start time")
+            energy_kwh = parse_float(record.get("energy_kwh"))
+            duration = parse_duration_minutes(record.get("duration"), start, end)
+            cost, breakdown = split_tariff_cost(start, end, energy_kwh)
+            validate_breakdown_totals(transaction_id, energy_kwh, cost, breakdown)
+            if duration <= 0:
+                issues.append(ImportValidationIssue("warning", "Charging duration is zero", row=index, field="duration"))
+        except (TypeError, ValueError) as exc:
+            issues.append(ImportValidationIssue("error", f"Invalid Ocular row: {exc}", row=index))
+    return issues
+
+
+def preview_records(records: list[dict], issues: Optional[list[ImportValidationIssue]] = None) -> ImportPreview:
+    issues = issues or validate_records(records)
+    error_rows = {issue.row for issue in issues if issue.severity == "error" and issue.row is not None}
+    starts = []
+    ends = []
+    total_energy = 0.0
+    samples = []
+    for index, record in enumerate(records, start=2):
+        if index in error_rows:
+            continue
+        try:
+            start = parse_datetime_value(record.get("start_time"))
+            end = parse_datetime_value(record.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        starts.append(start)
+        ends.append(end)
+        energy = parse_float(record.get("energy_kwh"))
+        total_energy += energy
+        if len(samples) < 3:
+            samples.append(
+                {
+                    "record_number": str(record.get("record_number") or "").strip(),
+                    "start_time": start.isoformat(timespec="seconds"),
+                    "energy_kwh": round(energy, 3),
+                }
+            )
+    return ImportPreview(
+        source=OCULAR_IMPORT_SOURCE,
+        total_records=len(records),
+        valid_records=max(len(records) - len(error_rows), 0),
+        date_start=min(starts).date().isoformat() if starts else None,
+        date_end=max(ends).date().isoformat() if ends else None,
+        total_energy_kwh=round(total_energy, 3),
+        issues=issues,
+        sample_records=samples,
+    )
+
+
+def import_records_to_db(
+    records: list[dict],
+    db_path: Path = DB_PATH,
+    household_id: str = DEFAULT_HOUSEHOLD_ID,
+) -> tuple[int, int]:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
         ensure_ev_sessions(conn)
         before = conn.execute(
             "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
-            (DEFAULT_HOUSEHOLD_ID, SOURCE),
+            (household_id, SOURCE),
         ).fetchone()[0]
         imported = 0
         for record in records:
-            if import_record(conn, record):
+            if import_record(conn, record, household_id=household_id):
                 imported += 1
         conn.commit()
         after = conn.execute(
             "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
-            (DEFAULT_HOUSEHOLD_ID, SOURCE),
+            (household_id, SOURCE),
         ).fetchone()[0]
     return imported, after - before
+
+
+def import_file(path: Path, household_id: str = DEFAULT_HOUSEHOLD_ID) -> tuple[int, int]:
+    return import_records_to_db(parse_file(path), DB_PATH, household_id)
+
+
+class OcularEVImporter:
+    """Importer adapter for existing Ocular EV charging history workbooks."""
+
+    source = OCULAR_IMPORT_SOURCE
+
+    def __init__(self, db_path: Path = DB_PATH) -> None:
+        self.db_path = Path(db_path)
+
+    def detect(self, file_path: Path) -> bool:
+        if file_path.suffix.lower() not in self.source.supported_extensions:
+            return False
+        try:
+            parse_file(file_path)
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile, ET.ParseError):
+            return False
+        return True
+
+    def parse(self, file_path: Path) -> list[dict]:
+        return parse_file(file_path)
+
+    def validate(self, parsed_data: list[dict]) -> list[ImportValidationIssue]:
+        return validate_records(parsed_data)
+
+    def preview(self, parsed_data: list[dict]) -> ImportPreview:
+        return preview_records(parsed_data)
+
+    def commit(
+        self,
+        parsed_data: list[dict],
+        household_context: HouseholdContext,
+        job_id: Optional[str] = None,
+    ) -> ImportResult:
+        issues = validate_records(parsed_data)
+        if any(issue.severity == "error" for issue in issues):
+            return ImportResult(
+                job_id=job_id or "",
+                source=self.source,
+                status="failed",
+                processed_records=len(parsed_data),
+                issues=issues,
+                message="Import contains validation errors.",
+            )
+        household_id = household_context.household.household_id
+        processed, inserted = import_records_to_db(parsed_data, self.db_path, household_id)
+        return ImportResult(
+            job_id=job_id or "",
+            source=self.source,
+            status="completed",
+            processed_records=processed,
+            inserted_records=inserted,
+            updated_records=max(processed - inserted, 0),
+            issues=issues,
+            message=f"Imported {processed} Ocular charging sessions.",
+        )
 
 
 def main() -> int:

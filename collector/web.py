@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
+import cgi
+import html
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
+import import_ocular_export
 import report
+from engine.import_framework import detect_importer
 from engine.models import to_api_safe
 
 HOST = "127.0.0.1"
@@ -15,6 +21,7 @@ PORT = 8765
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
 LOG_PATH = PROJECT_ROOT / "logs" / "web.log"
+UPLOAD_DIR = PROJECT_ROOT / "data" / "import_uploads"
 
 
 def setup_logging() -> None:
@@ -74,11 +81,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if request.path == "/recommendations/lifecycle":
                 self.update_recommendation_lifecycle()
+            elif request.path == "/imports/preview":
+                self.preview_import()
+            elif request.path == "/imports/commit":
+                self.commit_import()
             else:
                 self.send_json({"error": "not found"}, status=404)
-        except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
             logging.error("POST failed for %s: %s", request.path, exc)
-            self.send_json({"error": "recommendation lifecycle update failed"}, status=500)
+            if request.path.startswith("/imports/"):
+                self.send_import_error("Import could not be completed.", status=400)
+            else:
+                self.send_json({"error": "recommendation lifecycle update failed"}, status=500)
 
     @staticmethod
     def param(params: dict, name: str, default=None):
@@ -148,6 +162,71 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         self.redirect("/#recommendations")
 
+    def preview_import(self) -> None:
+        filename, content = self.read_uploaded_file()
+        upload_path = self.write_upload(filename, content)
+        importer = detect_importer(upload_path, self.importers())
+        if importer is None:
+            upload_path.unlink(missing_ok=True)
+            self.send_import_error("Unsupported import format.", status=400)
+            return
+
+        parsed = importer.parse(upload_path)
+        preview = importer.preview(parsed)
+        if any(issue.severity == "error" for issue in preview.issues):
+            upload_path.unlink(missing_ok=True)
+            self.send_import_preview(importer.source.display_name, filename, preview, None)
+            return
+
+        engine = report.data_engine()
+        engine.validate_database()
+        job = engine.create_import_job(
+            importer.source,
+            filename,
+            upload_path,
+            preview=preview,
+            status="previewed",
+            message="Ready to import",
+        )
+        self.send_import_preview(importer.source.display_name, filename, preview, job["job_id"])
+
+    def commit_import(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        params = parse_qs(self.rfile.read(length).decode("utf-8"))
+        job_id = self.param(params, "job_id")
+        if not job_id:
+            raise ValueError("job_id is required")
+
+        engine = report.data_engine()
+        engine.validate_database()
+        job = engine.get_import_job(job_id)
+        upload_path = Path(str(job.get("file_path") or ""))
+        if not upload_path.exists():
+            result_html = self.import_result_html(
+                "Import file unavailable",
+                "The uploaded file is no longer available. Please upload it again.",
+                success=False,
+            )
+            engine.update_import_job(job_id, "failed", message="Uploaded file unavailable")
+            self.send_html(result_html.encode("utf-8"))
+            return
+
+        importer = detect_importer(upload_path, self.importers())
+        if importer is None:
+            engine.update_import_job(job_id, "failed", message="Unsupported import format")
+            self.send_import_error("Unsupported import format.", status=400)
+            return
+
+        parsed = importer.parse(upload_path)
+        result = importer.commit(parsed, engine.get_household_context(), job_id=job_id)
+        engine.update_import_job(job_id, result.status, result=result, message=result.message)
+        result_html = self.import_result_html(
+            "Import complete" if result.success else "Import failed",
+            result.message or "Import finished.",
+            success=result.success,
+        )
+        self.send_html(result_html.encode("utf-8"))
+
     def serve_dashboard(self, params: dict) -> None:
         period = self.param(params, "period", "current_billing_period")
         content = report.build_live_html(
@@ -174,6 +253,105 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
             return
         self.send_html(REPORT_PATH.read_bytes())
+
+    def read_uploaded_file(self) -> tuple[str, bytes]:
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            },
+        )
+        field = form["import_file"] if "import_file" in form else None
+        if field is None or not getattr(field, "filename", None):
+            raise ValueError("No import file supplied")
+        content = field.file.read()
+        if not content:
+            raise ValueError("Import file is empty")
+        return safe_filename(field.filename), content
+
+    def write_upload(self, filename: str, content: bytes) -> Path:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        suffix = Path(filename).suffix.lower()
+        path = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
+        path.write_bytes(content)
+        return path
+
+    @staticmethod
+    def importers():
+        return [import_ocular_export.OcularEVImporter(report.DB_PATH)]
+
+    def send_import_preview(self, source_name: str, filename: str, preview, job_id: Optional[str]) -> None:
+        issues = "".join(
+            f"<li>{html.escape(issue.severity.title())}: {html.escape(issue.message)}</li>"
+            for issue in preview.issues
+        ) or "<li>No validation issues found.</li>"
+        samples = "".join(
+            f"<tr><td>{html.escape(str(item.get('record_number') or ''))}</td><td>{html.escape(str(item.get('start_time') or ''))}</td><td>{float(item.get('energy_kwh') or 0):.2f} kWh</td></tr>"
+            for item in preview.sample_records
+        ) or '<tr><td colspan="3">No sample records available.</td></tr>'
+        commit_form = (
+            f"""
+            <form class="import-form" method="post" action="/imports/commit">
+              <input type="hidden" name="job_id" value="{html.escape(job_id)}">
+              <button type="submit">Commit import</button>
+            </form>
+            """
+            if job_id
+            else '<p class="notice">Resolve validation errors before committing this import.</p>'
+        )
+        content = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Import preview</title>{self.import_page_style()}</head>
+<body><main>
+  <section class="panel">
+    <p class="eyebrow">Import preview</p>
+    <h1>{html.escape(source_name)}</h1>
+    <p>{html.escape(filename)}: {preview.valid_records} of {preview.total_records} rows valid, {preview.total_energy_kwh:.2f} kWh from {html.escape(str(preview.date_start or 'n/a'))} to {html.escape(str(preview.date_end or 'n/a'))}.</p>
+    {commit_form}
+    <a href="/#imports">Back to Imports</a>
+  </section>
+  <section class="panel"><h2>Validation</h2><ul>{issues}</ul></section>
+  <section class="panel"><h2>Sample</h2><table><thead><tr><th>Record</th><th>Start</th><th>Energy</th></tr></thead><tbody>{samples}</tbody></table></section>
+</main></body></html>"""
+        self.send_html(content.encode("utf-8"))
+
+    def send_import_error(self, message: str, status: int = 400) -> None:
+        content = self.import_result_html("Import not accepted", message, success=False)
+        self.send_response(status)
+        encoded = content.encode("utf-8")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_security_headers()
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def import_result_html(self, title: str, message: str, success: bool) -> str:
+        tone = "success" if success else "error"
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(title)}</title>{self.import_page_style()}</head>
+<body><main><section class="panel {tone}">
+  <p class="eyebrow">Imports</p>
+  <h1>{html.escape(title)}</h1>
+  <p>{html.escape(message)}</p>
+  <a href="/#imports">Back to Imports</a>
+</section></main></body></html>"""
+
+    @staticmethod
+    def import_page_style() -> str:
+        return """
+<style>
+body{margin:0;background:#f5f5f7;color:#1d1d1f;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{width:min(920px,calc(100% - 36px));margin:28px auto}
+.panel{margin-top:16px;padding:24px;background:#fff;border-radius:18px;box-shadow:0 18px 55px rgba(0,0,0,.06)}
+.panel.success{border-left:6px solid #1c9b6c}.panel.error{border-left:6px solid #dc604e}
+.eyebrow{margin:0;color:#1c9b6c;font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+h1,h2{margin:4px 0 8px} p{color:#6e6e73} a,button{display:inline-block;margin-top:10px;padding:9px 12px;color:#fff;background:#24312c;border:0;border-radius:10px;text-decoration:none;font:inherit;font-weight:750;cursor:pointer}
+table{width:100%;border-collapse:collapse} th,td{padding:9px 8px;border-bottom:1px solid #e7e7ec;text-align:left;font-size:12px} th{color:#6e6e73;font-size:9px;text-transform:uppercase;letter-spacing:.08em}
+.notice{padding:10px 12px;color:#765b20;background:#fff5da;border-radius:10px}
+</style>"""
 
     def send_html(self, content: bytes) -> None:
         self.send_response(200)
@@ -232,6 +410,12 @@ def next_billing_snooze_date(settings) -> date:
         ).days + 1
         return settings.current_billing_period_start + timedelta(days=days)
     return today + timedelta(days=7)
+
+
+def safe_filename(value: str) -> str:
+    name = Path(value or "upload").name
+    cleaned = "".join(char if char.isalnum() or char in {".", "-", "_"} else "_" for char in name)
+    return cleaned or "upload"
 
 
 def main() -> None:

@@ -1,5 +1,18 @@
 # Changelog
 
+## PB-003 - Import Framework and Web Upload
+
+- Added shared household-scoped import contracts for jobs, sources, previews,
+  results, and validation issues.
+- Adapted the existing Ocular EV charging history importer behind the new
+  plugin-style importer interface while preserving the command-line import.
+- Added Data Engine import job persistence and scoped import history for the
+  active household.
+- Added an Imports page with browser upload, preview, commit, and privacy-safe
+  success/failure pages for Ocular workbook exports.
+- Added importer framework and web upload regression tests, including unknown
+  format rejection and household-scoped EV session writes.
+
 ## PB-002 - Household Scoped Persistence
 
 - Added household scoping migration for persisted household data including

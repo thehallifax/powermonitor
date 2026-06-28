@@ -10,6 +10,7 @@ venv/
 # Runtime data
 data/power.sqlite
 data/collector_health.json
+data/import_uploads/
 
 # Logs
 logs/

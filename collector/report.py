@@ -1898,6 +1898,7 @@ def nav_html() -> str:
         ("whatif", "What If?"),
         ("timeline", "Timeline"),
         ("analytics", "Analytics"),
+        ("imports", "Imports"),
         ("system", "System"),
     )
     return (
@@ -2907,6 +2908,46 @@ def system_page_html(health: dict, settings: Settings, summary: Summary) -> str:
     """
 
 
+def imports_page_html(history: Optional[list[dict]] = None) -> str:
+    try:
+        history = history if history is not None else data_engine().get_import_history()
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        history = []
+
+    if history:
+        rows = "".join(
+            f"""
+            <tr>
+              <td>{html.escape(str(item.get("created_at") or ""))}</td>
+              <td>{html.escape(str(item.get("source", {}).get("display_name") or item.get("source", {}).get("source_id") or "Unknown"))}</td>
+              <td>{html.escape(str(item.get("filename") or ""))}</td>
+              <td>{html.escape(str(item.get("status") or ""))}</td>
+              <td>{html.escape(str(item.get("message") or ""))}</td>
+            </tr>
+            """
+            for item in history
+        )
+    else:
+        rows = '<tr><td colspan="5">No import history yet.</td></tr>'
+
+    return f"""
+    <section class="report-section import-panel">
+      <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Ocular EV charging history</p></div>
+      <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
+        <label><span>Supported file</span><input type="file" name="import_file" accept=".xlsx,.xlsm" required></label>
+        <button type="submit">Preview import</button>
+      </form>
+    </section>
+    <section class="report-section import-panel compact-section">
+      <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
+      <table>
+        <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </section>
+    """
+
+
 def comparison_html(comparison: dict) -> str:
     deltas = comparison["deltas"]
     label = (
@@ -3185,6 +3226,10 @@ def write_html(
     {trends_html(trends, settings)}
     {comparison_html(comparison) if comparison else ""}
   </section>
+  <section id="imports" class="page">
+    <div class="page-heading"><h2>Upload household data</h2><p>Preview and import supported local household exports.</p></div>
+    {imports_page_html()}
+  </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
     {system_page_html(health, settings, period_summary)}
@@ -3455,6 +3500,13 @@ def write_html(
     .system-card {{ margin-top:14px; }}
     .system-card table {{ width:100%; border-collapse:collapse; }} .system-card th,.system-card td {{ padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; }}
     .system-card th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .import-panel table {{ width:100%; border-collapse:collapse; }}
+    .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
+    .import-panel th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .import-form {{ display:grid; grid-template-columns:1fr auto; gap:12px; align-items:end; }}
+    .import-form label span {{ display:block; margin-bottom:4px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .import-form input,.import-form button {{ width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
+    .import-form button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
     .config-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }} .config-grid div {{ padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
     .completeness-grid {{ display:grid; gap:9px; }}
     .completeness-row {{ display:grid; grid-template-columns:1fr auto; gap:4px 10px; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
@@ -3513,6 +3565,7 @@ def write_html(
     body:has(#whatif:target) .top-nav a[href="#whatif"],
     body:has(#timeline:target) .top-nav a[href="#timeline"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
+    body:has(#imports:target) .top-nav a[href="#imports"],
     body:has(#system:target) .top-nav a[href="#system"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ font-size:34px; letter-spacing:-.055em; }} .page-heading p {{ max-width:620px; font-size:14px; }}
@@ -3532,7 +3585,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}

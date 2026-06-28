@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
 from .models import (
     Account,
     DecisionTimeline,
@@ -345,6 +346,30 @@ class DataEngine:
             ON recommendation_lifecycle(state)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS import_jobs (
+                job_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                source_id TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                status TEXT NOT NULL,
+                file_path TEXT,
+                preview_json TEXT,
+                result_json TEXT,
+                message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_import_jobs_household_created
+            ON import_jobs(household_id, created_at DESC)
+            """
+        )
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -369,6 +394,7 @@ class DataEngine:
             "ev_sessions",
             "billing_periods",
             "timeline_entries",
+            "import_jobs",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -401,6 +427,12 @@ class DataEngine:
             """
             CREATE INDEX IF NOT EXISTS idx_timeline_entries_household_timestamp
             ON timeline_entries(household_id, timestamp)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_import_jobs_household_created
+            ON import_jobs(household_id, created_at DESC)
             """
         )
 
@@ -1016,6 +1048,193 @@ class DataEngine:
             return counts
 
         return self._with_connection(query)
+
+    def create_import_job(
+        self,
+        source: ImportSource,
+        filename: str,
+        file_path: Path,
+        preview: Optional[ImportPreview] = None,
+        status: str = "previewed",
+        message: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def insert(conn):
+            self.validate_connection(conn)
+            job = ImportJob.create(household_id, source, filename, status=status)
+            if job_id:
+                job = ImportJob(
+                    job_id=job_id,
+                    household_id=job.household_id,
+                    source=job.source,
+                    filename=job.filename,
+                    status=job.status,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                    preview=preview,
+                )
+            conn.execute(
+                """
+                INSERT INTO import_jobs (
+                    job_id,
+                    household_id,
+                    source_id,
+                    source_name,
+                    filename,
+                    status,
+                    file_path,
+                    preview_json,
+                    message,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    household_id,
+                    source.source_id,
+                    source.display_name,
+                    job.filename,
+                    status,
+                    str(file_path),
+                    json.dumps(preview.as_dict(), sort_keys=True) if preview else None,
+                    message,
+                    job.created_at,
+                    job.updated_at,
+                ),
+            )
+            conn.commit()
+            return self.get_import_job(job.job_id)
+
+        return self._with_connection(insert)
+
+    def update_import_job(
+        self,
+        job_id: str,
+        status: str,
+        result: Optional[ImportResult] = None,
+        message: Optional[str] = None,
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def update(conn):
+            self.validate_connection(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            cursor = conn.execute(
+                """
+                UPDATE import_jobs
+                SET status = ?,
+                    result_json = ?,
+                    message = COALESCE(?, message),
+                    updated_at = ?
+                WHERE household_id = ? AND job_id = ?
+                """,
+                (
+                    status,
+                    json.dumps(result.as_dict(), sort_keys=True) if result else None,
+                    message,
+                    now,
+                    household_id,
+                    job_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError("Import job not found")
+            conn.commit()
+            return self.get_import_job(job_id)
+
+        return self._with_connection(update)
+
+    def get_import_job(self, job_id: str) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    job_id,
+                    household_id,
+                    source_id,
+                    source_name,
+                    filename,
+                    status,
+                    file_path,
+                    preview_json,
+                    result_json,
+                    message,
+                    created_at,
+                    updated_at
+                FROM import_jobs
+                WHERE household_id = ? AND job_id = ?
+                """,
+                (household_id, job_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Import job not found")
+            return self._normalise_import_job(row)
+
+        return self._with_connection(query)
+
+    def get_import_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    job_id,
+                    household_id,
+                    source_id,
+                    source_name,
+                    filename,
+                    status,
+                    file_path,
+                    preview_json,
+                    result_json,
+                    message,
+                    created_at,
+                    updated_at
+                FROM import_jobs
+                WHERE household_id = ?
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            return [self._normalise_import_job(row) for row in rows]
+
+        return self._with_connection(query)
+
+    @staticmethod
+    def _normalise_import_job(row) -> dict[str, Any]:
+        def parse_json(raw):
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+
+        return {
+            "job_id": row[0],
+            "household_id": row[1],
+            "source": {
+                "source_id": row[2],
+                "display_name": row[3],
+            },
+            "filename": row[4],
+            "status": row[5],
+            "file_path": row[6],
+            "preview": parse_json(row[7]),
+            "result": parse_json(row[8]),
+            "message": row[9],
+            "created_at": row[10],
+            "updated_at": row[11],
+        }
 
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
         household_id = self._active_household_id()
