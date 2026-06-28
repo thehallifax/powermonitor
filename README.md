@@ -86,11 +86,14 @@ python3 collector/web.py
 open http://localhost:8765
 ```
 
-The server binds to `127.0.0.1` only. It serves the generated printable
-dashboard at `/`, a kiosk-friendly Glance Mode at `/glance`, live summary JSON
-at `/api/summary`, and health information at `/api/health`. The dashboard
-reloads every five minutes and remains fully offline with no CDN or internet
-assets.
+By default the server binds to `127.0.0.1:8765`. Override this without editing
+source by setting `POWMONITOR_HOST` and `POWMONITOR_PORT`, or by adding
+`web_server.host` and `web_server.port` to `config/settings.json`. For LAN
+access on a trusted home network, use `POWMONITOR_HOST=0.0.0.0`. It serves the
+generated printable dashboard at `/`, a kiosk-friendly Glance Mode at
+`/glance`, live summary JSON at `/api/summary`, and health information at
+`/api/health`. The dashboard reloads every five minutes and remains fully
+offline with no CDN or internet assets.
 
 The live dashboard period selector supports Today, Yesterday, Last 7 days,
 This month, Current billing period, and custom dates. The API also supports
@@ -596,6 +599,15 @@ To keep the localhost dashboard available after login, create
 
   <key>WorkingDirectory</key>
   <string>/absolute/path/to/PowerMonitor</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>POWMONITOR_HOST</key>
+    <string>0.0.0.0</string>
+    <key>POWMONITOR_PORT</key>
+    <string>8765</string>
+  </dict>
+
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

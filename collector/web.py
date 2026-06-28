@@ -3,6 +3,7 @@ import cgi
 import html
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import date, timedelta
@@ -16,12 +17,13 @@ import report
 from engine.import_framework import detect_importer
 from engine.models import to_api_safe
 
-HOST = "127.0.0.1"
-PORT = 8765
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
 LOG_PATH = PROJECT_ROOT / "logs" / "web.log"
 UPLOAD_DIR = PROJECT_ROOT / "data" / "import_uploads"
+SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 
 
 def setup_logging() -> None:
@@ -42,6 +44,39 @@ def live_health() -> dict:
 
 def api_json_dumps(payload: dict) -> str:
     return json.dumps(to_api_safe(payload), indent=2, sort_keys=True)
+
+
+def resolve_web_bind(settings_path: Path = SETTINGS_PATH) -> tuple[str, int]:
+    config = load_web_bind_config(settings_path)
+    host = os.environ.get("POWMONITOR_HOST") or config.get("host") or DEFAULT_HOST
+    raw_port = os.environ.get("POWMONITOR_PORT") or config.get("port") or DEFAULT_PORT
+    return str(host), parse_port(raw_port)
+
+
+def load_web_bind_config(settings_path: Path) -> dict:
+    if not settings_path.exists():
+        return {}
+    try:
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    web_server = raw.get("web_server") if isinstance(raw.get("web_server"), dict) else {}
+    return {
+        "host": web_server.get("host") or raw.get("web_host"),
+        "port": web_server.get("port") or raw.get("web_port"),
+    }
+
+
+def parse_port(value) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("POWMONITOR_PORT/web_port must be an integer") from exc
+    if port < 1 or port > 65535:
+        raise ValueError("POWMONITOR_PORT/web_port must be between 1 and 65535")
+    return port
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -420,9 +455,10 @@ def safe_filename(value: str) -> str:
 
 def main() -> None:
     setup_logging()
-    server = ThreadingHTTPServer((HOST, PORT), DashboardHandler)
-    logging.info("PowerMonitor dashboard server started on http://%s:%d", HOST, PORT)
-    print(f"PowerMonitor dashboard: http://localhost:{PORT}")
+    host, port = resolve_web_bind()
+    server = ThreadingHTTPServer((host, port), DashboardHandler)
+    logging.info("PowerMonitor dashboard server started on http://%s:%d", host, port)
+    print(f"PowerMonitor dashboard: http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

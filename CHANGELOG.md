@@ -1,5 +1,17 @@
 # Changelog
 
+## Housekeeping - Configurable Web Host
+
+- Made the embedded web dashboard host and port configurable through
+  `POWMONITOR_HOST` and `POWMONITOR_PORT`.
+- Added config-file fallback support via `web_server.host` /
+  `web_server.port` or flat `web_host` / `web_port` keys.
+- Preserved the default development bind of `127.0.0.1:8765`.
+- Updated the LaunchAgent example to expose `0.0.0.0` for LAN appliance use
+  without editing tracked source code.
+- Added regression tests for defaults, config fallback, environment override,
+  and invalid port handling.
+
 ## PB-004 - Capability Detection
 
 - Added household capability detection for solar, EV, battery placeholder,
