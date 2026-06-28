@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 1.1.0 - Advisor Framework
+
+- Added shared `Advisor` and `AdvisorCollection` contracts for future
+  presentation-agnostic advisors.
+- Refactored Charging Advisor to expose its existing behaviour through the
+  shared `Advisor` contract without changing charge/wait/avoid logic.
+- Added advisor aggregation to the dashboard API and report generation path.
+- Updated Home, Glance Mode, and Recommendation Centre surfaces to consume
+  shared `Advisor` fields where appropriate.
+- Added Advisor contract, collection ordering, and Charging Advisor parity
+  tests.
+
 ## Sprint 1.0.2 - Advisor Evidence
 
 - Added shared `EvidenceItem` and `EvidenceTrail` models for ordered advisor

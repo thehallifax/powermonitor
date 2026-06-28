@@ -41,25 +41,26 @@ def build_glance_state(
     bill_projection_basis: str,
     now: datetime,
 ) -> GlanceState:
+    advisor = charging_advice.advisor
     bucket = str(charging_advice.supporting_evidence.get("current_tariff_bucket") or current_tariff_bucket(now))
     status = {
         "CHARGE_NOW": "CHARGE NOW",
         "WAIT": "WAIT",
         "AVOID": "AVOID",
         "UNKNOWN": "DATA UNAVAILABLE",
-    }[charging_advice.status]
+    }[advisor.status]
     tone = {
         "CHARGE_NOW": "charge",
         "WAIT": "wait",
         "AVOID": "avoid",
         "UNKNOWN": "unavailable",
-    }[charging_advice.status]
+    }[advisor.status]
 
     return GlanceState(
         status=status,
         tone=tone,
-        current_recommendation=charging_advice.headline,
-        reason=charging_advice.explanation,
+        current_recommendation=advisor.headline,
+        reason=advisor.summary,
         current_tariff=charging_advice.tariff_now_label or TARIFF_LABELS[bucket],
         current_tariff_bucket=bucket,
         next_window=charging_advice.next_window or next_better_window(now, bucket),
@@ -69,7 +70,7 @@ def build_glance_state(
         bill_projected=float(projected_bill),
         bill_projection_basis=bill_projection_basis,
         solar_status=str(charging_advice.supporting_evidence.get("solar_status") or "Solar unavailable"),
-        freshness=charging_advice.data_freshness,
+        freshness=advisor.freshness,
         last_updated=now.astimezone().isoformat(timespec="seconds"),
-        confidence=charging_advice.confidence,
+        confidence=advisor.confidence,
     )

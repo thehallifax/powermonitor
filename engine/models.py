@@ -11,6 +11,7 @@ CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
 DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
 CHARGING_ADVICE_STATUSES = ("CHARGE_NOW", "WAIT", "AVOID", "UNKNOWN")
+ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
 
@@ -289,6 +290,56 @@ class EvidenceTrail:
         return {"items": [item.as_dict() for item in self.items]}
 
 
+@dataclass(frozen=True)
+class Advisor:
+    """Shared presentation-agnostic contract for all PowerMonitor advisors."""
+
+    advisor_id: str
+    advisor_type: str
+    status: str
+    headline: str
+    summary: str
+    recommendation: str
+    estimated_financial_impact: Optional[FinancialImpact]
+    confidence: str
+    confidence_reason: str
+    evidence_trail: EvidenceTrail
+    freshness: str
+    supporting_data_sources: list[str]
+    next_review_time: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.status not in ADVISOR_STATUSES:
+            raise ValueError(f"Unsupported advisor status: {self.status}")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported advisor confidence: {self.confidence}")
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if isinstance(self.estimated_financial_impact, FinancialImpact):
+            data["estimated_financial_impact"] = self.estimated_financial_impact.as_dict()
+        if isinstance(self.evidence_trail, EvidenceTrail):
+            data["evidence_trail"] = self.evidence_trail.as_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class AdvisorCollection:
+    """Aggregates active advisors in deterministic priority order."""
+
+    advisors: list[Advisor] = field(default_factory=list)
+
+    def active(self) -> list[Advisor]:
+        return sorted(self.advisors, key=_advisor_sort_key)
+
+    def as_dict(self) -> dict[str, Any]:
+        ordered = self.active()
+        return {
+            "advisors": [advisor.as_dict() for advisor in ordered],
+            "count": len(ordered),
+        }
+
+
 @dataclass
 class ChargingAdvice:
     """Presentation-agnostic answer to whether EV charging should happen now."""
@@ -314,6 +365,7 @@ class ChargingAdvice:
     solar_data_status: str
     confidence_reason: str
     evidence_trail: EvidenceTrail
+    advisor: Advisor
 
     def __post_init__(self) -> None:
         if self.status not in CHARGING_ADVICE_STATUSES:
@@ -326,6 +378,25 @@ class ChargingAdvice:
         if isinstance(self.estimated_financial_benefit, FinancialImpact):
             data["estimated_financial_benefit"] = self.estimated_financial_benefit.as_dict()
         return data
+
+
+def _advisor_sort_key(advisor: Advisor) -> tuple[int, float, int, str]:
+    status_rank = {
+        "AVOID": 0,
+        "CHARGE_NOW": 1,
+        "WAIT": 2,
+        "UNKNOWN": 3,
+    }.get(advisor.status, 4)
+    impact = 0.0
+    if advisor.estimated_financial_impact:
+        values = [
+            value
+            for value in advisor.estimated_financial_impact.periods_dict().values()
+            if value is not None
+        ]
+        impact = max((abs(float(value)) for value in values), default=0.0)
+    confidence_rank = {"Very High": 0, "High": 1, "Medium": 2, "Low": 3}.get(advisor.confidence, 4)
+    return (status_rank, -impact, confidence_rank, advisor.advisor_id)
 
 
 @dataclass(frozen=True)

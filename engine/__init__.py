@@ -3,6 +3,8 @@ from .decision_engine import generate_decisions, generate_ev_session_decisions
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
 from .models import (
+    Advisor,
+    AdvisorCollection,
     Confidence,
     ChargingAdvice,
     Decision,
@@ -23,6 +25,8 @@ from .recommendation_engine import RecommendationEngine
 
 __all__ = [
     "Confidence",
+    "Advisor",
+    "AdvisorCollection",
     "BillPeriod",
     "ChargingAdvice",
     "ChargingAdvisor",

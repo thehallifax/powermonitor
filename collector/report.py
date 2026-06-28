@@ -24,7 +24,7 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
-from engine.models import ChargingAdvice, DecisionTimeline, EnergyScore
+from engine.models import Advisor, AdvisorCollection, ChargingAdvice, DecisionTimeline, EnergyScore
 from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -259,6 +259,7 @@ def dashboard_data(
         glance_projected,
         generated_at,
     )
+    advisors = AdvisorCollection([charging_advice.advisor])
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -277,6 +278,7 @@ def dashboard_data(
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": timeline.as_dict(),
+        "advisors": advisors.as_dict(),
         "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
             billing_summary=billing_summary,
@@ -1897,9 +1899,11 @@ def recommendation_centre_html(
     recommendations: list[Decision],
     lifecycle_counts: Optional[dict[str, int]] = None,
     hidden: Optional[list[Decision]] = None,
+    advisors: Optional[list[Advisor]] = None,
 ) -> str:
     ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
     hidden = sorted(hidden or [], key=lambda item: (-recommendation_priority_score(item), item.title))
+    advisors = advisors or []
     lifecycle_counts = lifecycle_counts or {"dismissed": 0, "snoozed_until": 0}
     inactive_count = int(lifecycle_counts.get("dismissed", 0)) + int(lifecycle_counts.get("snoozed_until", 0))
     lifecycle_note = (
@@ -1987,6 +1991,7 @@ def recommendation_centre_html(
         else ""
     )
     return f"""
+    {advisor_centre_html(advisors)}
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
         <div><span class="eyebrow">Recommendation centre</span><h2>Ranked household opportunities</h2></div>
@@ -1997,6 +2002,41 @@ def recommendation_centre_html(
       <div class="recommendation-grid">{''.join(cards)}</div>
     </section>
     {hidden_section}
+    """
+
+
+def advisor_centre_html(advisors: list[Advisor]) -> str:
+    if not advisors:
+        return ""
+    cards = []
+    for advisor in advisors:
+        cards.append(
+            f"""
+            <article class="recommendation-card recommendation-centre-card">
+              <div class="recommendation-centre-heading">
+                <span class="recommendation-level">{html.escape(advisor.confidence)} confidence</span>
+                <div><small>Status</small><strong>{html.escape(advisor.status.replace("_", " "))}</strong></div>
+              </div>
+              <h3>{html.escape(advisor.headline)}</h3>
+              <div class="recommendation-centre-meta">
+                <span>{html.escape(advisor.advisor_type.replace("_", " ").title())}</span>
+                <span>{html.escape(advisor.freshness)}</span>
+              </div>
+              <div class="decision-lines">
+                <p><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
+                <p><strong>Why?</strong>{html.escape(advisor.confidence_reason)}</p>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="report-section recommendation-centre-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Advisors</span><h2>Active advisor calls</h2></div>
+        <p>{len(advisors)} active</p>
+      </div>
+      <div class="recommendation-grid">{''.join(cards)}</div>
+    </section>
     """
 
 
@@ -2256,13 +2296,14 @@ def home_page_html(
 
 
 def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
+    advisor = charging_advice.advisor
     tone = {
         "CHARGE_NOW": "green",
         "WAIT": "amber",
         "AVOID": "red",
         "UNKNOWN": "amber",
-    }[charging_advice.status]
-    benefit = charging_advice.estimated_financial_benefit
+    }[advisor.status]
+    benefit = advisor.estimated_financial_impact
     benefit_text = "Not quantified"
     if benefit and benefit.today is not None:
         benefit_text = f"{money(benefit.today)} per kWh"
@@ -2276,17 +2317,17 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         if charging_advice.per_kwh_difference is not None
         else "Unavailable"
     )
-    reasoning = evidence_trail_html(charging_advice)
+    reasoning = evidence_trail_html(advisor)
     return f"""
     <section class="source-status {tone}">
-      <div><span>Charging Advisor</span><h2>{html.escape(charging_advice.headline)}</h2></div>
-      <p>{html.escape(charging_advice.explanation)}</p>
+      <div><span>Charging Advisor</span><h2>{html.escape(advisor.headline)}</h2></div>
+      <p>{html.escape(advisor.summary)}</p>
       <div class="metrics">
-        {metric("Status", charging_advice.status.replace("_", " "), "Shared ChargingAdvice", "ev")}
+        {metric("Status", advisor.status.replace("_", " "), "Shared Advisor", "ev")}
         {metric("Tariff now / next", rate_text, f"{charging_advice.tariff_now_label} to {charging_advice.tariff_next_label}", "cost")}
         {metric("Difference", difference_text, "Current tariff minus next window tariff", "cost")}
         {metric("Benefit", benefit_text, benefit.basis if benefit and benefit.basis else "Measured where tariff difference exists", "cost")}
-        {metric("Confidence", charging_advice.confidence, charging_advice.confidence_reason, "primary")}
+        {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
         {metric("Next window", charging_advice.next_window or "Unavailable", charging_advice.next_window_start or "Configured tariff schedule", "solar")}
         {metric("EV data", charging_advice.charger_data_status.replace("_", " "), charging_advice.ev_session_freshness, "ev")}
         {metric("Solar data", charging_advice.solar_data_status, "Daily summary only; no live surplus assumption", "solar")}
@@ -2296,8 +2337,8 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
     """
 
 
-def evidence_trail_html(charging_advice: ChargingAdvice) -> str:
-    items = getattr(charging_advice.evidence_trail, "items", [])
+def evidence_trail_html(advisor: Advisor) -> str:
+    items = getattr(advisor.evidence_trail, "items", [])
     if not items:
         return ""
     rows = []
@@ -2709,6 +2750,7 @@ def write_html(
         glance_projected,
         generated_dt,
     )
+    advisors = AdvisorCollection([charging_advice.advisor])
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -2738,7 +2780,7 @@ def write_html(
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [])}
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisors.active())}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>

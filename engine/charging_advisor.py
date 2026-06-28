@@ -9,7 +9,7 @@ markup and it does not forecast future appliance behaviour.
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
-from .models import ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact
+from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact
 
 TARIFF_LABELS = {
     "overnight": "Overnight",
@@ -80,6 +80,11 @@ class ChargingAdvisor:
         }
 
         if not available:
+            headline = "Charging advice needs fresher data"
+            explanation = (
+                "PowerMonitor does not have fresh enough interval data to make a reliable charging call. "
+                f"The tariff schedule is still known, but solar, billing, and EV evidence are {freshness.lower()}."
+            )
             evidence_trail = self._evidence_trail(
                 bucket=bucket,
                 next_bucket=next_bucket,
@@ -93,17 +98,27 @@ class ChargingAdvisor:
                 bill_is_high=bill_is_high,
                 top_priority=top_priority,
                 status="UNKNOWN",
-                headline="Charging advice needs fresher data",
+                headline=headline,
                 benefit=None,
                 advice_confidence="Low",
             )
+            advisor = self._advisor(
+                status="UNKNOWN",
+                headline=headline,
+                summary=explanation,
+                recommendation=headline,
+                benefit=None,
+                confidence="Low",
+                confidence_reason=confidence_reason,
+                evidence_trail=evidence_trail,
+                freshness=freshness,
+                supporting_data_sources=self._supporting_data_sources(charger_data_status, solar_data_status),
+                next_review_time=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+            )
             return ChargingAdvice(
                 status="UNKNOWN",
-                headline="Charging advice needs fresher data",
-                explanation=(
-                    "PowerMonitor does not have fresh enough interval data to make a reliable charging call. "
-                    f"The tariff schedule is still known, but solar, billing, and EV evidence are {freshness.lower()}."
-                ),
+                headline=headline,
+                explanation=explanation,
                 estimated_financial_benefit=None,
                 confidence="Low",
                 supporting_evidence=evidence,
@@ -122,6 +137,7 @@ class ChargingAdvisor:
                 solar_data_status=solar_data_status,
                 confidence_reason=confidence_reason,
                 evidence_trail=evidence_trail,
+                advisor=advisor,
             )
 
         benefit = self._financial_benefit(bucket, per_kwh_benefit)
@@ -177,6 +193,19 @@ class ChargingAdvisor:
             benefit=benefit,
             advice_confidence=confidence,
         )
+        advisor = self._advisor(
+            status=status,
+            headline=headline,
+            summary=explanation,
+            recommendation=headline,
+            benefit=benefit,
+            confidence=confidence,
+            confidence_reason=confidence_reason,
+            evidence_trail=evidence_trail,
+            freshness=freshness,
+            supporting_data_sources=self._supporting_data_sources(charger_data_status, solar_data_status),
+            next_review_time=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+        )
 
         return ChargingAdvice(
             status=status,
@@ -200,6 +229,7 @@ class ChargingAdvisor:
             solar_data_status=solar_data_status,
             confidence_reason=confidence_reason,
             evidence_trail=evidence_trail,
+            advisor=advisor,
         )
 
     def _data_is_available(self, today_summary: Any, billing_summary: Any, health: dict[str, Any]) -> tuple[bool, str, str]:
@@ -304,6 +334,47 @@ class ChargingAdvisor:
         if "No solar interval" in solar_data_status:
             return "High confidence for tariff timing, with solar context unavailable today."
         return "High confidence because tariff timing and today's interval data are fresh."
+
+    def _supporting_data_sources(self, charger_data_status: str, solar_data_status: str) -> list[str]:
+        sources = ["Configured tariff schedule", "Financial Engine", "Recommendation Engine"]
+        if "No solar interval" not in solar_data_status:
+            sources.append("SolarEdge interval data")
+        if charger_data_status == "actual_session_data_available":
+            sources.append("EV charging session data")
+        else:
+            sources.append("Estimated EV charging")
+        return sources
+
+    def _advisor(
+        self,
+        *,
+        status: str,
+        headline: str,
+        summary: str,
+        recommendation: str,
+        benefit: Optional[FinancialImpact],
+        confidence: str,
+        confidence_reason: str,
+        evidence_trail: EvidenceTrail,
+        freshness: str,
+        supporting_data_sources: list[str],
+        next_review_time: Optional[str],
+    ) -> Advisor:
+        return Advisor(
+            advisor_id="charging_advisor",
+            advisor_type="EV_CHARGING",
+            status=status,
+            headline=headline,
+            summary=summary,
+            recommendation=recommendation,
+            estimated_financial_impact=benefit,
+            confidence=confidence,
+            confidence_reason=confidence_reason,
+            evidence_trail=evidence_trail,
+            freshness=freshness,
+            supporting_data_sources=supporting_data_sources,
+            next_review_time=next_review_time,
+        )
 
     def _evidence_trail(
         self,
