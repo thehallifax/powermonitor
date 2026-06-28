@@ -1,5 +1,19 @@
 # Changelog
 
+## PB-008 - Provider Observation Pipeline
+
+- Extended provider observations with household, provider, capability,
+  observation type, timestamps, value, unit, freshness, quality, provenance,
+  raw reference, and import-job linkage fields.
+- Added household-scoped `provider_observations` persistence plus DataEngine
+  write/read APIs and an API-safe provider observation summary.
+- Linked Ocular EV imports to normalized `ev_session` provider observations
+  without replacing existing EV session domain tables or calculations.
+- Added provider observation metadata to capability reasons, System page latest
+  observations, Imports history observation counts, and dashboard API output.
+- Added persistence, household isolation, API serialization, and
+  importer-to-observation regression tests.
+
 ## PB-007 - Provider Framework
 
 - Added shared provider framework models for providers, provider types,

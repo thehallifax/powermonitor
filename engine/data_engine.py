@@ -30,6 +30,14 @@ from .models import (
     HouseholdMembership,
     TimelineEntry,
 )
+from .provider_framework import (
+    ProviderCapability,
+    ProviderFreshness,
+    ProviderObservation,
+    ProviderObservationQuality,
+    ProviderObservationType,
+    ProviderType,
+)
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 DEFAULT_ACCOUNT_ID = "local_account"
@@ -372,6 +380,7 @@ class DataEngine:
             ON import_jobs(household_id, created_at DESC)
             """
         )
+        DataEngine._ensure_provider_observation_table(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -390,6 +399,43 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_provider_observation_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provider_observations (
+                observation_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                provider_id TEXT NOT NULL,
+                provider_type TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                observation_type TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                value_json TEXT,
+                unit TEXT,
+                quality TEXT NOT NULL,
+                freshness_json TEXT,
+                provenance TEXT,
+                raw_reference TEXT,
+                import_job_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_observations_household_observed
+            ON provider_observations(household_id, observed_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_observations_provider_capability
+            ON provider_observations(household_id, provider_id, capability)
+            """
+        )
+
+    @staticmethod
     def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
         scoped_tables = (
             "readings",
@@ -397,6 +443,7 @@ class DataEngine:
             "billing_periods",
             "timeline_entries",
             "import_jobs",
+            "provider_observations",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -1149,6 +1196,191 @@ class DataEngine:
 
         return self._with_connection(update)
 
+    def persist_provider_observations(
+        self,
+        observations: list[ProviderObservation],
+    ) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def insert(conn):
+            DataEngine._ensure_provider_observation_table(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            rows = []
+            for observation in observations:
+                provider_id = observation.provider_id or "unknown_provider"
+                provider_type = observation.provider_type or ProviderType.GENERIC_IMPORT
+                capability = observation.capability
+                observation_type = observation.observation_type or _observation_type_for_capability(capability)
+                observed_at = observation.observed_at or now
+                received_at = observation.received_at or now
+                scoped_household_id = observation.household_id or household_id
+                if scoped_household_id != household_id:
+                    continue
+                value_json = json.dumps(observation.value, sort_keys=True) if observation.value is not None else None
+                freshness_json = json.dumps(observation.freshness.as_dict(), sort_keys=True) if observation.freshness else None
+                key = "|".join(
+                    [
+                        scoped_household_id,
+                        provider_id,
+                        capability.value,
+                        observation_type.value,
+                        observed_at,
+                        str(observation.raw_reference or ""),
+                        str(observation.import_job_id or ""),
+                    ]
+                )
+                observation_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+                row = (
+                    observation_id,
+                    scoped_household_id,
+                    provider_id,
+                    provider_type.value,
+                    capability.value,
+                    observation_type.value,
+                    observed_at,
+                    received_at,
+                    value_json,
+                    observation.unit,
+                    observation.quality.value,
+                    freshness_json,
+                    observation.provenance,
+                    observation.raw_reference,
+                    observation.import_job_id,
+                    now,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO provider_observations (
+                        observation_id,
+                        household_id,
+                        provider_id,
+                        provider_type,
+                        capability,
+                        observation_type,
+                        observed_at,
+                        received_at,
+                        value_json,
+                        unit,
+                        quality,
+                        freshness_json,
+                        provenance,
+                        raw_reference,
+                        import_job_id,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(observation_id) DO UPDATE SET
+                        received_at = excluded.received_at,
+                        value_json = excluded.value_json,
+                        unit = excluded.unit,
+                        quality = excluded.quality,
+                        freshness_json = excluded.freshness_json,
+                        provenance = excluded.provenance,
+                        raw_reference = excluded.raw_reference,
+                        import_job_id = excluded.import_job_id
+                    """,
+                    row,
+                )
+                rows.append(row)
+            conn.commit()
+            return [
+                self._normalise_provider_observation(row)
+                for row in rows
+            ]
+
+        return self._with_connection(insert)
+
+    def get_provider_observations(
+        self,
+        *,
+        limit: int = 20,
+        provider_id: Optional[str] = None,
+        capability: Optional[str] = None,
+        observation_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_provider_observation_table(conn)
+            clauses = ["household_id = ?"]
+            values: list[Any] = [household_id]
+            if provider_id:
+                clauses.append("provider_id = ?")
+                values.append(provider_id)
+            if capability:
+                clauses.append("capability = ?")
+                values.append(capability)
+            if observation_type:
+                clauses.append("observation_type = ?")
+                values.append(observation_type)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    observation_id,
+                    household_id,
+                    provider_id,
+                    provider_type,
+                    capability,
+                    observation_type,
+                    observed_at,
+                    received_at,
+                    value_json,
+                    unit,
+                    quality,
+                    freshness_json,
+                    provenance,
+                    raw_reference,
+                    import_job_id,
+                    created_at
+                FROM provider_observations
+                WHERE {' AND '.join(clauses)}
+                ORDER BY observed_at DESC, received_at DESC
+                LIMIT ?
+                """,
+                (*values, int(limit)),
+            ).fetchall()
+            return [self._normalise_provider_observation(row) for row in rows]
+
+        return self._with_connection(query)
+
+    def get_provider_observation_summary(self, limit: int = 20) -> dict[str, Any]:
+        observations = self.get_provider_observations(limit=limit)
+        by_provider: dict[str, dict[str, Any]] = {}
+        for observation in observations:
+            provider_id = observation["provider_id"]
+            item = by_provider.setdefault(
+                provider_id,
+                {
+                    "provider_id": provider_id,
+                    "provider_type": observation["provider_type"],
+                    "latest_observed_at": observation["observed_at"],
+                    "capabilities": set(),
+                    "observation_types": set(),
+                    "quality": observation["quality"],
+                    "count": 0,
+                },
+            )
+            item["count"] += 1
+            item["capabilities"].add(observation["capability"])
+            item["observation_types"].add(observation["observation_type"])
+            if observation["observed_at"] > item["latest_observed_at"]:
+                item["latest_observed_at"] = observation["observed_at"]
+                item["quality"] = observation["quality"]
+        providers = []
+        for item in by_provider.values():
+            providers.append(
+                {
+                    **item,
+                    "capabilities": sorted(item["capabilities"]),
+                    "observation_types": sorted(item["observation_types"]),
+                }
+            )
+        providers.sort(key=lambda item: item["latest_observed_at"], reverse=True)
+        return {
+            "count": len(observations),
+            "providers": providers,
+            "latest": observations[: min(limit, 10)],
+        }
+
     def get_import_job(self, job_id: str) -> dict[str, Any]:
         household_id = self._active_household_id()
 
@@ -1168,7 +1400,13 @@ class DataEngine:
                     result_json,
                     message,
                     created_at,
-                    updated_at
+                    updated_at,
+                    (
+                        SELECT COUNT(*)
+                        FROM provider_observations po
+                        WHERE po.household_id = import_jobs.household_id
+                          AND po.import_job_id = import_jobs.job_id
+                    ) AS provider_observation_count
                 FROM import_jobs
                 WHERE household_id = ? AND job_id = ?
                 """,
@@ -1199,7 +1437,13 @@ class DataEngine:
                     result_json,
                     message,
                     created_at,
-                    updated_at
+                    updated_at,
+                    (
+                        SELECT COUNT(*)
+                        FROM provider_observations po
+                        WHERE po.household_id = import_jobs.household_id
+                          AND po.import_job_id = import_jobs.job_id
+                    ) AS provider_observation_count
                 FROM import_jobs
                 WHERE household_id = ?
                 ORDER BY created_at DESC, job_id DESC
@@ -1236,6 +1480,36 @@ class DataEngine:
             "message": row[9],
             "created_at": row[10],
             "updated_at": row[11],
+            "provider_observation_count": int(row[12] or 0) if len(row) > 12 else 0,
+        }
+
+    @staticmethod
+    def _normalise_provider_observation(row) -> dict[str, Any]:
+        def parse_json(raw):
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+
+        return {
+            "observation_id": row[0],
+            "household_id": row[1],
+            "provider_id": row[2],
+            "provider_type": row[3],
+            "capability": row[4],
+            "observation_type": row[5],
+            "observed_at": row[6],
+            "received_at": row[7],
+            "value": parse_json(row[8]),
+            "unit": row[9],
+            "quality": row[10],
+            "freshness": parse_json(row[11]),
+            "provenance": row[12],
+            "raw_reference": row[13],
+            "import_job_id": row[14],
+            "created_at": row[15],
         }
 
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
@@ -1486,6 +1760,18 @@ class DataEngine:
                     """,
                     (household_id,),
                 ).fetchone()[0]
+            observation_counts: dict[str, int] = {}
+            if DataEngine._table_exists(conn, "provider_observations"):
+                observation_rows = conn.execute(
+                    """
+                    SELECT capability, COUNT(*)
+                    FROM provider_observations
+                    WHERE household_id = ?
+                    GROUP BY capability
+                    """,
+                    (household_id,),
+                ).fetchall()
+                observation_counts = {row[0]: int(row[1]) for row in observation_rows}
 
             reading_count = int(reading_row[0] or 0)
             grid_kwh = float(reading_row[1] or 0)
@@ -1506,7 +1792,7 @@ class DataEngine:
                     source="provider:solaredge",
                     confidence="High" if solar_kwh > 0 else "Medium",
                     reason=(
-                        f"Detected {solar_kwh:.2f} kWh of solar production/export readings."
+                        f"Detected {solar_kwh:.2f} kWh of solar production/export readings. {_observation_count_note(observation_counts, 'daily_summary')}"
                         if solar_kwh > 0 else
                         "No solar production or export readings found for this household."
                     ),
@@ -1520,7 +1806,7 @@ class DataEngine:
                     source="provider:ocular_export",
                     confidence="High" if ev_sessions > 0 and ev_kwh > 0 else "Medium",
                     reason=(
-                        f"Detected {ev_sessions} EV charging session rows."
+                        f"Detected {ev_sessions} EV charging session rows. {_observation_count_note(observation_counts, 'ev_sessions')}"
                         if ev_sessions > 0 and ev_kwh > 0 else
                         "No persisted EV charging sessions found; Ocular upload can add this data."
                     ),
@@ -1541,7 +1827,7 @@ class DataEngine:
                     source="provider:smart_meter_readings",
                     confidence="High" if reading_count else "Medium",
                     reason=(
-                        f"Detected {reading_count} household interval readings."
+                        f"Detected {reading_count} household interval readings. {_observation_count_note(observation_counts, 'interval_history')}"
                         if reading_count else
                         "No household interval readings found."
                     ),
@@ -1569,7 +1855,7 @@ class DataEngine:
                     source="provider:ocular_export",
                     confidence="High",
                     reason=(
-                        f"{import_job_count} import job records are available."
+                        f"{import_job_count} import job records are available. {_observation_count_note(observation_counts, 'import_only') or _observation_count_note(observation_counts, 'ev_sessions')}"
                         if import_job_count else
                         "Ocular EV charging history upload is available."
                     ),
@@ -1696,6 +1982,25 @@ def _tariff_configured(import_rates: Any) -> bool:
         return all(float(import_rates[bucket]) > 0 for bucket in required)
     except (TypeError, ValueError):
         return False
+
+
+def _observation_type_for_capability(capability: ProviderCapability) -> ProviderObservationType:
+    if capability == ProviderCapability.EV_SESSIONS:
+        return ProviderObservationType.EV_SESSION
+    if capability == ProviderCapability.TARIFF_DATA:
+        return ProviderObservationType.TARIFF_CONFIG
+    if capability == ProviderCapability.BILLING_DATA:
+        return ProviderObservationType.BILLING_PERIOD
+    if capability == ProviderCapability.INTERVAL_HISTORY:
+        return ProviderObservationType.GRID_IMPORT
+    return ProviderObservationType.COLLECTOR_HEALTH
+
+
+def _observation_count_note(counts: dict[str, int], capability: str) -> str:
+    count = int(counts.get(capability, 0))
+    if count <= 0:
+        return ""
+    return f"{count} provider observation{'s' if count != 1 else ''} recorded."
 
 
 def freshness_from_latest(latest_measurement: Optional[str], today: date) -> Freshness:

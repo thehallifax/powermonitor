@@ -45,6 +45,16 @@ class ProviderObservationQuality(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ProviderObservationType(str, Enum):
+    SOLAR_GENERATION = "solar_generation"
+    GRID_IMPORT = "grid_import"
+    SOLAR_EXPORT = "solar_export"
+    EV_SESSION = "ev_session"
+    TARIFF_CONFIG = "tariff_config"
+    BILLING_PERIOD = "billing_period"
+    COLLECTOR_HEALTH = "collector_health"
+
+
 @dataclass(frozen=True)
 class ProviderFreshness:
     state: str = "unknown"
@@ -62,18 +72,36 @@ class ProviderObservation:
     name: str
     value: Any = None
     unit: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_type: Optional[ProviderType] = None
+    household_id: Optional[str] = None
+    observation_type: Optional[ProviderObservationType] = None
+    observed_at: Optional[str] = None
+    received_at: Optional[str] = None
     freshness: Optional[ProviderFreshness] = None
     quality: ProviderObservationQuality = ProviderObservationQuality.UNKNOWN
+    provenance: Optional[str] = None
+    raw_reference: Optional[str] = None
+    import_job_id: Optional[str] = None
     note: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "provider_id": self.provider_id,
+            "provider_type": self.provider_type.value if self.provider_type else None,
+            "household_id": self.household_id,
             "capability": self.capability.value,
+            "observation_type": self.observation_type.value if self.observation_type else None,
             "name": self.name,
             "value": self.value,
             "unit": self.unit,
+            "observed_at": self.observed_at,
+            "received_at": self.received_at,
             "freshness": self.freshness.as_dict() if self.freshness else None,
             "quality": self.quality.value,
+            "provenance": self.provenance,
+            "raw_reference": self.raw_reference,
+            "import_job_id": self.import_job_id,
             "note": self.note,
         }
 

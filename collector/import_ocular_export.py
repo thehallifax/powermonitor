@@ -21,6 +21,15 @@ from engine.import_framework import (
     ImportValidationIssue,
 )
 from engine.models import HouseholdContext
+from engine.data_engine import DataEngine
+from engine.provider_framework import (
+    ProviderCapability,
+    ProviderFreshness,
+    ProviderObservation,
+    ProviderObservationQuality,
+    ProviderObservationType,
+    ProviderType,
+)
 
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
@@ -595,6 +604,8 @@ class OcularEVImporter:
             )
         household_id = household_context.household.household_id
         processed, inserted = import_records_to_db(parsed_data, self.db_path, household_id)
+        observations = ocular_provider_observations(parsed_data, household_id, job_id)
+        DataEngine(db_path=self.db_path, household_context=household_context).persist_provider_observations(observations)
         return ImportResult(
             job_id=job_id or "",
             source=self.source,
@@ -605,6 +616,56 @@ class OcularEVImporter:
             issues=issues,
             message=f"Imported {processed} Ocular charging sessions.",
         )
+
+
+def ocular_provider_observations(
+    records: list[dict],
+    household_id: str,
+    job_id: Optional[str] = None,
+) -> list[ProviderObservation]:
+    observations = []
+    received_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    for record in records:
+        transaction_id = str(record.get("record_number") or "").strip()
+        try:
+            start = parse_datetime_value(record.get("start_time"))
+            end = parse_datetime_value(record.get("end_time"))
+            energy_kwh = parse_float(record.get("energy_kwh"))
+            duration = parse_duration_minutes(record.get("duration"), start, end)
+            cost, breakdown = split_tariff_cost(start, end, energy_kwh)
+        except (TypeError, ValueError):
+            continue
+        observations.append(
+            ProviderObservation(
+                ProviderCapability.EV_SESSIONS,
+                "ev_session",
+                value={
+                    "transaction_id": transaction_id,
+                    "energy_kwh": round(energy_kwh, 4),
+                    "cost_estimate": round(cost, 4),
+                    "duration_minutes": round(duration, 2),
+                    "tariff_breakdown": breakdown,
+                },
+                unit="session",
+                provider_id="ocular_export",
+                provider_type=ProviderType.EV_CHARGER,
+                household_id=household_id,
+                observation_type=ProviderObservationType.EV_SESSION,
+                observed_at=end.isoformat(timespec="seconds"),
+                received_at=received_at,
+                freshness=ProviderFreshness(
+                    state="fresh",
+                    observed_at=end.isoformat(timespec="seconds"),
+                    note="Imported Ocular EV charging session.",
+                ),
+                quality=ProviderObservationQuality.HIGH,
+                provenance="Ocular EV charging history workbook",
+                raw_reference=transaction_id,
+                import_job_id=job_id,
+                note="Normalized EV session observation from Ocular export.",
+            )
+        )
+    return observations
 
 
 def main() -> int:

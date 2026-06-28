@@ -49,7 +49,11 @@ class ImportFrameworkTests(unittest.TestCase):
                 rows = conn.execute(
                     "SELECT household_id, COUNT(*), ROUND(SUM(energy_kwh), 2) FROM ev_sessions GROUP BY household_id"
                 ).fetchall()
+                observations = DataEngine(connection=conn, household_context=household_context("household_a")).get_provider_observations()
             self.assertEqual(rows, [("household_a", 2, 10.0)])
+            self.assertEqual(len(observations), 2)
+            self.assertEqual(observations[0]["provider_id"], "ocular_export")
+            self.assertEqual(observations[0]["import_job_id"], "job_1")
 
     def test_data_engine_persists_import_history_by_household(self):
         with sqlite3.connect(":memory:") as conn:
@@ -63,6 +67,7 @@ class ImportFrameworkTests(unittest.TestCase):
             engine_a.create_import_job(source, "a.csv", Path("/tmp/a.csv"), preview=preview)
 
             self.assertEqual(len(engine_a.get_import_history()), 1)
+            self.assertIn("provider_observation_count", engine_a.get_import_history()[0])
             self.assertEqual(engine_b.get_import_history(), [])
 
 

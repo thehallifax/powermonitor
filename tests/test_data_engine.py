@@ -6,6 +6,14 @@ from datetime import date
 from engine.data_engine import DataEngine
 from engine.decision_engine import generate_decisions_from_data_engine
 from engine.models import TimelineEntry
+from engine.provider_framework import (
+    ProviderCapability,
+    ProviderFreshness,
+    ProviderObservation,
+    ProviderObservationQuality,
+    ProviderObservationType,
+    ProviderType,
+)
 
 
 @dataclass
@@ -150,6 +158,62 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertEqual(counts[0]["source"], "ocular_export")
         self.assertEqual(counts[0]["sessions"], 1)
+
+    def test_provider_observations_are_persisted_and_summarised(self):
+        observations = self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.EV_SESSIONS,
+                    "ev_session",
+                    value={"transaction_id": "abc123", "energy_kwh": 7.5},
+                    unit="session",
+                    provider_id="ocular_export",
+                    provider_type=ProviderType.EV_CHARGER,
+                    observation_type=ProviderObservationType.EV_SESSION,
+                    observed_at="2026-06-27T11:00:00",
+                    quality=ProviderObservationQuality.HIGH,
+                    freshness=ProviderFreshness(state="fresh", observed_at="2026-06-27T11:00:00"),
+                    provenance="test",
+                    raw_reference="abc123",
+                    import_job_id="job_1",
+                )
+            ]
+        )
+        stored = self.engine.get_provider_observations()
+        summary = self.engine.get_provider_observation_summary()
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(stored[0]["provider_id"], "ocular_export")
+        self.assertEqual(stored[0]["observation_type"], "ev_session")
+        self.assertEqual(stored[0]["value"]["energy_kwh"], 7.5)
+        self.assertEqual(summary["providers"][0]["capabilities"], ["ev_sessions"])
+
+    def test_provider_observations_are_household_scoped(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+        self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.IMPORT_ONLY,
+                    "collector_health",
+                    value={"status": "ok"},
+                    provider_id="collector",
+                    provider_type=ProviderType.GENERIC_IMPORT,
+                    observation_type=ProviderObservationType.COLLECTOR_HEALTH,
+                    observed_at="2026-06-27T12:00:00",
+                    quality=ProviderObservationQuality.MEDIUM,
+                )
+            ]
+        )
+
+        self.assertEqual(len(self.engine.get_provider_observations()), 1)
+        self.assertEqual(engine_b.get_provider_observations(), [])
 
     def test_timeline_entries_are_persisted_idempotently(self):
         entry = TimelineEntry(

@@ -329,6 +329,7 @@ def dashboard_data(
         timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
         timeline = context_engine.persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
+        provider_observations = context_engine.get_provider_observation_summary()
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
@@ -419,6 +420,7 @@ def dashboard_data(
         "capability_summary": capability_summary.as_dict(),
         "provider_registry": provider_registry.as_dict(),
         "provider_status": provider_registry.status_by_provider(),
+        "provider_observations": provider_observations,
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -3053,6 +3055,28 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
     """
 
 
+def provider_observations_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return ""
+    rows = []
+    for observation in summary.get("latest", [])[:8]:
+        rows.append(
+            f"""
+            <div class="completeness-row {'good' if observation.get('quality') == 'high' else 'bad'}">
+              <span>{html.escape(str(observation.get("provider_id") or "Unknown provider"))}</span>
+              <strong>{html.escape(str(observation.get("observation_type") or "Observation").replace("_", " ").title())}</strong>
+              <small>{html.escape(str(observation.get("capability") or ""))} - {html.escape(str(observation.get("observed_at") or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Latest provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations have been recorded yet.</p>'}</div>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3060,6 +3084,7 @@ def system_page_html(
     capability_summary=None,
     setup: Optional[SetupChecklist] = None,
     provider_registry: Optional[ProviderRegistry] = None,
+    provider_observations: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3087,6 +3112,7 @@ def system_page_html(
       </div>
       <div class="system-grid">
         {provider_registry_html(provider_registry)}
+        {provider_observations_html(provider_observations)}
         {capability_summary_html(capability_summary)}
         {data_completeness_html(summary, settings)}
         <div class="system-card">
@@ -3127,12 +3153,13 @@ def imports_page_html(
               <td>{html.escape(str(item.get("filename") or ""))}</td>
               <td>{html.escape(str(item.get("status") or ""))}</td>
               <td>{html.escape(str(item.get("message") or ""))}</td>
+              <td>{int(item.get("provider_observation_count") or 0)}</td>
             </tr>
             """
             for item in history
         )
     else:
-        rows = '<tr><td colspan="5">No import history yet.</td></tr>'
+        rows = '<tr><td colspan="6">No import history yet.</td></tr>'
 
     capability_note = ""
     if capability_summary:
@@ -3199,7 +3226,7 @@ def imports_page_html(
     <section class="report-section import-panel compact-section">
       <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
       <table>
-        <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th></tr></thead>
+        <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th><th>Observations</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>
@@ -3372,9 +3399,12 @@ def write_html(
     billing_summary = billing_summary or period_summary
     household_context = report_household_context()
     try:
-        capability_summary = data_engine().get_household_capability_summary(local_today(), settings)
+        html_data_engine = data_engine()
+        capability_summary = html_data_engine.get_household_capability_summary(local_today(), settings)
+        provider_observations = html_data_engine.get_provider_observation_summary()
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
         capability_summary = None
+        provider_observations = None
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
@@ -3520,7 +3550,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations)}
   </section>
 """
     )
