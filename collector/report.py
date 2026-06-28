@@ -330,6 +330,7 @@ def dashboard_data(
         timeline = context_engine.persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
         provider_observations = context_engine.get_provider_observation_summary()
+        promotion_summary = context_engine.promote_provider_observations()
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
@@ -421,6 +422,9 @@ def dashboard_data(
         "provider_registry": provider_registry.as_dict(),
         "provider_status": provider_registry.status_by_provider(),
         "provider_observations": provider_observations,
+        "promotion_summary": promotion_summary,
+        "conflict_summary": promotion_summary["conflict_summary"],
+        "latest_promotions": promotion_summary["latest_promotions"],
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -2722,11 +2726,24 @@ def setup_section_html(section: SetupSection) -> str:
     """
 
 
-def setup_page_html(setup: Optional[SetupChecklist]) -> str:
+def setup_page_html(
+    setup: Optional[SetupChecklist],
+    promotion_summary: Optional[dict] = None,
+) -> str:
     if not setup:
         return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
     sections = "".join(setup_section_html(section) for section in setup.sections)
+    conflict = (promotion_summary or {}).get("conflict_summary", {})
+    conflict_notice = ""
+    if conflict.get("repeated_conflicts"):
+        conflict_notice = """
+        <section class="setup-progress-card">
+          <div><span>Provider configuration</span><h3>Provider observations are conflicting.</h3><p>Review provider configuration before relying on promoted data.</p></div>
+          <a href="#system">Review System</a>
+        </section>
+        """
     return f"""
+    {conflict_notice}
     <section class="report-section compact-section">
       <div class="section-title">
         <div><span class="eyebrow">Setup</span><h2>{setup.progress.completion_pct}% complete</h2></div>
@@ -3082,6 +3099,31 @@ def provider_observations_html(summary: Optional[dict]) -> str:
     """
 
 
+def promotion_summary_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return ""
+    counts = summary.get("counts", {})
+    rows = []
+    for item in summary.get("latest_promotions", [])[:8]:
+        state = str(item.get("state") or "PENDING")
+        tone = "good" if state == "ACCEPTED" else "bad" if state in {"REJECTED", "CONFLICT"} else "neutral"
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(item.get("provider_id") or "Unknown provider"))}</span>
+              <strong>{html.escape(state.replace("_", " ").title())}</strong>
+              <small>{html.escape(str(item.get("observation_type") or ""))} - {html.escape(str(item.get("observed_at") or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Latest promotions</h3><span>{int(counts.get("ACCEPTED") or 0)} accepted / {int(counts.get("REJECTED") or 0)} rejected / {int(counts.get("CONFLICT") or 0)} conflicts</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations have been promoted yet.</p>'}</div>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3090,6 +3132,7 @@ def system_page_html(
     setup: Optional[SetupChecklist] = None,
     provider_registry: Optional[ProviderRegistry] = None,
     provider_observations: Optional[dict] = None,
+    promotion_summary: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3118,6 +3161,7 @@ def system_page_html(
       <div class="system-grid">
         {provider_registry_html(provider_registry)}
         {provider_observations_html(provider_observations)}
+        {promotion_summary_html(promotion_summary)}
         {capability_summary_html(capability_summary)}
         {data_completeness_html(summary, settings)}
         <div class="system-card">
@@ -3407,9 +3451,11 @@ def write_html(
         html_data_engine = data_engine()
         capability_summary = html_data_engine.get_household_capability_summary(local_today(), settings)
         provider_observations = html_data_engine.get_provider_observation_summary()
+        promotion_summary = html_data_engine.promote_provider_observations()
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
         capability_summary = None
         provider_observations = None
+        promotion_summary = None
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
@@ -3515,7 +3561,7 @@ def write_html(
   </section>
   <section id="setup" class="page">
     <div class="page-heading"><h2>Finish household setup</h2><p>Continuous readiness guidance generated from household capability, import, collector, and recommendation state.</p></div>
-    {setup_page_html(setup_checklist)}
+    {setup_page_html(setup_checklist, promotion_summary)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
@@ -3555,7 +3601,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations, promotion_summary)}
   </section>
 """
     )

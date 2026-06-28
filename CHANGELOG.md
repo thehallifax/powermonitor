@@ -1,5 +1,21 @@
 # Changelog
 
+## PB-009 - Observation Promotion Engine
+
+- Added `PromotionEngine` with promotion candidates, decisions, reasons,
+  validation, conflicts, results, and explicit promotion states.
+- Added validation, deduplication, supersession, conflict, freshness,
+  household-scope, and capability-compatibility checks for provider
+  observations before promotion.
+- Added household-scoped `promotion_decisions` persistence in DataEngine as a
+  trusted read-model layer without replacing existing domain tables or
+  calculations.
+- Exposed `promotion_summary`, `conflict_summary`, and `latest_promotions`
+  through the dashboard API and System page.
+- Added Setup-page guidance when repeated provider conflicts are detected.
+- Added promotion, conflict, duplicate, household isolation, persistence, and
+  API serialization tests.
+
 ## Housekeeping - Charging Tariff Windows
 
 - Extended `ChargingAdvice` with current, next-lower-cost, lowest-cost, and

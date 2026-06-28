@@ -38,6 +38,7 @@ from .provider_framework import (
     ProviderObservationType,
     ProviderType,
 )
+from .promotion_engine import PromotionEngine, PromotionResult
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 DEFAULT_ACCOUNT_ID = "local_account"
@@ -381,6 +382,7 @@ class DataEngine:
             """
         )
         DataEngine._ensure_provider_observation_table(conn)
+        DataEngine._ensure_promotion_table(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -436,6 +438,42 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_promotion_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promotion_decisions (
+                promotion_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                observation_id TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                provider_type TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                observation_type TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                state TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                conflict_json TEXT,
+                value_json TEXT,
+                promoted_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_promotion_decisions_household_promoted
+            ON promotion_decisions(household_id, promoted_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_promotion_decisions_household_state
+            ON promotion_decisions(household_id, state)
+            """
+        )
+
+    @staticmethod
     def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
         scoped_tables = (
             "readings",
@@ -444,6 +482,7 @@ class DataEngine:
             "timeline_entries",
             "import_jobs",
             "provider_observations",
+            "promotion_decisions",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -1381,6 +1420,164 @@ class DataEngine:
             "latest": observations[: min(limit, 10)],
         }
 
+    def promote_provider_observations(
+        self,
+        *,
+        limit: int = 100,
+        tolerance_by_type: Optional[dict[str, float]] = None,
+    ) -> dict[str, Any]:
+        observations = self.get_provider_observations(limit=limit)
+        results = PromotionEngine(tolerance_by_type=tolerance_by_type).evaluate(
+            observations,
+            household_id=self._active_household_id(),
+        )
+        self.persist_promotion_results(results)
+        return self.get_promotion_summary()
+
+    def persist_promotion_results(self, results: list[PromotionResult]) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def upsert(conn):
+            DataEngine._ensure_promotion_table(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            rows = []
+            for result in results:
+                candidate = result.candidate
+                if candidate.household_id != household_id:
+                    continue
+                promotion_id = hashlib.sha256(
+                    f"{household_id}|{candidate.observation_id}".encode("utf-8")
+                ).hexdigest()[:32]
+                reasons = [reason.as_dict() for reason in result.decision.reasons]
+                conflict = result.decision.conflict.as_dict() if result.decision.conflict else None
+                row = (
+                    promotion_id,
+                    household_id,
+                    candidate.observation_id,
+                    candidate.provider_id,
+                    candidate.provider_type,
+                    candidate.capability,
+                    candidate.observation_type,
+                    candidate.observed_at,
+                    result.decision.state.value,
+                    json.dumps(reasons, sort_keys=True),
+                    json.dumps(conflict, sort_keys=True) if conflict else None,
+                    json.dumps(candidate.value, sort_keys=True) if candidate.value is not None else None,
+                    result.promoted_at,
+                    now,
+                    now,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO promotion_decisions (
+                        promotion_id,
+                        household_id,
+                        observation_id,
+                        provider_id,
+                        provider_type,
+                        capability,
+                        observation_type,
+                        observed_at,
+                        state,
+                        reasons_json,
+                        conflict_json,
+                        value_json,
+                        promoted_at,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(promotion_id) DO UPDATE SET
+                        state = excluded.state,
+                        reasons_json = excluded.reasons_json,
+                        conflict_json = excluded.conflict_json,
+                        value_json = excluded.value_json,
+                        promoted_at = excluded.promoted_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    row,
+                )
+                rows.append(row)
+            conn.commit()
+            return [self._normalise_promotion(row) for row in rows]
+
+        return self._with_connection(upsert)
+
+    def get_latest_promotions(self, limit: int = 20) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_promotion_table(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    promotion_id,
+                    household_id,
+                    observation_id,
+                    provider_id,
+                    provider_type,
+                    capability,
+                    observation_type,
+                    observed_at,
+                    state,
+                    reasons_json,
+                    conflict_json,
+                    value_json,
+                    promoted_at,
+                    created_at,
+                    updated_at
+                FROM promotion_decisions
+                WHERE household_id = ?
+                ORDER BY promoted_at DESC, observed_at DESC, promotion_id DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            return [self._normalise_promotion(row) for row in rows]
+
+        return self._with_connection(query)
+
+    def get_promotion_summary(self, limit: int = 20) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_promotion_table(conn)
+            state_rows = conn.execute(
+                """
+                SELECT state, COUNT(*)
+                FROM promotion_decisions
+                WHERE household_id = ?
+                GROUP BY state
+                """,
+                (household_id,),
+            ).fetchall()
+            counts = {
+                "ACCEPTED": 0,
+                "REJECTED": 0,
+                "SUPERSEDED": 0,
+                "DUPLICATE": 0,
+                "CONFLICT": 0,
+                "PENDING": 0,
+            }
+            for state, count in state_rows:
+                if state in counts:
+                    counts[state] = int(count)
+            latest = self.get_latest_promotions(limit=limit)
+            conflicts = [item for item in latest if item["state"] == "CONFLICT"]
+            return {
+                "counts": counts,
+                "accepted": counts["ACCEPTED"],
+                "rejected": counts["REJECTED"],
+                "conflicts": counts["CONFLICT"],
+                "latest_promotions": latest,
+                "conflict_summary": {
+                    "count": counts["CONFLICT"],
+                    "latest": conflicts[:10],
+                    "repeated_conflicts": counts["CONFLICT"] >= 2,
+                },
+            }
+
+        return self._with_connection(query)
+
     def get_import_job(self, job_id: str) -> dict[str, Any]:
         household_id = self._active_household_id()
 
@@ -1510,6 +1707,34 @@ class DataEngine:
             "raw_reference": row[13],
             "import_job_id": row[14],
             "created_at": row[15],
+        }
+
+    @staticmethod
+    def _normalise_promotion(row) -> dict[str, Any]:
+        def parse_json(raw):
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+
+        return {
+            "promotion_id": row[0],
+            "household_id": row[1],
+            "observation_id": row[2],
+            "provider_id": row[3],
+            "provider_type": row[4],
+            "capability": row[5],
+            "observation_type": row[6],
+            "observed_at": row[7],
+            "state": row[8],
+            "reasons": parse_json(row[9]) or [],
+            "conflict": parse_json(row[10]),
+            "value": parse_json(row[11]),
+            "promoted_at": row[12],
+            "created_at": row[13],
+            "updated_at": row[14],
         }
 
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:

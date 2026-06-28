@@ -215,6 +215,91 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(len(self.engine.get_provider_observations()), 1)
         self.assertEqual(engine_b.get_provider_observations(), [])
 
+    def test_provider_observations_are_promoted_to_trusted_read_models(self):
+        self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.EV_SESSIONS,
+                    "ev_session",
+                    value={"transaction_id": "abc123", "energy_kwh": 7.5},
+                    provider_id="ocular_export",
+                    provider_type=ProviderType.EV_CHARGER,
+                    observation_type=ProviderObservationType.EV_SESSION,
+                    observed_at="2026-06-27T11:00:00",
+                    quality=ProviderObservationQuality.HIGH,
+                    raw_reference="abc123",
+                )
+            ]
+        )
+
+        summary = self.engine.promote_provider_observations()
+        latest = self.engine.get_latest_promotions()
+
+        self.assertEqual(summary["accepted"], 1)
+        self.assertEqual(latest[0]["state"], "ACCEPTED")
+        self.assertEqual(latest[0]["observation_type"], "ev_session")
+
+    def test_promotion_conflicts_are_summarised(self):
+        self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.DAILY_SUMMARY,
+                    "grid_import",
+                    value=10.0,
+                    provider_id="meter_a",
+                    provider_type=ProviderType.SMART_METER,
+                    observation_type=ProviderObservationType.GRID_IMPORT,
+                    observed_at="2026-06-27T12:00:00",
+                    quality=ProviderObservationQuality.HIGH,
+                    raw_reference="reading",
+                ),
+                ProviderObservation(
+                    ProviderCapability.DAILY_SUMMARY,
+                    "grid_import",
+                    value=11.0,
+                    provider_id="meter_b",
+                    provider_type=ProviderType.SMART_METER,
+                    observation_type=ProviderObservationType.GRID_IMPORT,
+                    observed_at="2026-06-27T12:00:00",
+                    quality=ProviderObservationQuality.HIGH,
+                    raw_reference="reading",
+                ),
+            ]
+        )
+
+        summary = self.engine.promote_provider_observations(tolerance_by_type={"grid_import": 0.1})
+
+        self.assertEqual(summary["conflicts"], 1)
+        self.assertEqual(summary["conflict_summary"]["count"], 1)
+
+    def test_promotions_are_household_scoped(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+        self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.EV_SESSIONS,
+                    "ev_session",
+                    value={"energy_kwh": 7.5},
+                    provider_id="ocular_export",
+                    provider_type=ProviderType.EV_CHARGER,
+                    observation_type=ProviderObservationType.EV_SESSION,
+                    observed_at="2026-06-27T11:00:00",
+                    quality=ProviderObservationQuality.HIGH,
+                )
+            ]
+        )
+        self.engine.promote_provider_observations()
+
+        self.assertEqual(self.engine.get_promotion_summary()["accepted"], 1)
+        self.assertEqual(engine_b.get_promotion_summary()["accepted"], 0)
+
     def test_timeline_entries_are_persisted_idempotently(self):
         entry = TimelineEntry(
             timestamp="2026-06-27",

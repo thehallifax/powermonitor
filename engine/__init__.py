@@ -17,6 +17,16 @@ from .provider_framework import (
     ProviderStatus,
     ProviderType,
 )
+from .promotion_engine import (
+    ObservationConflict,
+    ObservationValidation,
+    PromotionCandidate,
+    PromotionDecision,
+    PromotionEngine,
+    PromotionReason,
+    PromotionResult,
+    PromotionState,
+)
 from .solar_advisor import SolarAdvisor
 from .models import (
     Advisor,
@@ -98,6 +108,14 @@ __all__ = [
     "ProviderRegistry",
     "ProviderStatus",
     "ProviderType",
+    "ObservationConflict",
+    "ObservationValidation",
+    "PromotionCandidate",
+    "PromotionDecision",
+    "PromotionEngine",
+    "PromotionReason",
+    "PromotionResult",
+    "PromotionState",
     "SolarAdvisor",
     "generate_decisions",
     "generate_ev_session_decisions",
