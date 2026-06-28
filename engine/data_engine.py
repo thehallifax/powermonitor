@@ -225,6 +225,11 @@ class DataEngine:
             self.household_context = context
         return context
 
+    def _active_household_id(self) -> str:
+        if self.household_context:
+            return self.household_context.household.household_id
+        return DEFAULT_HOUSEHOLD_ID
+
     @staticmethod
     def validate_connection(conn: sqlite3.Connection) -> None:
         table = conn.execute(
@@ -341,7 +346,169 @@ class DataEngine:
             """
         )
         DataEngine._ensure_household_tables(conn)
+        DataEngine._ensure_household_scoping(conn)
         conn.commit()
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+        return bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+        )
+
+    @staticmethod
+    def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
+        scoped_tables = (
+            "readings",
+            "ev_sessions",
+            "billing_periods",
+            "timeline_entries",
+        )
+        for table in scoped_tables:
+            if DataEngine._table_exists(conn, table):
+                DataEngine._ensure_household_column(conn, table)
+                DataEngine._ensure_default_household_trigger(conn, table)
+
+        DataEngine._migrate_recommendation_lifecycle_table(conn)
+        DataEngine._ensure_default_household_trigger(conn, "recommendation_lifecycle")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_readings_household_time
+            ON readings(household_id, measurement_time)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ev_sessions_household_start
+            ON ev_sessions(household_id, start_time)
+            """
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_ev_sessions_transaction_id")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_household_transaction_id
+            ON ev_sessions(household_id, transaction_id)
+            WHERE transaction_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_timeline_entries_household_timestamp
+            ON timeline_entries(household_id, timestamp)
+            """
+        )
+
+    @staticmethod
+    def _ensure_household_column(conn: sqlite3.Connection, table: str) -> None:
+        columns = DataEngine._table_columns(conn, table)
+        if "household_id" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN household_id TEXT")
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET household_id = ?
+            WHERE household_id IS NULL OR household_id = ''
+            """,
+            (DEFAULT_HOUSEHOLD_ID,),
+        )
+
+    @staticmethod
+    def _ensure_default_household_trigger(conn: sqlite3.Connection, table: str) -> None:
+        trigger_name = f"trg_{table}_default_household_id"
+        conn.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {trigger_name}
+            AFTER INSERT ON {table}
+            FOR EACH ROW
+            WHEN NEW.household_id IS NULL OR NEW.household_id = ''
+            BEGIN
+                UPDATE {table}
+                SET household_id = '{DEFAULT_HOUSEHOLD_ID}'
+                WHERE rowid = NEW.rowid;
+            END
+            """
+        )
+
+    @staticmethod
+    def _migrate_recommendation_lifecycle_table(conn: sqlite3.Connection) -> None:
+        if not DataEngine._table_exists(conn, "recommendation_lifecycle"):
+            conn.execute(
+                """
+                CREATE TABLE recommendation_lifecycle (
+                    household_id TEXT NOT NULL DEFAULT 'default_household',
+                    stable_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'active',
+                    snoozed_until TEXT,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (household_id, stable_id)
+                )
+                """
+            )
+        else:
+            columns = DataEngine._table_columns(conn, "recommendation_lifecycle")
+            pk_columns = [
+                row[1]
+                for row in conn.execute("PRAGMA table_info(recommendation_lifecycle)")
+                if row[5]
+            ]
+            if "household_id" not in columns or pk_columns == ["stable_id"]:
+                conn.execute("ALTER TABLE recommendation_lifecycle RENAME TO recommendation_lifecycle_legacy")
+                conn.execute(
+                    """
+                    CREATE TABLE recommendation_lifecycle (
+                        household_id TEXT NOT NULL DEFAULT 'default_household',
+                        stable_id TEXT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'active',
+                        snoozed_until TEXT,
+                        reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (household_id, stable_id)
+                    )
+                    """
+                )
+                legacy_columns = DataEngine._table_columns(conn, "recommendation_lifecycle_legacy")
+                household_expr = "household_id" if "household_id" in legacy_columns else f"'{DEFAULT_HOUSEHOLD_ID}'"
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO recommendation_lifecycle (
+                        household_id,
+                        stable_id,
+                        state,
+                        snoozed_until,
+                        reason,
+                        created_at,
+                        updated_at
+                    )
+                    SELECT
+                        COALESCE(NULLIF({household_expr}, ''), ?),
+                        stable_id,
+                        state,
+                        snoozed_until,
+                        reason,
+                        created_at,
+                        updated_at
+                    FROM recommendation_lifecycle_legacy
+                    """,
+                    (DEFAULT_HOUSEHOLD_ID,),
+                )
+                conn.execute("DROP TABLE recommendation_lifecycle_legacy")
+            else:
+                DataEngine._ensure_household_column(conn, "recommendation_lifecycle")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recommendation_lifecycle_household_state
+            ON recommendation_lifecycle(household_id, state)
+            """
+        )
 
     @staticmethod
     def _ensure_household_tables(conn: sqlite3.Connection) -> None:
@@ -496,16 +663,18 @@ class DataEngine:
     def get_grid_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()
+        household_id = self._active_household_id()
 
         def query(conn):
             rows = conn.execute(
                 """
                 SELECT measurement_time, tariff_bucket, grid_to_home_w, grid_to_home_kwh
                 FROM readings
-                WHERE measurement_time >= ? AND measurement_time < ?
+                WHERE household_id = ?
+                  AND measurement_time >= ? AND measurement_time < ?
                 ORDER BY measurement_time
                 """,
-                (start_text, end_exclusive),
+                (household_id, start_text, end_exclusive),
             ).fetchall()
             return [
                 {
@@ -522,16 +691,18 @@ class DataEngine:
     def get_solar_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()
+        household_id = self._active_household_id()
 
         def query(conn):
             rows = conn.execute(
                 """
                 SELECT measurement_time, production_kwh, solar_to_home_kwh, solar_to_grid_kwh
                 FROM readings
-                WHERE measurement_time >= ? AND measurement_time < ?
+                WHERE household_id = ?
+                  AND measurement_time >= ? AND measurement_time < ?
                 ORDER BY measurement_time
                 """,
-                (start_text, end_exclusive),
+                (household_id, start_text, end_exclusive),
             ).fetchall()
             return [
                 {
@@ -556,6 +727,7 @@ class DataEngine:
             return []
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()
+        household_id = self._active_household_id()
         tariff_columns = [
             column
             for bucket in BUCKET_ORDER
@@ -579,7 +751,8 @@ class DataEngine:
                     tariff_breakdown_json,
                     {}
                 FROM ev_sessions
-                WHERE source IN ({})
+                WHERE household_id = ?
+                  AND source IN ({})
                   AND COALESCE(last_seen, end_time, start_time) >= ?
                   AND start_time < ?
                 ORDER BY start_time
@@ -587,7 +760,7 @@ class DataEngine:
                     ", ".join(tariff_columns),
                     ",".join("?" for _ in sources),
                 ),
-                (*sources, start_text, end_exclusive),
+                (household_id, *sources, start_text, end_exclusive),
             ).fetchall()
             if rows and prefer_source and any(row[7] == prefer_source for row in rows):
                 rows = [row for row in rows if row[7] == prefer_source]
@@ -667,14 +840,18 @@ class DataEngine:
         return (ordered[midpoint - 1] + ordered[midpoint]) / 2
 
     def get_ev_source_counts(self) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
         def query(conn):
             rows = conn.execute(
                 """
                 SELECT source, COUNT(*), COALESCE(SUM(energy_kwh), 0), COALESCE(SUM(cost_estimate), 0)
                 FROM ev_sessions
+                WHERE household_id = ?
                 GROUP BY source
                 ORDER BY source
-                """
+                """,
+                (household_id,),
             ).fetchall()
             return [
                 {"source": row[0] or "unknown", "sessions": int(row[1]), "energy_kwh": float(row[2] or 0), "cost": float(row[3] or 0)}
@@ -694,6 +871,7 @@ class DataEngine:
             return {}
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()
+        household_id = self._active_household_id()
 
         def query(conn):
             rows = conn.execute(
@@ -704,13 +882,14 @@ class DataEngine:
                     COUNT(*),
                     COALESCE(SUM(energy_kwh), 0)
                 FROM ev_sessions
-                WHERE source IN ({})
+                WHERE household_id = ?
+                  AND source IN ({})
                   AND start_time >= ?
                   AND start_time < ?
                 GROUP BY session_day, source
                 ORDER BY session_day, source
                 """.format(",".join("?" for _ in sources)),
-                (*sources, start_text, end_exclusive),
+                (household_id, *sources, start_text, end_exclusive),
             ).fetchall()
             by_day: dict[str, list[tuple[str, int, float]]] = {}
             for day_text, source, sessions, energy_kwh in rows:
@@ -750,26 +929,28 @@ class DataEngine:
             raise ValueError("snoozed_until is required for snoozed recommendations")
         if state != "snoozed_until":
             snoozed_until = None
+        household_id = self._active_household_id()
 
         def upsert(conn):
             now = datetime.now().astimezone().isoformat(timespec="seconds")
             conn.execute(
                 """
                 INSERT INTO recommendation_lifecycle (
+                    household_id,
                     stable_id,
                     state,
                     snoozed_until,
                     reason,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(stable_id) DO UPDATE SET
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(household_id, stable_id) DO UPDATE SET
                     state = excluded.state,
                     snoozed_until = excluded.snoozed_until,
                     reason = excluded.reason,
                     updated_at = excluded.updated_at
                 """,
-                (stable_id, state, snoozed_until, reason, now, now),
+                (household_id, stable_id, state, snoozed_until, reason, now, now),
             )
             conn.commit()
             return self.get_recommendation_lifecycle([stable_id]).get(stable_id, {})
@@ -780,22 +961,27 @@ class DataEngine:
         self,
         stable_ids: Optional[list[str]] = None,
     ) -> dict[str, dict[str, Any]]:
+        household_id = self._active_household_id()
+
         def query(conn):
             if stable_ids:
                 rows = conn.execute(
                     """
                     SELECT stable_id, state, snoozed_until, reason, updated_at
                     FROM recommendation_lifecycle
-                    WHERE stable_id IN ({})
+                    WHERE household_id = ?
+                      AND stable_id IN ({})
                     """.format(",".join("?" for _ in stable_ids)),
-                    tuple(stable_ids),
+                    (household_id, *stable_ids),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     """
                     SELECT stable_id, state, snoozed_until, reason, updated_at
                     FROM recommendation_lifecycle
-                    """
+                    WHERE household_id = ?
+                    """,
+                    (household_id,),
                 ).fetchall()
             return {
                 row[0]: {
@@ -811,13 +997,17 @@ class DataEngine:
         return self._with_connection(query)
 
     def get_recommendation_lifecycle_counts(self) -> dict[str, int]:
+        household_id = self._active_household_id()
+
         def query(conn):
             rows = conn.execute(
                 """
                 SELECT state, COUNT(*)
                 FROM recommendation_lifecycle
+                WHERE household_id = ?
                 GROUP BY state
-                """
+                """,
+                (household_id,),
             ).fetchall()
             counts = {"active": 0, "dismissed": 0, "snoozed_until": 0}
             for state, count in rows:
@@ -828,12 +1018,15 @@ class DataEngine:
         return self._with_connection(query)
 
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
+        household_id = self._active_household_id()
+
         def upsert(conn):
             now = datetime.now().astimezone().isoformat(timespec="seconds")
             for entry in entries:
                 conn.execute(
                     """
                     INSERT INTO timeline_entries (
+                        household_id,
                         event_key,
                         timestamp,
                         title,
@@ -844,8 +1037,9 @@ class DataEngine:
                         event_type,
                         created_at,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(event_key) DO UPDATE SET
+                        household_id = excluded.household_id,
                         timestamp = excluded.timestamp,
                         title = excluded.title,
                         summary = excluded.summary,
@@ -856,7 +1050,8 @@ class DataEngine:
                         updated_at = excluded.updated_at
                     """,
                     (
-                        self._timeline_event_key(entry),
+                        household_id,
+                        self._timeline_event_key(entry, household_id),
                         entry.timestamp,
                         entry.title,
                         entry.summary,
@@ -881,10 +1076,11 @@ class DataEngine:
     ) -> DecisionTimeline:
         start_text = start.isoformat() if start else None
         end_text = end.isoformat() if end else None
+        household_id = self._active_household_id()
 
         def query(conn):
-            conditions = []
-            params: list[Any] = []
+            conditions = ["household_id = ?"]
+            params: list[Any] = [household_id]
             if start_text:
                 conditions.append("timestamp >= ?")
                 params.append(start_text)
@@ -931,8 +1127,8 @@ class DataEngine:
         return self._with_connection(query)
 
     @staticmethod
-    def _timeline_event_key(entry: TimelineEntry) -> str:
-        raw = "|".join((entry.event_type, entry.timestamp, entry.title))
+    def _timeline_event_key(entry: TimelineEntry, household_id: str = DEFAULT_HOUSEHOLD_ID) -> str:
+        raw = "|".join((household_id, entry.event_type, entry.timestamp, entry.title))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get_data_completeness(
@@ -961,6 +1157,7 @@ class DataEngine:
         today: date,
         bill_period: Optional[BillPeriod] = None,
     ) -> dict[str, Any]:
+        household_id = self._active_household_id()
         latest_measurement = self._latest_measurement_time()
         latest_collect, collect_status = self._latest_collect_log_entry()
         collector_health = self.health_loader()
@@ -991,6 +1188,7 @@ class DataEngine:
                 status = "invalid reading timestamp"
 
         result = {
+            "household_id": household_id,
             "status": status,
             "failure_type": collector_health.get("failure_type"),
             "collector_message": collector_health.get("message"),
@@ -1039,8 +1237,17 @@ class DataEngine:
         )
 
     def _latest_measurement_time(self) -> Optional[str]:
+        household_id = self._active_household_id()
+
         def query(conn):
-            row = conn.execute("SELECT MAX(measurement_time) FROM readings").fetchone()
+            row = conn.execute(
+                """
+                SELECT MAX(measurement_time)
+                FROM readings
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
             return row[0] if row else None
 
         return self._with_connection(query)

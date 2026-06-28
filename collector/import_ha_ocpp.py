@@ -16,6 +16,7 @@ SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.json"
 LOG_PATH = PROJECT_ROOT / "logs" / "ha_ocpp.log"
 SOURCE = "home_assistant_ocpp"
+DEFAULT_HOUSEHOLD_ID = "default_household"
 
 DEFAULT_HOME_ASSISTANT_URL = "http://192.168.4.96:8123"
 ENTITIES = {
@@ -155,6 +156,7 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS ev_sessions (
+            household_id TEXT DEFAULT 'default_household',
             start_time TEXT NOT NULL,
             end_time TEXT,
             energy_kwh REAL NOT NULL,
@@ -174,6 +176,7 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
     )
     present = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
     columns = {
+        "household_id": "ALTER TABLE ev_sessions ADD COLUMN household_id TEXT",
         "end_time": "ALTER TABLE ev_sessions ADD COLUMN end_time TEXT",
         "cost_estimate": "ALTER TABLE ev_sessions ADD COLUMN cost_estimate REAL",
         "transaction_id": "ALTER TABLE ev_sessions ADD COLUMN transaction_id TEXT",
@@ -190,9 +193,14 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
         if column not in present:
             conn.execute(statement)
     conn.execute(
+        "UPDATE ev_sessions SET household_id = ? WHERE household_id IS NULL OR household_id = ''",
+        (DEFAULT_HOUSEHOLD_ID,),
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_ev_sessions_transaction_id")
+    conn.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_transaction_id
-        ON ev_sessions(transaction_id)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_household_transaction_id
+        ON ev_sessions(household_id, transaction_id)
         WHERE transaction_id IS NOT NULL
         """
     )
@@ -266,9 +274,9 @@ def import_snapshot(states: dict) -> tuple[str, float, float, str, float, float,
                 tariff_breakdown_json, cost_estimate, first_seen_energy_kwh,
                 cost_partial
             FROM ev_sessions
-            WHERE transaction_id = ? AND source = ?
+            WHERE household_id = ? AND transaction_id = ? AND source = ?
             """,
-            (transaction_id, SOURCE),
+            (DEFAULT_HOUSEHOLD_ID, transaction_id, SOURCE),
         ).fetchone()
         start_time = now.astimezone().isoformat(timespec="seconds") if not existing else existing[0]
         max_power_kw = max(float(existing[1] or 0) if existing else 0.0, power_kw)
@@ -310,12 +318,12 @@ def import_snapshot(states: dict) -> tuple[str, float, float, str, float, float,
         conn.execute(
             """
             INSERT INTO ev_sessions (
-                transaction_id, start_time, last_seen, end_time, energy_kwh,
+                household_id, transaction_id, start_time, last_seen, end_time, energy_kwh,
                 max_power_kw, status, source, cost_estimate, tariff_breakdown_json,
                 first_seen_energy_kwh, last_energy_kwh, duration_minutes, cost_partial
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(transaction_id) WHERE transaction_id IS NOT NULL DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(household_id, transaction_id) WHERE transaction_id IS NOT NULL DO UPDATE SET
                 last_seen = excluded.last_seen,
                 end_time = excluded.end_time,
                 energy_kwh = excluded.energy_kwh,
@@ -330,6 +338,7 @@ def import_snapshot(states: dict) -> tuple[str, float, float, str, float, float,
                 cost_partial = excluded.cost_partial
             """,
             (
+                DEFAULT_HOUSEHOLD_ID,
                 transaction_id,
                 start_time,
                 last_seen,

@@ -1,5 +1,19 @@
 # Changelog
 
+## PB-002 - Household Scoped Persistence
+
+- Added household scoping migration for persisted household data including
+  readings, EV sessions, timeline entries, recommendation lifecycle state, and
+  billing-period records.
+- Seeded the default local household/account context and migrated legacy rows
+  to `default_household` for single-household compatibility.
+- Scoped Data Engine reads and writes by active household context to prevent
+  cross-household data leakage.
+- Updated importer write paths to persist new readings and EV sessions into the
+  default household.
+- Added regression tests for legacy-row migration, household isolation, and API
+  household metadata.
+
 ## PB-001 - Multi Household Foundation
 
 - Added shared multi-household platform models: `Account`, `Household`,

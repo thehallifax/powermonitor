@@ -6,6 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
+DEFAULT_HOUSEHOLD_ID = "default_household"
 
 RATES = {
     "super_off_peak": 0.086151,
@@ -57,6 +58,7 @@ def main():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS readings (
+        household_id TEXT DEFAULT 'default_household',
         measurement_time TEXT PRIMARY KEY,
         tariff_bucket TEXT,
 
@@ -77,6 +79,13 @@ def main():
         import_cost REAL
     )
     """)
+    present = {row[1] for row in cur.execute("PRAGMA table_info(readings)")}
+    if "household_id" not in present:
+        cur.execute("ALTER TABLE readings ADD COLUMN household_id TEXT")
+    cur.execute(
+        "UPDATE readings SET household_id = ? WHERE household_id IS NULL OR household_id = ''",
+        (DEFAULT_HOUSEHOLD_ID,),
+    )
 
     imported = 0
 
@@ -114,6 +123,7 @@ def main():
 
         cur.execute("""
         INSERT OR REPLACE INTO readings (
+            household_id,
             measurement_time,
             tariff_bucket,
 
@@ -133,8 +143,9 @@ def main():
 
             import_cost
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            DEFAULT_HOUSEHOLD_ID,
             ts,
             bucket,
 

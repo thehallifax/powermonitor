@@ -14,6 +14,7 @@ DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 LOG_PATH = PROJECT_ROOT / "logs" / "ocular_export.log"
 SOURCE = "ocular_export"
+DEFAULT_HOUSEHOLD_ID = "default_household"
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 DEFAULT_IMPORT_RATES = {
     "super_off_peak": 0.086151,
@@ -131,6 +132,7 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS ev_sessions (
+            household_id TEXT DEFAULT 'default_household',
             start_time TEXT NOT NULL,
             end_time TEXT,
             energy_kwh REAL NOT NULL,
@@ -161,6 +163,7 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
     )
     present = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
     columns = {
+        "household_id": "ALTER TABLE ev_sessions ADD COLUMN household_id TEXT",
         "end_time": "ALTER TABLE ev_sessions ADD COLUMN end_time TEXT",
         "cost_estimate": "ALTER TABLE ev_sessions ADD COLUMN cost_estimate REAL",
         "transaction_id": "ALTER TABLE ev_sessions ADD COLUMN transaction_id TEXT",
@@ -183,9 +186,14 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
         if column not in present:
             conn.execute(statement)
     conn.execute(
+        "UPDATE ev_sessions SET household_id = ? WHERE household_id IS NULL OR household_id = ''",
+        (DEFAULT_HOUSEHOLD_ID,),
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_ev_sessions_transaction_id")
+    conn.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_transaction_id
-        ON ev_sessions(transaction_id)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ev_sessions_household_transaction_id
+        ON ev_sessions(household_id, transaction_id)
         WHERE transaction_id IS NOT NULL
         """
     )
@@ -372,14 +380,14 @@ def import_record(conn: sqlite3.Connection, record: dict) -> bool:
     conn.execute(
         f"""
         INSERT INTO ev_sessions (
-            transaction_id, start_time, end_time, last_seen, energy_kwh,
+            household_id, transaction_id, start_time, end_time, last_seen, energy_kwh,
             source, cost_estimate, tariff_breakdown_json, first_seen_energy_kwh,
             last_energy_kwh, duration_minutes, cost_partial, status,
             max_power_kw, start_source, stop_source, notes_json,
             {", ".join(tariff_columns)}
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Completed', ?, ?, ?, ?, {", ".join(tariff_placeholders)})
-        ON CONFLICT(transaction_id) WHERE transaction_id IS NOT NULL DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Completed', ?, ?, ?, ?, {", ".join(tariff_placeholders)})
+        ON CONFLICT(household_id, transaction_id) WHERE transaction_id IS NOT NULL DO UPDATE SET
             start_time = excluded.start_time,
             end_time = excluded.end_time,
             last_seen = excluded.last_seen,
@@ -399,6 +407,7 @@ def import_record(conn: sqlite3.Connection, record: dict) -> bool:
             {", ".join(tariff_updates)}
         """,
         (
+            DEFAULT_HOUSEHOLD_ID,
             transaction_id,
             start.isoformat(timespec="seconds"),
             end.isoformat(timespec="seconds"),
@@ -427,7 +436,8 @@ def import_file(path: Path) -> tuple[int, int]:
     with sqlite3.connect(DB_PATH) as conn:
         ensure_ev_sessions(conn)
         before = conn.execute(
-            "SELECT COUNT(*) FROM ev_sessions WHERE source = ?", (SOURCE,)
+            "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
+            (DEFAULT_HOUSEHOLD_ID, SOURCE),
         ).fetchone()[0]
         imported = 0
         for record in records:
@@ -435,7 +445,8 @@ def import_file(path: Path) -> tuple[int, int]:
                 imported += 1
         conn.commit()
         after = conn.execute(
-            "SELECT COUNT(*) FROM ev_sessions WHERE source = ?", (SOURCE,)
+            "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
+            (DEFAULT_HOUSEHOLD_ID, SOURCE),
         ).fetchone()[0]
     return imported, after - before
 

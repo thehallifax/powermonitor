@@ -662,6 +662,7 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     start_text = start.isoformat()
     end_exclusive = (end + timedelta(days=1)).isoformat()
     import_cost_expression, cost_params = cost_sql(settings)
+    household_id = data_engine(conn)._active_household_id()
     row = conn.execute(
         f"""
         SELECT
@@ -678,9 +679,10 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
                      ELSE 0 END
             ), 0)
         FROM readings
-        WHERE measurement_time >= ? AND measurement_time < ?
+        WHERE household_id = ?
+          AND measurement_time >= ? AND measurement_time < ?
         """,
-        (*cost_params, settings.ev_baseline_watts, start_text, end_exclusive),
+        (*cost_params, settings.ev_baseline_watts, household_id, start_text, end_exclusive),
     ).fetchone()
 
     buckets = {
@@ -691,10 +693,11 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         """
         SELECT tariff_bucket, COALESCE(SUM(grid_to_home_kwh), 0)
         FROM readings
-        WHERE measurement_time >= ? AND measurement_time < ?
+        WHERE household_id = ?
+          AND measurement_time >= ? AND measurement_time < ?
         GROUP BY tariff_bucket
         """,
-        (start_text, end_exclusive),
+        (household_id, start_text, end_exclusive),
     ):
         buckets.setdefault(bucket, {"kwh": 0.0, "cost": 0.0})
         buckets[bucket] = {
@@ -995,6 +998,7 @@ def load_daily_trends(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[DailyTrend]:
     import_cost_expression, cost_params = cost_sql(settings)
+    household_id = data_engine(conn)._active_household_id()
     rows = conn.execute(
         f"""
         SELECT
@@ -1009,11 +1013,12 @@ def load_daily_trends(
                      ELSE 0 END
             ), 0)
         FROM readings
-        WHERE measurement_time >= ? AND measurement_time < ?
+        WHERE household_id = ?
+          AND measurement_time >= ? AND measurement_time < ?
         GROUP BY day
         ORDER BY day
         """,
-        (*cost_params, settings.ev_baseline_watts, start.isoformat(), (end + timedelta(days=1)).isoformat()),
+        (*cost_params, settings.ev_baseline_watts, household_id, start.isoformat(), (end + timedelta(days=1)).isoformat()),
     ).fetchall()
     trends = []
     actual_ev_totals = data_engine(conn).get_daily_ev_session_totals(

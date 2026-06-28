@@ -123,6 +123,12 @@ class PlatformStabilisationTests(unittest.TestCase):
                 report.DB_PATH, report.REPORT_PATH, report.COLLECT_LOG_PATH = original_paths
 
         self.assertEqual(decoded["period"]["start"], "2026-06-27")
+        self.assertEqual(decoded["household"]["household_id"], "default_household")
+        self.assertEqual(decoded["account"]["account_id"], "local_account")
+        self.assertEqual(
+            decoded["household_membership"]["household_id"],
+            "default_household",
+        )
         self.assertIn("summary", decoded)
         self.assertIn("energy_score", decoded)
 
