@@ -25,6 +25,7 @@ from engine.decision_engine import (
     generate_decisions_from_data_engine,
     generate_ev_session_decisions,
 )
+from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
 from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore
 from engine.solar_advisor import SolarAdvisor
@@ -72,6 +73,10 @@ def cost_advisor() -> CostAdvisor:
 
 def solar_advisor() -> SolarAdvisor:
     return SolarAdvisor()
+
+
+def efficiency_advisor() -> EfficiencyAdvisor:
+    return EfficiencyAdvisor()
 
 
 def briefing_engine() -> BriefingEngine:
@@ -258,6 +263,7 @@ def dashboard_data(
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
+        overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
@@ -299,7 +305,19 @@ def dashboard_data(
         timeline,
         generated_at,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar])
+    efficiency = build_efficiency_advisor(
+        period_summary,
+        compared_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        comparison,
+        trends,
+        overnight_baseload_watts,
+        generated_at,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
     briefing = briefing_engine().build(advisors, current_day)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
@@ -1050,6 +1068,32 @@ def build_solar_advisor(
         recommendations=recommendations,
         timeline=timeline,
         health=health,
+        now=now,
+    )
+
+
+def build_efficiency_advisor(
+    summary: Summary,
+    previous_summary: Optional[Summary],
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+    timeline: Optional[DecisionTimeline],
+    comparison: Optional[dict],
+    trends: list[DailyTrend],
+    overnight_baseload_watts: float,
+    now: datetime,
+) -> Advisor:
+    return efficiency_advisor().advise(
+        summary=summary,
+        previous_summary=previous_summary,
+        settings=settings,
+        recommendations=recommendations,
+        timeline=timeline,
+        health=health,
+        overnight_baseload_watts=overnight_baseload_watts,
+        comparison=comparison,
+        trends=trends,
         now=now,
     )
 
@@ -2880,6 +2924,7 @@ def write_html(
     hidden: Optional[list[Decision]] = None,
     billing_summary: Optional[Summary] = None,
     glance_only: bool = False,
+    overnight_baseload_watts: Optional[float] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -2897,6 +2942,7 @@ def write_html(
     )
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
+    overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -2925,7 +2971,19 @@ def write_html(
         timeline,
         generated_dt,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar])
+    efficiency = build_efficiency_advisor(
+        period_summary,
+        previous_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        comparison,
+        trends,
+        overnight_baseload_watts,
+        generated_dt,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
     briefing = briefing_engine().build(advisors, local_today())
     glance = build_glance_state(
         billing_summary=billing_summary,
@@ -3425,6 +3483,7 @@ def build_live_html(
         comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(selected_summary, recommendations, comparison)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
+        overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
     return write_html(
         today_summary,
         selected_summary,
@@ -3440,6 +3499,7 @@ def build_live_html(
         hidden=hidden,
         billing_summary=billing_summary,
         glance_only=glance_only,
+        overnight_baseload_watts=overnight_baseload_watts,
     )
 
 
@@ -3471,6 +3531,7 @@ def main() -> None:
         )
         timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
+        overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(period_start, period_end)
 
     health["last_successful_report_generation"] = datetime.now().astimezone().isoformat(
         timespec="seconds"
@@ -3491,6 +3552,7 @@ def main() -> None:
         timeline=timeline,
         recommendation_lifecycle_counts=recommendation_lifecycle_counts,
         hidden=hidden,
+        overnight_baseload_watts=overnight_baseload_watts,
     )
     logging.info(
         "Generated report for %s and billing period %s to %s at %s",

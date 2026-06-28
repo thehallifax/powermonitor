@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.5.0 - Efficiency Advisor
+
+- Added reusable `EfficiencyAdvisor` that answers where household energy may be
+  wasted using measured overnight baseload, daily import trends, Financial
+  Engine, Recommendation Engine, timeline, and freshness data.
+- Added Efficiency Advisor to `AdvisorCollection`, so Home, Recommendation
+  Centre, API, and Briefing Engine consume it automatically.
+- Added efficiency statuses: `EXCELLENT`, `GOOD`, `WATCH`, `INEFFICIENT`, and
+  `UNKNOWN`.
+- Added evidence trail items for overnight baseload, daily average import,
+  previous-period trend, financial impact estimate, recommendation context,
+  daily import trends, and timeline evidence.
+- Added Efficiency Advisor unit tests.
+
 ## Sprint 1.4.0 - Solar Advisor
 
 - Added reusable `SolarAdvisor` that answers whether the household is making
