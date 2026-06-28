@@ -1,5 +1,20 @@
 # Changelog
 
+## Sprint 1.6.0 - Advisor Orchestration
+
+- Enhanced `BriefingEngine` to cluster related advisor signals into one
+  household narrative rather than repeating separate advisor messages.
+- Added deterministic orchestration scoring using urgency, measurable
+  financial impact, confidence, and estimated action effort.
+- Daily Briefing now emits one `Today's Best Action`, one `You're Doing Well`
+  reinforcement, and one `Watch This` item where advisor data supports them.
+- Added supporting-advisor metadata to briefing priorities so merged actions
+  can show which advisors agree.
+- Kept individual advisor outputs unchanged for Recommendation Centre and API
+  advisor summaries.
+- Added orchestration tests for EV/cost merging, solar/efficiency merging, and
+  briefing item caps.
+
 ## Sprint 1.5.0 - Efficiency Advisor
 
 - Added reusable `EfficiencyAdvisor` that answers where household energy may be

@@ -2338,9 +2338,9 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
 
 
 def daily_briefing_html(briefing: DailyBriefing) -> str:
-    priorities = briefing_priority_grid_html(briefing.top_priorities, "Top priorities", "No immediate action", "Advisor Engine has not found an urgent household priority today.")
-    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're doing well", "No positive signal yet", "Advisor Engine does not have enough positive advisor output to call out a win today.")
-    watch = briefing_priority_grid_html(briefing.items_to_watch, "Items to watch", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
+    priorities = briefing_priority_grid_html(briefing.top_priorities, "Today's Best Action", "No immediate action", "Advisor Engine has not found an urgent household priority today.")
+    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're Doing Well", "No positive signal yet", "Advisor Engine does not have enough positive advisor output to call out a win today.")
+    watch = briefing_priority_grid_html(briefing.items_to_watch, "Watch This", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
     savings = briefing.estimated_savings_opportunity
     savings_text = "Not quantified"
     if savings:
@@ -2397,6 +2397,9 @@ def briefing_priority_grid_html(
 
 
 def briefing_priority_card_html(item: BriefingPriority, eyebrow: str) -> str:
+    support = ""
+    if item.supporting_advisors:
+        support = f"<small>Supported by {html.escape(', '.join(item.supporting_advisors))}</small>"
     return f"""
     <article class="briefing-card {html.escape(briefing_priority_severity(item.status))}">
       <div class="briefing-card-heading">
@@ -2408,6 +2411,7 @@ def briefing_priority_card_html(item: BriefingPriority, eyebrow: str) -> str:
       <div class="briefing-meta">
         <small>{html.escape(item.advisor_type.replace("_", " ").title())}</small>
         <small>{html.escape(briefing_priority_impact(item))}</small>
+        {support}
       </div>
     </article>
     """

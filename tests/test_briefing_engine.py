@@ -5,14 +5,14 @@ from engine.briefing_engine import BriefingEngine
 from engine.models import Advisor, AdvisorCollection, EvidenceTrail, FinancialImpact
 
 
-def advisor(status, advisor_id, impact=0.0, confidence="High"):
+def advisor(status, advisor_id, impact=0.0, confidence="High", advisor_type="TEST", recommendation=None, headline=None):
     return Advisor(
         advisor_id=advisor_id,
-        advisor_type="TEST",
+        advisor_type=advisor_type,
         status=status,
-        headline=f"{status} headline",
+        headline=headline or f"{status} headline",
         summary=f"{status} summary",
-        recommendation=f"{status} action",
+        recommendation=recommendation or f"{status} action",
         estimated_financial_impact=FinancialImpact(billing_period=impact),
         confidence=confidence,
         confidence_reason=f"{confidence} confidence reason",
@@ -72,6 +72,77 @@ class BriefingEngineTests(unittest.TestCase):
         self.assertEqual(data["positive_outcomes"][0]["advisor_id"], "cost")
         self.assertEqual(data["sections"][1]["section_type"], "positive_outcomes")
         self.assertIn("suggested_next_action", data)
+
+    def test_merges_related_ev_and_cost_actions_into_one_best_action(self):
+        charging = advisor(
+            "WAIT",
+            "charging_advisor",
+            impact=1.8,
+            advisor_type="EV_CHARGING",
+            recommendation="Charge your EV after 11 pm.",
+            headline="Charging is cheaper after 11 pm.",
+        )
+        cost = advisor(
+            "SLIGHTLY_HIGH",
+            "cost_advisor",
+            impact=12.0,
+            advisor_type="COST",
+            recommendation="Reduce charging costs before the bill closes.",
+            headline="Your bill is slightly high.",
+        )
+
+        briefing = BriefingEngine().build(AdvisorCollection([charging, cost]))
+
+        self.assertEqual(len(briefing.top_priorities), 1)
+        self.assertEqual(briefing.top_priorities[0].recommendation, "Reduce charging costs before the bill closes.")
+        self.assertEqual(
+            briefing.top_priorities[0].supporting_advisors,
+            ["Cost", "Ev Charging"],
+        )
+        self.assertEqual(len(briefing.advisor_summary), 2)
+
+    def test_merges_solar_and_efficiency_into_one_household_action(self):
+        solar = advisor(
+            "MISSED_OPPORTUNITY",
+            "solar_advisor",
+            impact=9.0,
+            advisor_type="SOLAR",
+            recommendation="Review active solar recommendations and consider moving flexible loads into sunny periods.",
+        )
+        efficiency = advisor(
+            "INEFFICIENT",
+            "efficiency_advisor",
+            impact=7.5,
+            advisor_type="EFFICIENCY",
+            recommendation="Review daytime imports and shift flexible usage where practical.",
+        )
+
+        briefing = BriefingEngine().build(AdvisorCollection([solar, efficiency]))
+
+        self.assertEqual(len(briefing.top_priorities), 1)
+        self.assertEqual(briefing.top_priorities[0].title, "Shift flexible loads into your solar window.")
+        self.assertEqual(
+            briefing.top_priorities[0].supporting_advisors,
+            ["Efficiency", "Solar"],
+        )
+
+    def test_orchestration_emits_one_best_action_one_win_and_one_watch(self):
+        briefing = BriefingEngine().build(
+            AdvisorCollection(
+                [
+                    advisor("HIGH", "high"),
+                    advisor("CHARGE_NOW", "charge"),
+                    advisor("ON_TRACK", "cost", advisor_type="COST"),
+                    advisor("GOOD", "solar", advisor_type="SOLAR"),
+                    advisor("WATCH", "efficiency", advisor_type="EFFICIENCY"),
+                    advisor("UNKNOWN", "unknown"),
+                ]
+            )
+        )
+
+        self.assertEqual(len(briefing.top_priorities), 1)
+        self.assertEqual(len(briefing.positive_outcomes), 1)
+        self.assertEqual(len(briefing.items_to_watch), 1)
 
 
 if __name__ == "__main__":

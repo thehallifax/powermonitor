@@ -365,6 +365,7 @@ class BriefingPriority:
     confidence_reason: str
     freshness: str
     estimated_financial_impact: Optional[FinancialImpact] = None
+    supporting_advisors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
