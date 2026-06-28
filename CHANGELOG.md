@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-007 - Provider Framework
+
+- Added shared provider framework models for providers, provider types,
+  capabilities, statuses, freshness, normalized observations, observation
+  quality, and registry serialization.
+- Registered current conceptual providers for SolarEdge, smart meter readings,
+  Ocular export, Synergy tariff/config, and Home Assistant OCPP when configured.
+- Exposed `provider_registry` and `provider_status` through the dashboard API.
+- Added provider registry/status rendering to the System page and supported
+  import provider metadata to the Imports page.
+- Threaded provider metadata into setup guidance and capability sources without
+  changing advisor calculations or recommendation behaviour.
+- Added provider registry, setup/provider metadata, API serialization, and
+  advisor-agnostic regression tests.
+
 ## PB-006 - Advisor Evidence Quality
 
 - Added shared Evidence Quality contracts for advisor evidence source,

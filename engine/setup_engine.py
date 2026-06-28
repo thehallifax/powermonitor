@@ -15,6 +15,7 @@ from .models import (
     SetupTask,
     SetupTaskPriority,
 )
+from .provider_framework import ProviderCapability, ProviderRegistry
 
 
 class SetupEngine:
@@ -35,6 +36,7 @@ class SetupEngine:
         goals: Optional[list[Any]] = None,
         recommendations: Optional[list[Any]] = None,
         settings: Optional[Any] = None,
+        provider_registry: Optional[ProviderRegistry] = None,
         now: Optional[datetime] = None,
     ) -> SetupChecklist:
         now = now or datetime.now().astimezone()
@@ -57,12 +59,12 @@ class SetupEngine:
             SetupSection(
                 "energy_providers",
                 "Energy Providers",
-                self._provider_tasks(capability_summary),
+                self._provider_tasks(capability_summary, provider_registry),
             ),
             SetupSection(
                 "imports",
                 "Imports",
-                self._import_tasks(capability_summary, import_sources),
+                self._import_tasks(capability_summary, import_sources, provider_registry),
             ),
             SetupSection(
                 "data_quality",
@@ -167,10 +169,20 @@ class SetupEngine:
             source="future_placeholder",
         )
 
-    def _provider_tasks(self, capability_summary: HouseholdCapabilitySummary) -> list[SetupTask]:
+    def _provider_tasks(
+        self,
+        capability_summary: HouseholdCapabilitySummary,
+        provider_registry: Optional[ProviderRegistry],
+    ) -> list[SetupTask]:
         tasks = []
         if self._household_declares("solar"):
             solar = capability_summary.get("solar")
+            solar_provider = _first_provider(provider_registry, ProviderCapability.DAILY_SUMMARY)
+            rationale = solar.reason if solar else "Solar capability is unavailable."
+            source = "HouseholdCapabilitySummary.solar"
+            if solar_provider:
+                rationale = f"{rationale} Provider: {solar_provider.name} ({solar_provider.status.value})."
+                source = "ProviderRegistry.solar"
             tasks.append(
                 task(
                     "connect_solar_provider",
@@ -180,8 +192,8 @@ class SetupEngine:
                     "5 minutes",
                     "Go to System",
                     "#system",
-                    solar.reason if solar else "Solar capability is unavailable.",
-                    "HouseholdCapabilitySummary.solar",
+                    rationale,
+                    source,
                 )
             )
         return tasks
@@ -190,6 +202,7 @@ class SetupEngine:
         self,
         capability_summary: HouseholdCapabilitySummary,
         import_sources: list[ImportSource],
+        provider_registry: Optional[ProviderRegistry],
     ) -> list[SetupTask]:
         tasks = []
         if self._household_declares("ev"):
@@ -200,6 +213,12 @@ class SetupEngine:
             detail = ev.reason if ev else "EV charging capability is unavailable."
             if supported:
                 detail = f"{detail} Supported upload paths: {supported}."
+            import_provider_names = [
+                provider.name
+                for provider in (provider_registry.providers_with_capability(ProviderCapability.IMPORT_ONLY) if provider_registry else [])
+            ]
+            if import_provider_names:
+                detail = f"{detail} Import providers: {', '.join(import_provider_names)}."
             tasks.append(
                 task(
                     "upload_ev_charging_history",
@@ -314,6 +333,16 @@ def task(
         rationale=rationale,
         source=source,
     )
+
+
+def _first_provider(
+    provider_registry: Optional[ProviderRegistry],
+    capability: ProviderCapability,
+):
+    if not provider_registry:
+        return None
+    providers = provider_registry.providers_with_capability(capability)
+    return providers[0] if providers else None
 
 
 def _priority_rank(priority: str) -> int:

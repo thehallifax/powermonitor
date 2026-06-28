@@ -6,6 +6,16 @@ from .efficiency_advisor import EfficiencyAdvisor
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
 from .goals_engine import GoalsEngine
+from .provider_framework import (
+    Provider,
+    ProviderCapability,
+    ProviderFreshness,
+    ProviderObservation,
+    ProviderObservationQuality,
+    ProviderRegistry,
+    ProviderStatus,
+    ProviderType,
+)
 from .solar_advisor import SolarAdvisor
 from .models import (
     Advisor,
@@ -78,6 +88,14 @@ __all__ = [
     "RecommendationDismissal",
     "RecommendationEngine",
     "RecommendationImpact",
+    "Provider",
+    "ProviderCapability",
+    "ProviderFreshness",
+    "ProviderObservation",
+    "ProviderObservationQuality",
+    "ProviderRegistry",
+    "ProviderStatus",
+    "ProviderType",
     "SolarAdvisor",
     "generate_decisions",
     "generate_ev_session_decisions",

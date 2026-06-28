@@ -101,6 +101,10 @@ class CapabilityDetectionTests(unittest.TestCase):
                 self.assertIn("setup_progress", payload)
                 self.assertIn("setup_tasks", payload)
                 self.assertIn("setup_sections", payload)
+                self.assertIn("provider_registry", payload)
+                self.assertIn("provider_status", payload)
+                self.assertIn("solaredge", payload["provider_status"])
+                self.assertTrue(payload["provider_registry"]["providers"])
                 self.assertIsInstance(payload["setup_progress"]["completion_pct"], int)
                 self.assertTrue(
                     all("task_id" in item for item in payload["setup_tasks"])

@@ -1503,7 +1503,7 @@ class DataEngine:
                     "solar",
                     "Solar",
                     present=solar_kwh > 0,
-                    source="readings",
+                    source="provider:solaredge",
                     confidence="High" if solar_kwh > 0 else "Medium",
                     reason=(
                         f"Detected {solar_kwh:.2f} kWh of solar production/export readings."
@@ -1517,7 +1517,7 @@ class DataEngine:
                     "EV charging",
                     present=ev_sessions > 0 and ev_kwh > 0,
                     available=True,
-                    source="ev_sessions",
+                    source="provider:ocular_export",
                     confidence="High" if ev_sessions > 0 and ev_kwh > 0 else "Medium",
                     reason=(
                         f"Detected {ev_sessions} EV charging session rows."
@@ -1538,7 +1538,7 @@ class DataEngine:
                     "grid_smart_meter",
                     "Grid / smart meter",
                     present=reading_count > 0 and grid_kwh >= 0,
-                    source="readings",
+                    source="provider:smart_meter_readings",
                     confidence="High" if reading_count else "Medium",
                     reason=(
                         f"Detected {reading_count} household interval readings."
@@ -1551,7 +1551,7 @@ class DataEngine:
                     "tariff",
                     "Tariff",
                     configured=tariff_configured or import_cost > 0,
-                    source="settings" if tariff_configured else "readings" if import_cost > 0 else None,
+                    source="provider:synergy_tariff_config" if tariff_configured else "provider:smart_meter_readings" if import_cost > 0 else None,
                     confidence="High" if tariff_configured else "Medium" if import_cost > 0 else "Low",
                     reason=(
                         "Tariff rates are configured in settings."
@@ -1566,7 +1566,7 @@ class DataEngine:
                     "Imports",
                     present=import_job_count > 0,
                     available=True,
-                    source="import_framework",
+                    source="provider:ocular_export",
                     confidence="High",
                     reason=(
                         f"{import_job_count} import job records are available."

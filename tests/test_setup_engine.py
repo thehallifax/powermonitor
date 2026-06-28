@@ -13,6 +13,7 @@ from engine.models import (
     HouseholdMembership,
 )
 from engine.setup_engine import SetupEngine
+from engine.provider_framework import build_provider_registry
 
 
 class SetupEngineTests(unittest.TestCase):
@@ -55,6 +56,34 @@ class SetupEngineTests(unittest.TestCase):
         self.assertEqual(remaining["data_older_than_24_hours"].priority.value, "high")
         self.assertIn(".xlsx", remaining["upload_ev_charging_history"].rationale)
         self.assertLess(checklist.progress.completion_pct, 100)
+
+    def test_setup_tasks_can_include_provider_registry_metadata(self):
+        summary = capability_summary(
+            solar=False,
+            ev=False,
+            tariff=True,
+            latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+        )
+        registry = build_provider_registry(
+            settings=type("Settings", (), {"ev_data_source": "estimated"})(),
+            health={"status": "ok"},
+            capability_summary=summary,
+            import_sources=[ImportSource("ocular_ev_export", "Ocular EV export", (".xlsx",))],
+        )
+
+        checklist = SetupEngine(context_with("solar", "ev")).build_checklist(
+            summary,
+            collector_health={"status": "ok"},
+            import_sources=[ImportSource("ocular_ev_export", "Ocular EV export", (".xlsx",))],
+            settings=settings(billing_configured=True),
+            provider_registry=registry,
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        tasks = {task.task_id: task for task in checklist.tasks}
+
+        self.assertIn("Provider:", tasks["connect_solar_provider"].rationale)
+        self.assertIn("Ocular export", tasks["upload_ev_charging_history"].rationale)
 
     def test_completed_setup_reaches_full_progress(self):
         checklist = SetupEngine(context_with("solar", "ev")).build_checklist(
