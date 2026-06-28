@@ -345,6 +345,82 @@ class AdvisorCollection:
         }
 
 
+@dataclass(frozen=True)
+class BriefingPriority:
+    """A concise advisor-derived item for the daily briefing."""
+
+    advisor_id: str
+    advisor_type: str
+    title: str
+    summary: str
+    recommendation: str
+    status: str
+    confidence: str
+    confidence_reason: str
+    freshness: str
+    estimated_financial_impact: Optional[FinancialImpact] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if isinstance(self.estimated_financial_impact, FinancialImpact):
+            data["estimated_financial_impact"] = self.estimated_financial_impact.as_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class BriefingSection:
+    """A capped group of briefing priorities."""
+
+    title: str
+    section_type: str
+    items: list[BriefingPriority] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "section_type": self.section_type,
+            "items": [item.as_dict() for item in self.items],
+        }
+
+
+@dataclass(frozen=True)
+class DailyBriefing:
+    """Advisor-orchestrated daily briefing for the Home page."""
+
+    greeting: str
+    overall_household_status: str
+    overall_confidence: str
+    overall_freshness: str
+    top_priorities: list[BriefingPriority]
+    positive_outcomes: list[BriefingPriority]
+    items_to_watch: list[BriefingPriority]
+    suggested_next_action: str
+    estimated_savings_opportunity: Optional[FinancialImpact]
+    advisor_summary: list[BriefingPriority]
+    read_time_minutes: int
+    sections: list[BriefingSection] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "greeting": self.greeting,
+            "overall_household_status": self.overall_household_status,
+            "overall_confidence": self.overall_confidence,
+            "overall_freshness": self.overall_freshness,
+            "top_priorities": [item.as_dict() for item in self.top_priorities],
+            "positive_outcomes": [item.as_dict() for item in self.positive_outcomes],
+            "items_to_watch": [item.as_dict() for item in self.items_to_watch],
+            "suggested_next_action": self.suggested_next_action,
+            "estimated_savings_opportunity": (
+                self.estimated_savings_opportunity.as_dict()
+                if self.estimated_savings_opportunity
+                else None
+            ),
+            "advisor_summary": [item.as_dict() for item in self.advisor_summary],
+            "read_time_minutes": self.read_time_minutes,
+            "sections": [section.as_dict() for section in self.sections],
+        }
+
+
 @dataclass
 class ChargingAdvice:
     """Presentation-agnostic answer to whether EV charging should happen now."""

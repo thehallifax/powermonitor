@@ -1,3 +1,4 @@
+from .briefing_engine import BriefingEngine
 from .charging_advisor import ChargingAdvisor
 from .cost_advisor import CostAdvisor
 from .decision_engine import generate_decisions, generate_ev_session_decisions
@@ -6,8 +7,11 @@ from .financial_engine import FinancialEngine
 from .models import (
     Advisor,
     AdvisorCollection,
+    BriefingPriority,
+    BriefingSection,
     Confidence,
     ChargingAdvice,
+    DailyBriefing,
     Decision,
     EngineStatus,
     Evidence,
@@ -29,11 +33,15 @@ __all__ = [
     "Advisor",
     "AdvisorCollection",
     "BillPeriod",
+    "BriefingEngine",
+    "BriefingPriority",
+    "BriefingSection",
     "ChargingAdvice",
     "ChargingAdvisor",
     "CostAdvisor",
     "DataCompleteness",
     "DataEngine",
+    "DailyBriefing",
     "Decision",
     "EngineStatus",
     "Evidence",

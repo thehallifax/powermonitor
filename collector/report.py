@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from engine.briefing_engine import BriefingEngine
 from engine.charging_advisor import ChargingAdvisor
 from engine.cost_advisor import CostAdvisor
 from engine.data_engine import DataEngine
@@ -25,8 +26,8 @@ from engine.decision_engine import (
     generate_ev_session_decisions,
 )
 from engine.financial_engine import FinancialEngine
-from engine.models import Advisor, AdvisorCollection, ChargingAdvice, DecisionTimeline, EnergyScore
-from presentation.briefing import BriefingItem, DailyBriefing, build_daily_briefing
+from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore
+from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
 from presentation.timeline import build_decision_timeline
@@ -66,6 +67,10 @@ def charging_advisor() -> ChargingAdvisor:
 
 def cost_advisor() -> CostAdvisor:
     return CostAdvisor()
+
+
+def briefing_engine() -> BriefingEngine:
+    return BriefingEngine()
 
 
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
@@ -282,6 +287,7 @@ def dashboard_data(
         generated_at,
     )
     advisors = AdvisorCollection([charging_advice.advisor, cost])
+    briefing = briefing_engine().build(advisors, current_day)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -302,6 +308,7 @@ def dashboard_data(
         "timeline": timeline.as_dict(),
         "comparison": comparison,
         "advisors": advisors.as_dict(),
+        "daily_briefing": briefing.as_dict(),
         "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
             billing_summary=billing_summary,
@@ -2256,52 +2263,100 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
 
 
 def daily_briefing_html(briefing: DailyBriefing) -> str:
-    priority = (
-        briefing_card_html(briefing.todays_priority, "Today's priority")
-        if briefing.todays_priority
-        else """
-        <article class="briefing-card green">
-          <div class="briefing-card-heading"><span>Today's priority</span><strong>No action</strong></div>
-          <h3>Nothing urgent</h3>
-          <p>The Decision Engine has not found an active priority for this period.</p>
-          <div class="briefing-meta"><small>General</small><small>Not quantified</small></div>
-        </article>
-        """
-    )
-    win = (
-        briefing_card_html(briefing.todays_win, "Today's win")
-        if briefing.todays_win
-        else """
-        <article class="briefing-card">
-          <div class="briefing-card-heading"><span>Today's win</span><strong>Watching</strong></div>
-          <h3>No specific win yet</h3>
-          <p>There is not enough positive Decision Engine output to call out a win today.</p>
-          <div class="briefing-meta"><small>General</small><small>Not quantified</small></div>
-        </article>
-        """
-    )
-    sources = ", ".join(briefing.data_sources_used) if briefing.data_sources_used else "No decision sources"
-    energy = energy_score_html(briefing.energy_score)
+    priorities = briefing_priority_grid_html(briefing.top_priorities, "Top priorities", "No immediate action", "Advisor Engine has not found an urgent household priority today.")
+    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're doing well", "No positive signal yet", "Advisor Engine does not have enough positive advisor output to call out a win today.")
+    watch = briefing_priority_grid_html(briefing.items_to_watch, "Items to watch", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
+    savings = briefing.estimated_savings_opportunity
+    savings_text = "Not quantified"
+    if savings:
+        value = savings.billing_period if savings.billing_period is not None else savings.today
+        if value is not None:
+            savings_text = money(value)
     return f"""
     <section class="report-section briefing-section">
       <div class="briefing-hero">
         <div>
           <span class="eyebrow">Daily briefing</span>
           <h2>{html.escape(briefing.greeting)}</h2>
-          <p>{html.escape(briefing.introduction)}</p>
+          <p>{html.escape(briefing.overall_household_status)}</p>
         </div>
         <div class="briefing-readtime">
-          <span>{html.escape(briefing.confidence)} confidence</span>
+          <span>{html.escape(briefing.overall_confidence)} confidence</span>
           <strong>{briefing.read_time_minutes} min read</strong>
         </div>
       </div>
-      <p class="briefing-headline">{html.escape(briefing.headline)}</p>
-      {energy}
-      <div class="briefing-grid two-up">{priority}{win}</div>
-      {briefing_opportunities_html(briefing.opportunities)}
-      <p class="briefing-sources">Sources used: {html.escape(sources)}</p>
+      <p class="briefing-headline">{html.escape(briefing.suggested_next_action)}</p>
+      <div class="metrics">
+        {metric("Overall freshness", briefing.overall_freshness, "AdvisorCollection", "primary")}
+        {metric("Savings opportunity", savings_text, savings.basis if savings and savings.basis else "Measured advisor impacts", "cost")}
+        {metric("Advisor count", str(len(briefing.advisor_summary)), "Active advisor summary", "ev")}
+        {metric("Read time", f"{briefing.read_time_minutes} min", "Briefing Engine estimate", "solar")}
+      </div>
+      {priorities}
+      {positives}
+      {watch}
     </section>
     """
+
+
+def briefing_priority_grid_html(
+    items: list[BriefingPriority],
+    title: str,
+    empty_title: str,
+    empty_body: str,
+) -> str:
+    if not items:
+        return f"""
+        <section class="briefing-block">
+          <div class="section-title"><div><span class="eyebrow">{html.escape(title)}</span><h2>{html.escape(empty_title)}</h2></div></div>
+          <p class="notice">{html.escape(empty_body)}</p>
+        </section>
+        """
+    cards = "".join(briefing_priority_card_html(item, title) for item in items)
+    return f"""
+    <section class="briefing-block">
+      <div class="section-title"><div><span class="eyebrow">{html.escape(title)}</span><h2>{len(items)} advisor signal{'s' if len(items) != 1 else ''}</h2></div></div>
+      <div class="briefing-grid">{cards}</div>
+    </section>
+    """
+
+
+def briefing_priority_card_html(item: BriefingPriority, eyebrow: str) -> str:
+    return f"""
+    <article class="briefing-card {html.escape(briefing_priority_severity(item.status))}">
+      <div class="briefing-card-heading">
+        <span>{html.escape(eyebrow)}</span>
+        <strong>{html.escape(item.confidence)} confidence</strong>
+      </div>
+      <h3>{html.escape(item.title)}</h3>
+      <p>{html.escape(item.summary)}</p>
+      <div class="briefing-meta">
+        <small>{html.escape(item.advisor_type.replace("_", " ").title())}</small>
+        <small>{html.escape(briefing_priority_impact(item))}</small>
+      </div>
+    </article>
+    """
+
+
+def briefing_priority_severity(status: str) -> str:
+    if status in {"HIGH", "AVOID"}:
+        return "red"
+    if status in {"SLIGHTLY_HIGH", "WAIT", "UNKNOWN"}:
+        return "amber"
+    return "green"
+
+
+def briefing_priority_impact(item: BriefingPriority) -> str:
+    impact = item.estimated_financial_impact
+    if not impact:
+        return "Not quantified"
+    if impact.billing_period is not None:
+        return money(impact.billing_period)
+    if impact.today is not None:
+        return f"{money(impact.today)} today"
+    if impact.yearly is not None:
+        return f"{money(impact.yearly)} yearly"
+    return "Not quantified"
 
 
 def energy_score_html(score: Optional[EnergyScore]) -> str:
@@ -2335,13 +2390,8 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
 
 def home_page_html(
     briefing: DailyBriefing,
-    charging_advice: ChargingAdvice,
-    advisors: Optional[list[Advisor]] = None,
 ) -> str:
-    advisors = advisors or []
-    cost = next((advisor for advisor in advisors if advisor.advisor_id == "cost_advisor"), None)
-    cost_html = advisor_home_html(cost) if cost else ""
-    return cost_html + charging_advice_home_html(charging_advice) + daily_briefing_html(briefing)
+    return daily_briefing_html(briefing)
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -2808,7 +2858,6 @@ def write_html(
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
-    briefing = build_daily_briefing(recommendations, local_today(), energy_score)
     timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
     billing_summary = billing_summary or period_summary
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine().project_bill(
@@ -2838,6 +2887,7 @@ def write_html(
         generated_dt,
     )
     advisors = AdvisorCollection([charging_advice.advisor, cost])
+    briefing = briefing_engine().build(advisors, local_today())
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -2863,7 +2913,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, charging_advice, advisors.active())}
+    {home_page_html(briefing)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>

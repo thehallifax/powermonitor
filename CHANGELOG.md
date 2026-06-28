@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 1.3.0 - Briefing Engine
+
+- Added reusable `BriefingEngine` that orchestrates `AdvisorCollection` into a
+  concise Home daily briefing.
+- Added shared `DailyBriefing`, `BriefingSection`, and `BriefingPriority`
+  models for advisor-driven briefing output.
+- Refactored Home to render the Briefing Engine output instead of assembling
+  its own summary from decisions or advisor-specific objects.
+- Added Daily Briefing API serialization via `daily_briefing`.
+- Added Briefing Engine tests for advisor-only orchestration, section caps, and
+  serialization.
+
 ## Sprint 1.2.0 - Cost Advisor
 
 - Added a reusable `CostAdvisor` that answers whether the household is on
