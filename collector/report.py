@@ -27,6 +27,7 @@ from engine.decision_engine import (
 )
 from engine.financial_engine import FinancialEngine
 from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore
+from engine.solar_advisor import SolarAdvisor
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -67,6 +68,10 @@ def charging_advisor() -> ChargingAdvisor:
 
 def cost_advisor() -> CostAdvisor:
     return CostAdvisor()
+
+
+def solar_advisor() -> SolarAdvisor:
+    return SolarAdvisor()
 
 
 def briefing_engine() -> BriefingEngine:
@@ -286,7 +291,15 @@ def dashboard_data(
         comparison,
         generated_at,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost])
+    solar = build_solar_advisor(
+        period_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        generated_at,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar])
     briefing = briefing_engine().build(advisors, current_day)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
@@ -1019,6 +1032,24 @@ def build_cost_advisor(
         timeline=timeline,
         health=health,
         comparison=comparison,
+        now=now,
+    )
+
+
+def build_solar_advisor(
+    summary: Summary,
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+    timeline: Optional[DecisionTimeline],
+    now: datetime,
+) -> Advisor:
+    return solar_advisor().advise(
+        summary=summary,
+        settings=settings,
+        recommendations=recommendations,
+        timeline=timeline,
+        health=health,
         now=now,
     )
 
@@ -2886,7 +2917,15 @@ def write_html(
         comparison,
         generated_dt,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost])
+    solar = build_solar_advisor(
+        period_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        generated_dt,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar])
     briefing = briefing_engine().build(advisors, local_today())
     glance = build_glance_state(
         billing_summary=billing_summary,

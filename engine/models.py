@@ -16,6 +16,10 @@ ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES + (
     "SLIGHTLY_HIGH",
     "HIGH",
     "IMPROVING",
+    "EXCELLENT",
+    "GOOD",
+    "OPPORTUNITY",
+    "MISSED_OPPORTUNITY",
 )
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
@@ -467,7 +471,11 @@ def _advisor_sort_key(advisor: Advisor) -> tuple[int, float, int, str]:
         "HIGH": 0,
         "CHARGE_NOW": 1,
         "SLIGHTLY_HIGH": 1,
+        "MISSED_OPPORTUNITY": 1,
+        "OPPORTUNITY": 2,
         "IMPROVING": 2,
+        "GOOD": 3,
+        "EXCELLENT": 3,
         "ON_TRACK": 3,
         "WAIT": 2,
         "UNKNOWN": 4,

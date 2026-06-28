@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.4.0 - Solar Advisor
+
+- Added reusable `SolarAdvisor` that answers whether the household is making
+  the most of available solar using existing period-level solar and financial
+  data.
+- Added Solar Advisor to the shared Advisor framework, dashboard API, Home,
+  Recommendation Centre, and Briefing Engine through `AdvisorCollection`.
+- Added solar advisor statuses: `EXCELLENT`, `GOOD`, `OPPORTUNITY`,
+  `MISSED_OPPORTUNITY`, and `UNKNOWN`.
+- Added evidence trail items for solar generation, self-consumption, exported
+  energy, export credit, import offset, billing contribution, recommendations,
+  and timeline context.
+- Added Solar Advisor unit tests.
+
 ## Sprint 1.3.0 - Briefing Engine
 
 - Added reusable `BriefingEngine` that orchestrates `AdvisorCollection` into a
