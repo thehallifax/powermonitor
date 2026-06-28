@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.7.0 - Goals Engine
+
+- Added reusable `GoalsEngine` for tracking household progress from
+  `AdvisorCollection` outputs only.
+- Added shared `Goal`, `GoalProgress`, and `GoalStatus` models for API-safe
+  goal reporting.
+- Added v1 active goals for bill target, Peak reduction, solar usage,
+  off-peak EV charging, and overnight baseload.
+- Added Home Daily Briefing `Today's Progress` cards showing goal progress,
+  confidence, and advisor-supported status.
+- Added Recommendation Centre goal contribution labels for recommendations
+  that support active goals.
+- Added Goals Engine and Recommendation Centre goal-rendering tests.
+
 ## Sprint 1.6.0 - Advisor Orchestration
 
 - Enhanced `BriefingEngine` to cluster related advisor signals into one

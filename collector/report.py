@@ -27,7 +27,8 @@ from engine.decision_engine import (
 )
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
-from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore
+from engine.goals_engine import GoalsEngine
+from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore, GoalProgress
 from engine.solar_advisor import SolarAdvisor
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
@@ -81,6 +82,10 @@ def efficiency_advisor() -> EfficiencyAdvisor:
 
 def briefing_engine() -> BriefingEngine:
     return BriefingEngine()
+
+
+def goals_engine() -> GoalsEngine:
+    return GoalsEngine()
 
 
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
@@ -319,6 +324,7 @@ def dashboard_data(
     )
     advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
     briefing = briefing_engine().build(advisors, current_day)
+    goals = goals_engine().evaluate(advisors)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -340,6 +346,7 @@ def dashboard_data(
         "comparison": comparison,
         "advisors": advisors.as_dict(),
         "daily_briefing": briefing.as_dict(),
+        "goals": [goal.as_dict() for goal in goals],
         "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
             billing_summary=billing_summary,
@@ -2027,10 +2034,12 @@ def recommendation_centre_html(
     lifecycle_counts: Optional[dict[str, int]] = None,
     hidden: Optional[list[Decision]] = None,
     advisors: Optional[list[Advisor]] = None,
+    goals: Optional[list[GoalProgress]] = None,
 ) -> str:
     ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
     hidden = sorted(hidden or [], key=lambda item: (-recommendation_priority_score(item), item.title))
     advisors = advisors or []
+    goals = goals or []
     lifecycle_counts = lifecycle_counts or {"dismissed": 0, "snoozed_until": 0}
     inactive_count = int(lifecycle_counts.get("dismissed", 0)) + int(lifecycle_counts.get("snoozed_until", 0))
     lifecycle_note = (
@@ -2047,6 +2056,7 @@ def recommendation_centre_html(
             if decision.explanation
             else "This recommendation is based on available Recommendation Engine evidence."
         )
+        goal_links = recommendation_goal_links_html(decision, goals)
         cards.append(
             f"""
             <article class="recommendation-card recommendation-centre-card {html.escape(decision.severity)}">
@@ -2066,6 +2076,7 @@ def recommendation_centre_html(
               <div class="decision-lines">
                 <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
                 <p><strong>Why?</strong>{html.escape(why)}</p>
+                {goal_links}
               </div>
               <div class="recommendation-centre-evidence">
                 <strong>Supporting evidence</strong>
@@ -2130,6 +2141,20 @@ def recommendation_centre_html(
     </section>
     {hidden_section}
     """
+
+
+def recommendation_goal_links_html(decision: Decision, goals: list[GoalProgress]) -> str:
+    if not goals:
+        return ""
+    category = recommendation_category(decision).replace("_", " ").lower()
+    titles = [
+        goal.goal.title
+        for goal in goals
+        if any(item.replace("_", " ").lower() == category for item in goal.goal.recommendation_categories)
+    ]
+    if not titles:
+        return ""
+    return f"<p><strong>Contributes to goals</strong>{html.escape(', '.join(titles))}</p>"
 
 
 def advisor_centre_html(advisors: list[Advisor]) -> str:
@@ -2337,10 +2362,11 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
     """
 
 
-def daily_briefing_html(briefing: DailyBriefing) -> str:
+def daily_briefing_html(briefing: DailyBriefing, goals: Optional[list[GoalProgress]] = None) -> str:
     priorities = briefing_priority_grid_html(briefing.top_priorities, "Today's Best Action", "No immediate action", "Advisor Engine has not found an urgent household priority today.")
     positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're Doing Well", "No positive signal yet", "Advisor Engine does not have enough positive advisor output to call out a win today.")
     watch = briefing_priority_grid_html(briefing.items_to_watch, "Watch This", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
+    goal_progress = goals_progress_html(goals or [])
     savings = briefing.estimated_savings_opportunity
     savings_text = "Not quantified"
     if savings:
@@ -2367,11 +2393,50 @@ def daily_briefing_html(briefing: DailyBriefing) -> str:
         {metric("Advisor count", str(len(briefing.advisor_summary)), "Active advisor summary", "ev")}
         {metric("Read time", f"{briefing.read_time_minutes} min", "Briefing Engine estimate", "solar")}
       </div>
+      {goal_progress}
       {priorities}
       {positives}
       {watch}
     </section>
     """
+
+
+def goals_progress_html(goals: list[GoalProgress]) -> str:
+    if not goals:
+        return ""
+    cards = []
+    for goal in goals:
+        progress = f"{goal.progress_pct}%" if goal.progress_pct is not None else "Unknown"
+        cards.append(
+            f"""
+            <article class="briefing-card {html.escape(goal_status_tone(goal))}">
+              <div class="briefing-card-heading">
+                <span>{html.escape(goal.goal.outcome)}</span>
+                <strong>{html.escape(goal.confidence)} confidence</strong>
+              </div>
+              <h3>{html.escape(goal.goal.title)}</h3>
+              <p>{html.escape(goal.summary)}</p>
+              <div class="briefing-meta">
+                <small>{html.escape(progress)}</small>
+                <small>{html.escape(goal.status.label)}</small>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="briefing-block">
+      <div class="section-title"><div><span class="eyebrow">Today's Progress</span><h2>{len(goals)} active goal{'s' if len(goals) != 1 else ''}</h2></div></div>
+      <div class="briefing-grid">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def goal_status_tone(goal: GoalProgress) -> str:
+    if goal.status.state in {"AHEAD", "ON_TRACK"}:
+        return "green"
+    if goal.status.state == "NEEDS_ATTENTION":
+        return "red"
+    return "amber"
 
 
 def briefing_priority_grid_html(
@@ -2469,8 +2534,9 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
 
 def home_page_html(
     briefing: DailyBriefing,
+    goals: Optional[list[GoalProgress]] = None,
 ) -> str:
-    return daily_briefing_html(briefing)
+    return daily_briefing_html(briefing, goals or [])
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -2989,6 +3055,7 @@ def write_html(
     )
     advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
     briefing = briefing_engine().build(advisors, local_today())
+    goals = goals_engine().evaluate(advisors)
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -3014,11 +3081,11 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing)}
+    {home_page_html(briefing, goals)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisors.active())}
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisors.active(), goals)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>

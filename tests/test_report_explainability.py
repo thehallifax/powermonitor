@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
-from engine.models import Decision, DecisionExplanation, FinancialImpact
+from engine.models import Decision, DecisionExplanation, FinancialImpact, Goal, GoalProgress, GoalStatus
 
 
 def explained_decision(
@@ -108,6 +108,29 @@ class ReportExplainabilityTests(unittest.TestCase):
         self.assertIn("Snooze 1 day", markup)
         self.assertIn("Next bill", markup)
         self.assertIn("Restore", markup)
+
+    def test_recommendation_centre_shows_goal_contributions(self):
+        goal = GoalProgress(
+            goal=Goal(
+                goal_id="peak_reduction",
+                title="Peak Reduction",
+                outcome="Reduce Peak usage",
+                advisor_types=["COST"],
+                recommendation_categories=["tariff"],
+            ),
+            progress_pct=83,
+            status=GoalStatus("ON_TRACK", "On track", "Peak reduction is tracking well."),
+            confidence="High",
+            summary="Peak Reduction is tracking well.",
+            supporting_advisors=["Cost"],
+            supporting_evidence=["Cost advisor evidence"],
+            recommended_action="Keep Peak usage low.",
+        )
+
+        markup = report.recommendation_centre_html([explained_decision(category="tariff")], goals=[goal])
+
+        self.assertIn("Contributes to goals", markup)
+        self.assertIn("Peak Reduction", markup)
 
     def test_serialized_decision_includes_explanation_for_api_outputs(self):
         payload = explained_decision().as_dict()

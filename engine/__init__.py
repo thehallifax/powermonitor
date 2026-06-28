@@ -5,6 +5,7 @@ from .decision_engine import generate_decisions, generate_ev_session_decisions
 from .efficiency_advisor import EfficiencyAdvisor
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
+from .goals_engine import GoalsEngine
 from .solar_advisor import SolarAdvisor
 from .models import (
     Advisor,
@@ -22,6 +23,9 @@ from .models import (
     FinancialImpact,
     Forecast,
     Freshness,
+    Goal,
+    GoalProgress,
+    GoalStatus,
     Insight,
     Recommendation,
     RecommendationDismissal,
@@ -54,6 +58,10 @@ __all__ = [
     "FinancialEngine",
     "Forecast",
     "Freshness",
+    "Goal",
+    "GoalProgress",
+    "GoalStatus",
+    "GoalsEngine",
     "HouseholdSnapshot",
     "Insight",
     "Recommendation",

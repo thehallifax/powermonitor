@@ -11,6 +11,7 @@ CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
 DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
 CHARGING_ADVICE_STATUSES = ("CHARGE_NOW", "WAIT", "AVOID", "UNKNOWN")
+GOAL_STATUS_STATES = ("ON_TRACK", "AHEAD", "WATCH", "NEEDS_ATTENTION", "UNKNOWN")
 ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES + (
     "ON_TRACK",
     "SLIGHTLY_HIGH",
@@ -348,6 +349,69 @@ class AdvisorCollection:
         return {
             "advisors": [advisor.as_dict() for advisor in ordered],
             "count": len(ordered),
+        }
+
+
+@dataclass(frozen=True)
+class GoalStatus:
+    """Current state of a measurable household goal."""
+
+    state: str
+    label: str
+    description: str
+
+    def __post_init__(self) -> None:
+        if self.state not in GOAL_STATUS_STATES:
+            raise ValueError(f"Unsupported goal status: {self.state}")
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Goal:
+    """A user-facing outcome tracked from existing advisor outputs."""
+
+    goal_id: str
+    title: str
+    outcome: str
+    advisor_types: list[str]
+    recommendation_categories: list[str]
+    active: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class GoalProgress:
+    """Progress toward one goal, derived from advisor evidence only."""
+
+    goal: Goal
+    progress_pct: Optional[int]
+    status: GoalStatus
+    confidence: str
+    summary: str
+    supporting_advisors: list[str]
+    supporting_evidence: list[str]
+    recommended_action: str
+
+    def __post_init__(self) -> None:
+        if self.progress_pct is not None and not 0 <= self.progress_pct <= 100:
+            raise ValueError("Goal progress must be between 0 and 100")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported goal confidence: {self.confidence}")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "goal": self.goal.as_dict(),
+            "progress_pct": self.progress_pct,
+            "status": self.status.as_dict(),
+            "confidence": self.confidence,
+            "summary": self.summary,
+            "supporting_advisors": list(self.supporting_advisors),
+            "supporting_evidence": list(self.supporting_evidence),
+            "recommended_action": self.recommended_action,
         }
 
 
