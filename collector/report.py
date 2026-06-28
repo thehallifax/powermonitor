@@ -1992,8 +1992,12 @@ def glance_page_html(glance: GlanceState) -> str:
           <strong>{html.escape(glance.current_tariff)}</strong>
         </div>
         <div class="glance-panel">
-          <span>Next better/cheaper window</span>
+          <span>Next cheaper window</span>
           <strong>{html.escape(glance.next_window)}</strong>
+        </div>
+        <div class="glance-panel">
+          <span>Lowest-cost window</span>
+          <strong>{html.escape(glance.lowest_cost_window)}</strong>
         </div>
         <div class="glance-panel score">
           <span>Energy Score</span>
@@ -2786,8 +2790,8 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
     if benefit and benefit.today is not None:
         benefit_text = f"{money(benefit.today)} per kWh"
     rate_text = (
-        f"{money(charging_advice.tariff_now_rate)} / {money(charging_advice.tariff_next_rate)}"
-        if charging_advice.tariff_now_rate is not None and charging_advice.tariff_next_rate is not None
+        f"{money(charging_advice.current_window_rate)} / {money(charging_advice.next_lower_cost_window_rate)}"
+        if charging_advice.current_window_rate is not None and charging_advice.next_lower_cost_window_rate is not None
         else "Unavailable"
     )
     difference_text = (
@@ -2805,12 +2809,13 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
       <p>{html.escape(advisor.summary)}</p>
       <div class="metrics">
         {metric("Status", advisor.status.replace("_", " "), "Shared Advisor", "ev")}
-        {metric("Tariff now / next", rate_text, f"{charging_advice.tariff_now_label} to {charging_advice.tariff_next_label}", "cost")}
+        {metric("Tariff now / next cheaper", rate_text, f"{charging_advice.current_window_label} to {charging_advice.next_lower_cost_window_label}", "cost")}
         {metric("Difference", difference_text, "Current tariff minus next window tariff", "cost")}
         {metric("Benefit", benefit_text, benefit.basis if benefit and benefit.basis else "Measured where tariff difference exists", "cost")}
         {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
         {metric("Evidence", evidence_quality, evidence_reason, "primary")}
-        {metric("Next window", charging_advice.next_window or "Unavailable", charging_advice.next_window_start or "Configured tariff schedule", "solar")}
+        {metric("Next cheaper window", charging_advice.next_lower_cost_window or "Unavailable", charging_advice.next_lower_cost_window_start or "Configured tariff schedule", "solar")}
+        {metric("Lowest-cost window", charging_advice.lowest_cost_window or "Unavailable", charging_advice.lowest_cost_window_start or "Configured tariff schedule", "solar")}
         {metric("EV data", charging_advice.charger_data_status.replace("_", " "), charging_advice.ev_session_freshness, "ev")}
         {metric("Solar data", charging_advice.solar_data_status, "Daily summary only; no live surplus assumption", "solar")}
       </div>

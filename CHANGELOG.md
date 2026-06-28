@@ -1,5 +1,17 @@
 # Changelog
 
+## Housekeeping - Charging Tariff Windows
+
+- Extended `ChargingAdvice` with current, next-lower-cost, lowest-cost, and
+  recommended-wait tariff window fields while preserving existing compatibility
+  aliases.
+- Updated Charging Advisor tariff wording to distinguish the next cheaper
+  window from the lowest-cost window.
+- Changed Glance and Home wording to show "Next cheaper window" and
+  "Lowest-cost window" separately.
+- Added regression coverage for multi-step tariff structures where a nearer
+  cheaper window exists before the lowest-cost window.
+
 ## PB-008 - Provider Observation Pipeline
 
 - Extended provider observations with household, provider, capability,

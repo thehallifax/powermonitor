@@ -18,6 +18,7 @@ class GlanceState:
     current_tariff: str
     current_tariff_bucket: str
     next_window: str
+    lowest_cost_window: str
     energy_score: Optional[int]
     energy_score_label: str
     bill_current: float
@@ -68,7 +69,8 @@ def build_glance_state(
         reason=advisor.summary,
         current_tariff=charging_advice.tariff_now_label or TARIFF_LABELS[bucket],
         current_tariff_bucket=bucket,
-        next_window=charging_advice.next_window or next_better_window(now, bucket),
+        next_window=charging_advice.next_lower_cost_window or charging_advice.next_window or next_better_window(now, bucket),
+        lowest_cost_window=charging_advice.lowest_cost_window or charging_advice.next_window or next_better_window(now, bucket),
         energy_score=energy_score.score if energy_score else None,
         energy_score_label=energy_score.label if energy_score else "Unavailable",
         bill_current=float(getattr(billing_summary, "net_cost", 0.0) or 0.0),

@@ -859,6 +859,17 @@ class ChargingAdvice:
     next_recommended_charging_window: Optional[str]
     data_freshness: str
     current_window: str
+    current_window_label: str
+    current_window_rate: Optional[float]
+    next_lower_cost_window: str
+    next_lower_cost_window_start: Optional[str]
+    next_lower_cost_window_label: Optional[str]
+    next_lower_cost_window_rate: Optional[float]
+    lowest_cost_window: str
+    lowest_cost_window_start: Optional[str]
+    lowest_cost_window_label: Optional[str]
+    lowest_cost_window_rate: Optional[float]
+    recommended_wait_minutes: Optional[int]
     next_window: str
     next_window_start: Optional[str]
     tariff_now_label: str

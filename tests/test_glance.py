@@ -126,13 +126,16 @@ class GlanceModeTests(unittest.TestCase):
         self.assertEqual(state.status, "AVOID")
         self.assertIn("Peak", state.reason)
         self.assertEqual(state.current_recommendation, "Avoid charging during Peak")
+        self.assertEqual(state.next_window, "Off peak from 9:00 PM")
+        self.assertEqual(state.lowest_cost_window, "Super off peak from 9:00 AM")
 
     def test_off_peak_without_surplus_maps_to_wait(self):
         state = build_state(datetime(2026, 6, 27, 21, 30, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "WAIT")
-        self.assertIn("lower-cost", state.reason)
+        self.assertIn("next cheaper", state.reason)
         self.assertIn("Overnight", state.next_window)
+        self.assertIn("Super off peak", state.lowest_cost_window)
 
     def test_stale_or_missing_data_maps_to_unavailable(self):
         state = build_state(

@@ -6,6 +6,7 @@ decision, EV history, and freshness evidence. It does not render presentation
 markup and it does not forecast future appliance behaviour.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
@@ -30,6 +31,21 @@ EV_BUCKET_LABELS = {
     "off_peak": "off-peak",
     "peak": "peak",
 }
+
+
+@dataclass(frozen=True)
+class TariffWindow:
+    bucket: str
+    label: str
+    start: Optional[datetime]
+    rate: Optional[float]
+
+    def display(self, reference: datetime) -> str:
+        if self.start is None:
+            return self.label
+        if self.start <= reference:
+            return f"{self.label} now"
+        return f"{self.label} from {self.start.strftime('%-I:%M %p')}"
 
 
 class ChargingAdvisor:
@@ -58,10 +74,16 @@ class ChargingAdvisor:
         tariff_rates = self._import_rates(settings)
         top_priority = self._top_priority(recommendations)
         bill_is_high = any(item.id == "high_cost_alert" for item in recommendations)
-        next_bucket, next_window, next_window_start = next_recommended_window(observed_at, bucket)
         tariff_now_rate = tariff_rates.get(bucket)
-        tariff_next_rate = tariff_rates.get(next_bucket)
+        current_window = TariffWindow(bucket, TARIFF_LABELS[bucket], observed_at, tariff_now_rate)
+        next_lower_window = next_lower_cost_window(observed_at, bucket, tariff_rates)
+        lowest_window = lowest_cost_window(observed_at, bucket, tariff_rates)
+        next_bucket = next_lower_window.bucket
+        next_window = next_lower_window.display(observed_at)
+        next_window_start = next_lower_window.start
+        tariff_next_rate = next_lower_window.rate
         per_kwh_difference = self._per_kwh_difference(bucket, next_bucket, tariff_rates)
+        recommended_wait_minutes = wait_minutes(observed_at, next_lower_window.start)
         per_kwh_benefit = self._per_kwh_benefit(bucket, tariff_rates)
         charger_data_status, ev_session_freshness = self._charger_data_status(billing_summary)
         solar_data_status = self._solar_data_status(today_summary, freshness)
@@ -88,6 +110,10 @@ class ChargingAdvisor:
             "next_tariff_bucket": next_bucket,
             "next_tariff_label": TARIFF_LABELS[next_bucket],
             "next_import_rate": tariff_next_rate,
+            "lowest_tariff_bucket": lowest_window.bucket,
+            "lowest_tariff_label": lowest_window.label,
+            "lowest_import_rate": lowest_window.rate,
+            "recommended_wait_minutes": recommended_wait_minutes,
             "per_kwh_difference": per_kwh_difference,
             "solar_generated_kwh_today": self._number(today_summary, "solar_generated_kwh"),
             "solar_exported_kwh_today": self._number(today_summary, "solar_exported_kwh"),
@@ -149,6 +175,17 @@ class ChargingAdvisor:
                 next_recommended_charging_window=next_window,
                 data_freshness=freshness,
                 current_window=EV_BUCKET_LABELS[bucket],
+                current_window_label=current_window.label,
+                current_window_rate=current_window.rate,
+                next_lower_cost_window=next_window,
+                next_lower_cost_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+                next_lower_cost_window_label=next_lower_window.label,
+                next_lower_cost_window_rate=next_lower_window.rate,
+                lowest_cost_window=lowest_window.display(observed_at),
+                lowest_cost_window_start=lowest_window.start.isoformat(timespec="seconds") if lowest_window.start else None,
+                lowest_cost_window_label=lowest_window.label,
+                lowest_cost_window_rate=lowest_window.rate,
+                recommended_wait_minutes=recommended_wait_minutes,
                 next_window=next_window,
                 next_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
                 tariff_now_label=TARIFF_LABELS[bucket],
@@ -185,14 +222,16 @@ class ChargingAdvisor:
             headline = "Avoid charging during Peak"
             explanation = (
                 f"Advice is tariff-based: the current Peak rate is ${tariff_now_rate:.4f}/kWh. "
-                f"The next recommended window is {next_window} at ${tariff_next_rate:.4f}/kWh."
+                f"The next cheaper window is {next_window} at ${tariff_next_rate:.4f}/kWh. "
+                f"The lowest-cost window is {lowest_window.display(observed_at)} at ${lowest_window.rate:.4f}/kWh."
             )
             status = "AVOID"
         else:
             headline = "Wait for a cheaper charging window"
             explanation = (
                 f"Advice is tariff-based: the current {TARIFF_LABELS[bucket]} rate is ${tariff_now_rate:.4f}/kWh. "
-                f"The next recommended lower-cost window is {next_window} at ${tariff_next_rate:.4f}/kWh."
+                f"The next cheaper window is {next_window} at ${tariff_next_rate:.4f}/kWh. "
+                f"The lowest-cost window is {lowest_window.display(observed_at)} at ${lowest_window.rate:.4f}/kWh."
             )
             status = "WAIT"
 
@@ -242,6 +281,17 @@ class ChargingAdvisor:
             next_recommended_charging_window=next_window,
             data_freshness=freshness,
             current_window=EV_BUCKET_LABELS[bucket],
+            current_window_label=current_window.label,
+            current_window_rate=current_window.rate,
+            next_lower_cost_window=next_window,
+            next_lower_cost_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
+            next_lower_cost_window_label=next_lower_window.label,
+            next_lower_cost_window_rate=next_lower_window.rate,
+            lowest_cost_window=lowest_window.display(observed_at),
+            lowest_cost_window_start=lowest_window.start.isoformat(timespec="seconds") if lowest_window.start else None,
+            lowest_cost_window_label=lowest_window.label,
+            lowest_cost_window_rate=lowest_window.rate,
+            recommended_wait_minutes=recommended_wait_minutes,
             next_window=next_window,
             next_window_start=next_window_start.isoformat(timespec="seconds") if next_window_start else None,
             tariff_now_label=TARIFF_LABELS[bucket],
@@ -599,6 +649,61 @@ def current_tariff_bucket(now: datetime) -> str:
 
 def next_better_window(now: datetime, current_bucket: str) -> str:
     return next_recommended_window(now, current_bucket)[1]
+
+
+def next_lower_cost_window(now: datetime, current_bucket: str, rates: dict[str, float]) -> TariffWindow:
+    current_rate = rates.get(current_bucket)
+    if current_rate is None:
+        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, None)
+    if current_rate <= min(rates.values(), default=current_rate):
+        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
+    for start, bucket in upcoming_tariff_windows(now):
+        rate = rates.get(bucket)
+        if rate is not None and rate < current_rate:
+            return TariffWindow(bucket, TARIFF_LABELS[bucket], start, rate)
+    return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
+
+
+def lowest_cost_window(now: datetime, current_bucket: str, rates: dict[str, float]) -> TariffWindow:
+    current_rate = rates.get(current_bucket)
+    if not rates:
+        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
+    lowest_rate = min(rates.values())
+    if current_rate == lowest_rate:
+        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
+    for start, bucket in upcoming_tariff_windows(now):
+        rate = rates.get(bucket)
+        if rate == lowest_rate:
+            return TariffWindow(bucket, TARIFF_LABELS[bucket], start, rate)
+    lowest_bucket = min(rates, key=lambda item: rates[item])
+    return TariffWindow(lowest_bucket, TARIFF_LABELS[lowest_bucket], None, rates[lowest_bucket])
+
+
+def upcoming_tariff_windows(now: datetime) -> list[tuple[datetime, str]]:
+    local_now = now.astimezone()
+    day = local_now.date()
+    schedule = [
+        (time(6, 0), "off_peak"),
+        (time(9, 0), "super_off_peak"),
+        (time(15, 0), "peak"),
+        (time(21, 0), "off_peak"),
+        (time(23, 0), "overnight"),
+    ]
+    windows: list[tuple[datetime, str]] = []
+    for day_offset in range(3):
+        target_day = day + timedelta(days=day_offset)
+        for window_time, bucket in schedule:
+            start = datetime.combine(target_day, window_time, tzinfo=local_now.tzinfo)
+            if start > local_now:
+                windows.append((start, bucket))
+    windows.sort(key=lambda item: item[0])
+    return windows
+
+
+def wait_minutes(now: datetime, start: Optional[datetime]) -> int:
+    if start is None or start <= now:
+        return 0
+    return int(round((start - now).total_seconds() / 60))
 
 
 def next_recommended_window(now: datetime, current_bucket: str) -> tuple[str, str, Optional[datetime]]:

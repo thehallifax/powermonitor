@@ -71,8 +71,13 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertIsNotNone(advice.estimated_financial_benefit)
         self.assertEqual(advice.supporting_evidence["current_tariff_bucket"], "super_off_peak")
         self.assertEqual(advice.current_window, "9am-3pm super off-peak / EV solar window")
+        self.assertEqual(advice.current_window_label, "Super off peak")
+        self.assertEqual(advice.current_window_rate, SETTINGS.import_rates["super_off_peak"])
         self.assertEqual(advice.tariff_now_label, "Super off peak")
         self.assertEqual(advice.tariff_next_label, "Super off peak")
+        self.assertEqual(advice.next_lower_cost_window_label, "Super off peak")
+        self.assertEqual(advice.lowest_cost_window_label, "Super off peak")
+        self.assertEqual(advice.recommended_wait_minutes, 0)
         self.assertEqual(advice.per_kwh_difference, 0.0)
         self.assertIn("tariff timing", advice.confidence_reason)
 
@@ -91,10 +96,44 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertIn("tariff-based", advice.explanation)
         self.assertIn("billing position", advice.explanation)
         self.assertGreater(advice.estimated_financial_benefit.today, 0)
-        self.assertEqual(advice.next_window, "Overnight from 11:00 PM")
-        self.assertTrue(advice.next_window_start.endswith("23:00:00+08:00"))
-        self.assertEqual(advice.tariff_next_label, "Overnight")
-        self.assertAlmostEqual(advice.per_kwh_difference, 0.3446)
+        self.assertEqual(advice.next_lower_cost_window, "Off peak from 9:00 PM")
+        self.assertTrue(advice.next_lower_cost_window_start.endswith("21:00:00+08:00"))
+        self.assertEqual(advice.next_lower_cost_window_label, "Off peak")
+        self.assertEqual(advice.next_window, advice.next_lower_cost_window)
+        self.assertEqual(advice.tariff_next_label, "Off peak")
+        self.assertEqual(advice.lowest_cost_window, "Super off peak from 9:00 AM")
+        self.assertTrue(advice.lowest_cost_window_start.endswith("09:00:00+08:00"))
+        self.assertEqual(advice.lowest_cost_window_label, "Super off peak")
+        self.assertEqual(advice.recommended_wait_minutes, 180)
+        self.assertAlmostEqual(advice.per_kwh_difference, 0.3015)
+        self.assertIn("next cheaper window", advice.explanation)
+        self.assertIn("lowest-cost window", advice.explanation)
+
+    def test_multistep_tariff_separates_next_lower_from_lowest_cost(self):
+        settings = Settings(
+            import_rates={
+                "super_off_peak": 0.25,
+                "overnight": 0.10,
+                "off_peak": 0.30,
+                "peak": 0.55,
+            }
+        )
+
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=settings,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[],
+            projected_bill=220.0,
+            now=datetime(2026, 6, 27, 18, tzinfo=LOCAL),
+        )
+
+        self.assertEqual(advice.next_lower_cost_window, "Off peak from 9:00 PM")
+        self.assertEqual(advice.lowest_cost_window, "Overnight from 11:00 PM")
+        self.assertEqual(advice.next_lower_cost_window_rate, 0.30)
+        self.assertEqual(advice.lowest_cost_window_rate, 0.10)
+        self.assertEqual(advice.recommended_wait_minutes, 180)
 
     def test_solar_export_alone_waits_outside_super_off_peak(self):
         advice = ChargingAdvisor().advise(
@@ -146,6 +185,24 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.charger_data_status, "estimated_fallback")
         self.assertIn("report freshness", advice.confidence_reason)
         self.assertEqual(advice.next_window, "Overnight from 11:00 PM")
+        self.assertEqual(advice.lowest_cost_window, "Super off peak from 9:00 AM")
+
+    def test_charging_advice_serializes_refined_tariff_windows(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[],
+            projected_bill=80.0,
+            now=datetime(2026, 6, 27, 18, tzinfo=LOCAL),
+        )
+
+        data = advice.as_dict()
+
+        self.assertEqual(data["next_lower_cost_window"], "Off peak from 9:00 PM")
+        self.assertEqual(data["lowest_cost_window"], "Super off peak from 9:00 AM")
+        self.assertEqual(data["recommended_wait_minutes"], 180)
 
 
 if __name__ == "__main__":
