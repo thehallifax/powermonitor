@@ -257,6 +257,38 @@ class Recommendation:
         return data
 
 
+@dataclass(frozen=True)
+class EvidenceItem:
+    """One ordered evidence point used by an advisor."""
+
+    source: str
+    observation: str
+    impact: str
+    confidence: str
+    freshness: Optional[str] = None
+    financial_contribution: Optional[FinancialImpact] = None
+
+    def __post_init__(self) -> None:
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported evidence confidence: {self.confidence}")
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if isinstance(self.financial_contribution, FinancialImpact):
+            data["financial_contribution"] = self.financial_contribution.as_dict()
+        return data
+
+
+@dataclass(frozen=True)
+class EvidenceTrail:
+    """Ordered explanation of why an advisor reached its conclusion."""
+
+    items: list[EvidenceItem] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"items": [item.as_dict() for item in self.items]}
+
+
 @dataclass
 class ChargingAdvice:
     """Presentation-agnostic answer to whether EV charging should happen now."""
@@ -281,6 +313,7 @@ class ChargingAdvice:
     ev_session_freshness: str
     solar_data_status: str
     confidence_reason: str
+    evidence_trail: EvidenceTrail
 
     def __post_init__(self) -> None:
         if self.status not in CHARGING_ADVICE_STATUSES:

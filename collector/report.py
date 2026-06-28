@@ -2276,6 +2276,7 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         if charging_advice.per_kwh_difference is not None
         else "Unavailable"
     )
+    reasoning = evidence_trail_html(charging_advice)
     return f"""
     <section class="source-status {tone}">
       <div><span>Charging Advisor</span><h2>{html.escape(charging_advice.headline)}</h2></div>
@@ -2290,7 +2291,36 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         {metric("EV data", charging_advice.charger_data_status.replace("_", " "), charging_advice.ev_session_freshness, "ev")}
         {metric("Solar data", charging_advice.solar_data_status, "Daily summary only; no live surplus assumption", "solar")}
       </div>
+      {reasoning}
     </section>
+    """
+
+
+def evidence_trail_html(charging_advice: ChargingAdvice) -> str:
+    items = getattr(charging_advice.evidence_trail, "items", [])
+    if not items:
+        return ""
+    rows = []
+    for item in items:
+        contribution = ""
+        if item.financial_contribution and item.financial_contribution.today is not None:
+            contribution = f"<small>{html.escape(money(item.financial_contribution.today))} per kWh</small>"
+        rows.append(
+            f"""
+            <li>
+              <span>{html.escape(item.source)}</span>
+              <strong>{html.escape(item.observation)}</strong>
+              <p>{html.escape(item.impact)}</p>
+              <small>{html.escape(item.confidence)} confidence · {html.escape(item.freshness or "Freshness unavailable")}</small>
+              {contribution}
+            </li>
+            """
+        )
+    return f"""
+      <details class="evidence-trail">
+        <summary>Why?</summary>
+        <ol>{''.join(rows)}</ol>
+      </details>
     """
 
 
@@ -2962,6 +2992,14 @@ def write_html(
     .decision-explanation-grid span {{ display:block; margin-bottom:3px; color:var(--ink); font-size:8px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .decision-explanation-grid p,.decision-explanation-grid li {{ color:var(--muted); font-size:12px; line-height:1.4; }}
     .decision-explanation-grid ul {{ margin:0; padding-left:18px; }}
+    .evidence-trail {{ margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,.08); }}
+    .evidence-trail summary {{ cursor:pointer; color:var(--ink); font-size:12px; font-weight:850; }}
+    .evidence-trail ol {{ display:grid; gap:10px; margin:12px 0 0; padding-left:20px; }}
+    .evidence-trail li {{ color:var(--muted); font-size:12px; line-height:1.4; }}
+    .evidence-trail li span,.evidence-trail li strong,.evidence-trail li small {{ display:block; }}
+    .evidence-trail li span {{ color:var(--ink); font-size:8px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .evidence-trail li strong {{ margin-top:2px; color:var(--ink); font-size:13px; }}
+    .evidence-trail li p {{ margin:3px 0; }}
     .briefing-card.green {{ background:#f3fbf7; }} .briefing-card.amber {{ background:#fffaf0; }} .briefing-card.red {{ background:#fff5f3; }}
     .briefing-block {{ display:grid; gap:14px; }}
     .briefing-block .section-title {{ margin:0; }}

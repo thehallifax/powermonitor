@@ -1,5 +1,17 @@
 # Changelog
 
+## Sprint 1.0.2 - Advisor Evidence
+
+- Added shared `EvidenceItem` and `EvidenceTrail` models for ordered advisor
+  reasoning.
+- Added `evidence_trail` to `ChargingAdvice` with tariff, solar, EV-session,
+  recommendation-context, and final recommendation evidence items.
+- Added a compact expandable `Why?` section to the Home Charging Advisor card.
+- Kept Charging Advisor recommendation logic unchanged while making the
+  reasoning auditable through the API and report.
+- Added Evidence Trail model, serialization, advisor ordering, and rendering
+  tests.
+
 ## Sprint 1.0.1 - Charging Advisor Context
 
 - Expanded `ChargingAdvice` with current and next tariff-window context,

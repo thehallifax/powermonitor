@@ -9,7 +9,7 @@ markup and it does not forecast future appliance behaviour.
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
-from .models import ChargingAdvice, Decision, FinancialImpact
+from .models import ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact
 
 TARIFF_LABELS = {
     "overnight": "Overnight",
@@ -80,6 +80,23 @@ class ChargingAdvisor:
         }
 
         if not available:
+            evidence_trail = self._evidence_trail(
+                bucket=bucket,
+                next_bucket=next_bucket,
+                tariff_now_rate=tariff_now_rate,
+                tariff_next_rate=tariff_next_rate,
+                per_kwh_difference=per_kwh_difference,
+                freshness=freshness,
+                solar_status=solar_status,
+                solar_data_status=solar_data_status,
+                ev_session_freshness=ev_session_freshness,
+                bill_is_high=bill_is_high,
+                top_priority=top_priority,
+                status="UNKNOWN",
+                headline="Charging advice needs fresher data",
+                benefit=None,
+                advice_confidence="Low",
+            )
             return ChargingAdvice(
                 status="UNKNOWN",
                 headline="Charging advice needs fresher data",
@@ -104,6 +121,7 @@ class ChargingAdvisor:
                 ev_session_freshness=ev_session_freshness,
                 solar_data_status=solar_data_status,
                 confidence_reason=confidence_reason,
+                evidence_trail=evidence_trail,
             )
 
         benefit = self._financial_benefit(bucket, per_kwh_benefit)
@@ -142,6 +160,23 @@ class ChargingAdvisor:
             explanation += " The current billing position is already flagged as high, so avoiding avoidable charging cost matters more."
         if top_priority is not None and top_priority >= 67:
             evidence["recommendation_pressure"] = "high"
+        evidence_trail = self._evidence_trail(
+            bucket=bucket,
+            next_bucket=next_bucket,
+            tariff_now_rate=tariff_now_rate,
+            tariff_next_rate=tariff_next_rate,
+            per_kwh_difference=per_kwh_difference,
+            freshness=freshness,
+            solar_status=solar_status,
+            solar_data_status=solar_data_status,
+            ev_session_freshness=ev_session_freshness,
+            bill_is_high=bill_is_high,
+            top_priority=top_priority,
+            status=status,
+            headline=headline,
+            benefit=benefit,
+            advice_confidence=confidence,
+        )
 
         return ChargingAdvice(
             status=status,
@@ -164,6 +199,7 @@ class ChargingAdvisor:
             ev_session_freshness=ev_session_freshness,
             solar_data_status=solar_data_status,
             confidence_reason=confidence_reason,
+            evidence_trail=evidence_trail,
         )
 
     def _data_is_available(self, today_summary: Any, billing_summary: Any, health: dict[str, Any]) -> tuple[bool, str, str]:
@@ -269,6 +305,90 @@ class ChargingAdvisor:
             return "High confidence for tariff timing, with solar context unavailable today."
         return "High confidence because tariff timing and today's interval data are fresh."
 
+    def _evidence_trail(
+        self,
+        *,
+        bucket: str,
+        next_bucket: str,
+        tariff_now_rate: Optional[float],
+        tariff_next_rate: Optional[float],
+        per_kwh_difference: Optional[float],
+        freshness: str,
+        solar_status: str,
+        solar_data_status: str,
+        ev_session_freshness: str,
+        bill_is_high: bool,
+        top_priority: Optional[int],
+        status: str,
+        headline: str,
+        benefit: Optional[FinancialImpact],
+        advice_confidence: str,
+    ) -> EvidenceTrail:
+        items = [
+            EvidenceItem(
+                source="Current tariff",
+                observation=f"{TARIFF_LABELS[bucket]} ({_rate_text(tariff_now_rate)})",
+                impact="Sets the cost of charging if the EV is charged now.",
+                confidence="High",
+                freshness="Configured tariff schedule",
+            ),
+            EvidenceItem(
+                source="Next tariff",
+                observation=f"{TARIFF_LABELS[next_bucket]} ({_rate_text(tariff_next_rate)})",
+                impact=(
+                    f"Next-window difference is {_money_per_kwh(per_kwh_difference)}."
+                    if per_kwh_difference is not None
+                    else "Next-window tariff comparison is unavailable."
+                ),
+                confidence="High",
+                freshness="Configured tariff schedule",
+                financial_contribution=(
+                    FinancialImpact(today=per_kwh_difference, basis="current tariff minus next recommended tariff")
+                    if per_kwh_difference is not None
+                    else None
+                ),
+            ),
+            EvidenceItem(
+                source="Solar data",
+                observation=solar_status,
+                impact=solar_data_status,
+                confidence="Low" if "No solar interval" in solar_data_status else advice_confidence,
+                freshness=freshness,
+            ),
+            EvidenceItem(
+                source="EV sessions",
+                observation=ev_session_freshness,
+                impact="Used only as charging-history context; no live charger state is assumed.",
+                confidence="High" if "Actual EV session" in ev_session_freshness else "Medium",
+                freshness="Current billing period",
+            ),
+        ]
+        if bill_is_high or top_priority is not None:
+            items.append(
+                EvidenceItem(
+                    source="Recommendation context",
+                    observation=(
+                        "High billing-cost recommendation is active."
+                        if bill_is_high
+                        else f"Top active recommendation priority score is {top_priority}."
+                    ),
+                    impact="Raises the importance of avoiding avoidable charging cost.",
+                    confidence=advice_confidence,
+                    freshness=freshness,
+                )
+            )
+        items.append(
+            EvidenceItem(
+                source="Recommendation",
+                observation=headline,
+                impact=f"Advisor status: {status.replace('_', ' ')}.",
+                confidence=advice_confidence,
+                freshness=freshness,
+                financial_contribution=benefit,
+            )
+        )
+        return EvidenceTrail(items=items)
+
 
 def solar_signal(today_summary: Any) -> tuple[str, bool]:
     generated = float(getattr(today_summary, "solar_generated_kwh", 0.0) or 0.0)
@@ -317,3 +437,15 @@ def next_recommended_window(now: datetime, current_bucket: str) -> tuple[str, st
     bucket = "super_off_peak" if target == next_super else "overnight"
     label = "super off-peak" if bucket == "super_off_peak" else "overnight"
     return bucket, f"{label.title()} from {target.strftime('%-I:%M %p')}", target
+
+
+def _rate_text(rate: Optional[float]) -> str:
+    if rate is None:
+        return "rate unavailable"
+    return f"{rate * 100:.2f} c/kWh"
+
+
+def _money_per_kwh(value: Optional[float]) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{value * 100:.2f} c/kWh"
