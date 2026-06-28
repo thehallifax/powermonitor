@@ -18,11 +18,13 @@ from typing import Any, Callable, Optional
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
 from .models import (
     Account,
+    CapabilityStatus,
     DecisionTimeline,
     EngineStatus,
     Evidence,
     Freshness,
     Household,
+    HouseholdCapabilitySummary,
     HouseholdCapability,
     HouseholdContext,
     HouseholdMembership,
@@ -1430,6 +1432,182 @@ class DataEngine:
             result["current_billing_period_end"] = bill_period.end.isoformat()
         return result
 
+    def get_household_capability_summary(
+        self,
+        today: date,
+        settings: Any = None,
+    ) -> HouseholdCapabilitySummary:
+        household_id = self._active_household_id()
+        health = self.health_loader()
+        import_rates = getattr(settings, "import_rates", None) if settings is not None else None
+        tariff_configured = _tariff_configured(import_rates)
+
+        def query(conn):
+            self.validate_connection(conn)
+            latest_row = conn.execute(
+                """
+                SELECT MAX(measurement_time)
+                FROM readings
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            latest = latest_row[0] if latest_row else None
+            freshness = freshness_from_latest(latest, today)
+            reading_row = conn.execute(
+                """
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(ABS(COALESCE(grid_to_home_kwh, 0))), 0),
+                    COALESCE(SUM(ABS(COALESCE(production_kwh, 0))), 0),
+                    COALESCE(SUM(ABS(COALESCE(solar_to_home_kwh, 0))), 0),
+                    COALESCE(SUM(ABS(COALESCE(solar_to_grid_kwh, 0))), 0),
+                    COALESCE(SUM(ABS(COALESCE(import_cost, 0))), 0)
+                FROM readings
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            ev_row = conn.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(energy_kwh), 0)
+                FROM ev_sessions
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            import_job_count = 0
+            if DataEngine._table_exists(conn, "import_jobs"):
+                import_job_count = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM import_jobs
+                    WHERE household_id = ?
+                    """,
+                    (household_id,),
+                ).fetchone()[0]
+
+            reading_count = int(reading_row[0] or 0)
+            grid_kwh = float(reading_row[1] or 0)
+            solar_kwh = sum(float(reading_row[index] or 0) for index in (2, 3, 4))
+            import_cost = float(reading_row[5] or 0)
+            ev_sessions = int(ev_row[0] or 0)
+            ev_kwh = float(ev_row[1] or 0)
+            collector_available = bool(
+                health
+                or (self.collect_log_path and self.collect_log_path.exists())
+                or reading_count
+            )
+            capabilities = [
+                CapabilityStatus(
+                    "solar",
+                    "Solar",
+                    present=solar_kwh > 0,
+                    source="readings",
+                    confidence="High" if solar_kwh > 0 else "Medium",
+                    reason=(
+                        f"Detected {solar_kwh:.2f} kWh of solar production/export readings."
+                        if solar_kwh > 0 else
+                        "No solar production or export readings found for this household."
+                    ),
+                    freshness=freshness if solar_kwh > 0 else None,
+                ),
+                CapabilityStatus(
+                    "ev",
+                    "EV charging",
+                    present=ev_sessions > 0 and ev_kwh > 0,
+                    available=True,
+                    source="ev_sessions",
+                    confidence="High" if ev_sessions > 0 and ev_kwh > 0 else "Medium",
+                    reason=(
+                        f"Detected {ev_sessions} EV charging session rows."
+                        if ev_sessions > 0 and ev_kwh > 0 else
+                        "No persisted EV charging sessions found; Ocular upload can add this data."
+                    ),
+                ),
+                CapabilityStatus(
+                    "battery",
+                    "Battery",
+                    present=False,
+                    available=False,
+                    source="placeholder",
+                    confidence="Low",
+                    reason="Battery detection is reserved for a future supported data source.",
+                ),
+                CapabilityStatus(
+                    "grid_smart_meter",
+                    "Grid / smart meter",
+                    present=reading_count > 0 and grid_kwh >= 0,
+                    source="readings",
+                    confidence="High" if reading_count else "Medium",
+                    reason=(
+                        f"Detected {reading_count} household interval readings."
+                        if reading_count else
+                        "No household interval readings found."
+                    ),
+                    freshness=freshness if reading_count else None,
+                ),
+                CapabilityStatus(
+                    "tariff",
+                    "Tariff",
+                    configured=tariff_configured or import_cost > 0,
+                    source="settings" if tariff_configured else "readings" if import_cost > 0 else None,
+                    confidence="High" if tariff_configured else "Medium" if import_cost > 0 else "Low",
+                    reason=(
+                        "Tariff rates are configured in settings."
+                        if tariff_configured else
+                        "Import costs exist in readings but configured tariff rates are missing."
+                        if import_cost > 0 else
+                        "No configured tariff rates or import cost evidence found."
+                    ),
+                ),
+                CapabilityStatus(
+                    "imports",
+                    "Imports",
+                    present=import_job_count > 0,
+                    available=True,
+                    source="import_framework",
+                    confidence="High",
+                    reason=(
+                        f"{import_job_count} import job records are available."
+                        if import_job_count else
+                        "Ocular EV charging history upload is available."
+                    ),
+                ),
+                CapabilityStatus(
+                    "live_local_collector",
+                    "Live/local collector",
+                    present=collector_available,
+                    source="collector_health",
+                    confidence="High" if collector_available else "Low",
+                    reason=(
+                        "Collector health, logs, or local readings are available."
+                        if collector_available else
+                        "No local collector health or readings found."
+                    ),
+                ),
+                CapabilityStatus(
+                    "data_freshness",
+                    "Data freshness",
+                    present=freshness.state in {"fresh", "stale"},
+                    source="readings",
+                    confidence="High" if latest else "Low",
+                    reason=(
+                        f"Latest reading timestamp is {latest}."
+                        if latest else
+                        "No latest reading timestamp is available."
+                    ),
+                    freshness=freshness,
+                ),
+            ]
+            return HouseholdCapabilitySummary(
+                household_id=household_id,
+                generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                capabilities=capabilities,
+            )
+
+        return self._with_connection(query)
+
     def get_latest_household_snapshot(
         self,
         today: date,
@@ -1506,6 +1684,18 @@ def format_duration(minutes: Optional[float]) -> str:
     total = max(int(round(minutes)), 0)
     hours, remainder = divmod(total, 60)
     return f"{hours}h {remainder:02d}m"
+
+
+def _tariff_configured(import_rates: Any) -> bool:
+    if not isinstance(import_rates, dict):
+        return False
+    required = {"overnight", "off_peak", "super_off_peak", "peak"}
+    if not required.issubset(import_rates.keys()):
+        return False
+    try:
+        return all(float(import_rates[bucket]) > 0 for bucket in required)
+    except (TypeError, ValueError):
+        return False
 
 
 def freshness_from_latest(latest_measurement: Optional[str], today: date) -> Freshness:

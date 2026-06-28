@@ -52,6 +52,7 @@ ACTION_TYPE_BY_ID = {
     "ev_session_low_cost_window": "maintain",
     "ev_session_peak_shift": "load_shift",
     "data_quality_actual_ev_sessions": "data_quality",
+    "data_quality_tariff_setup": "data_quality",
     "trend_repeated_peak_usage": "trend_review",
     "trend_bill_trajectory_improving": "trend_review",
     "trend_bill_trajectory_worsening": "trend_review",
@@ -99,6 +100,7 @@ class RecommendationEngine:
                 self._baseload_monitoring(observations, thresholds),
                 self._positive_reinforcement(observations, thresholds),
                 self._data_quality_actual_ev_sessions(observations, thresholds),
+                self._data_quality_tariff_setup(observations, thresholds),
             )
             if item is not None
         ]
@@ -382,6 +384,30 @@ class RecommendationEngine:
             basis="data source coverage",
         )
 
+    def _data_quality_tariff_setup(self, context: dict[str, Any], thresholds: dict[str, Any]) -> Optional[Recommendation]:
+        capability_summary = context.get("capability_summary") or {}
+        tariff = _capability(capability_summary, "tariff")
+        if tariff and tariff.get("usable"):
+            return None
+        if not tariff and context.get("import_rates"):
+            return None
+        return self._recommendation(
+            stable_id="data_quality_tariff_setup",
+            category="data_quality",
+            title="Complete tariff setup",
+            explanation="Tariff rates are not configured, so cost and charging recommendations may be unavailable.",
+            period_impact=None,
+            monthly_impact=None,
+            confidence="High",
+            difficulty="Easy",
+            evidence={
+                "capability": "tariff",
+                "reason": tariff.get("reason") if tariff else "Tariff capability was not detected.",
+            },
+            action="Add the household tariff rates before relying on cost, plan, or charging recommendations.",
+            basis="household capability detection",
+        )
+
     def _trend_recommendations(self, context: dict[str, Any], thresholds: dict[str, Any]) -> list[Recommendation]:
         entries = list(getattr(context.get("timeline_history"), "entries", []) or [])
         if not entries:
@@ -618,12 +644,24 @@ def build_recommendation_context(
         "overnight_baseload_watts": overnight_baseload,
         "timeline_history": timeline_history,
         "recommendation_lifecycle": recommendation_lifecycle,
+        "capability_summary": (
+            data_engine.get_household_capability_summary(end, settings).as_dict()
+            if hasattr(data_engine, "get_household_capability_summary")
+            else {}
+        ),
         "household_id": household_context.household.household_id if household_context else None,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
         "projected_net_cost": projected_bill[0],
         "projected_bill_impact": projected_bill[3],
     }
+
+
+def _capability(summary: dict[str, Any], capability_id: str) -> dict[str, Any]:
+    for capability in summary.get("capabilities", []):
+        if capability.get("capability_id") == capability_id:
+            return capability
+    return {}
 
 
 def generate_ev_session_recommendations(sessions: list[dict[str, Any]], import_rates: dict[str, float]) -> list[Recommendation]:

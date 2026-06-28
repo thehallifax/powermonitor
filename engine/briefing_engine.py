@@ -33,7 +33,11 @@ class BriefingEngine:
     ) -> DailyBriefing:
         active_household = household_context or self.household_context
         if active_household and advisors.household is None:
-            advisors = AdvisorCollection(advisors.advisors, household=active_household.household)
+            advisors = AdvisorCollection(
+                advisors.advisors,
+                household=active_household.household,
+                capability_summary=advisors.capability_summary,
+            )
         ordered = advisors.active()
         priorities = _orchestrated_section(ordered, "priority")[:1]
         used_advisor_ids = _supporting_ids(priorities)

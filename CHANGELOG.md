@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-004 - Capability Detection
+
+- Added household capability detection for solar, EV, battery placeholder,
+  grid/smart meter, tariff, imports, live/local collector, and data freshness.
+- Exposed a Data Engine household capability summary and serialized it through
+  the dashboard API.
+- Made `AdvisorCollection` capability-aware so Home, Briefing, Goals, and the
+  Recommendation Centre only activate advisors supported by detected household
+  data.
+- Added System page capability status and Imports page capability hints for
+  Ocular EV upload availability.
+- Added a data-quality recommendation for missing tariff setup.
+- Added capability detection, advisor activation, API serialization, and setup
+  recommendation regression tests.
+
 ## PB-003 - Import Framework and Web Upload
 
 - Added shared household-scoped import contracts for jobs, sources, previews,

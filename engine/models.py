@@ -14,8 +14,12 @@ HOUSEHOLD_CAPABILITIES = (
     "solar",
     "ev",
     "battery",
+    "grid_smart_meter",
     "tariff",
     "billing",
+    "imports",
+    "live_local_collector",
+    "data_freshness",
     "baseload",
     "recommendations",
 )
@@ -231,6 +235,77 @@ class HouseholdContext:
         }
 
 
+@dataclass(frozen=True)
+class CapabilityStatus:
+    """Detected setup state for one household capability."""
+
+    capability_id: str
+    label: str
+    present: bool = False
+    configured: bool = False
+    available: bool = False
+    source: Optional[str] = None
+    confidence: str = "Medium"
+    reason: str = ""
+    freshness: Optional[Freshness] = None
+
+    def __post_init__(self) -> None:
+        if self.capability_id not in HOUSEHOLD_CAPABILITIES:
+            raise ValueError(f"Unsupported household capability: {self.capability_id}")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"Unsupported capability confidence: {self.confidence}")
+
+    @property
+    def enabled(self) -> bool:
+        return self.present or self.configured or self.available
+
+    @property
+    def usable(self) -> bool:
+        return self.present or self.configured
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["enabled"] = self.enabled
+        data["usable"] = self.usable
+        if self.freshness:
+            data["freshness"] = self.freshness.__dict__
+        return data
+
+
+@dataclass(frozen=True)
+class HouseholdCapabilitySummary:
+    """Detected capability map for one household."""
+
+    household_id: str
+    generated_at: str
+    capabilities: list[CapabilityStatus] = field(default_factory=list)
+
+    def get(self, capability_id: str) -> Optional[CapabilityStatus]:
+        for capability in self.capabilities:
+            if capability.capability_id == capability_id:
+                return capability
+        return None
+
+    def is_enabled(self, capability_id: str) -> bool:
+        capability = self.get(capability_id)
+        return bool(capability and capability.usable)
+
+    def missing_required(self, required: list[str]) -> list[str]:
+        return [capability_id for capability_id in required if not self.is_enabled(capability_id)]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "household_id": self.household_id,
+            "generated_at": self.generated_at,
+            "capabilities": [capability.as_dict() for capability in self.capabilities],
+            "enabled": [
+                capability.capability_id
+                for capability in self.capabilities
+                if capability.enabled
+            ],
+        }
+
+
 @dataclass
 class Decision:
     """Actionable recommendation emitted by the Decision Engine."""
@@ -426,17 +501,60 @@ class AdvisorCollection:
 
     advisors: list[Advisor] = field(default_factory=list)
     household: Optional[Household] = None
+    capability_summary: Optional[HouseholdCapabilitySummary] = None
 
     def active(self) -> list[Advisor]:
-        return sorted(self.advisors, key=_advisor_sort_key)
+        return sorted(
+            [
+                advisor for advisor in self.advisors
+                if self._advisor_capabilities_present(advisor)
+            ],
+            key=_advisor_sort_key,
+        )
+
+    def inactive(self) -> list[dict[str, Any]]:
+        if not self.capability_summary:
+            return []
+        inactive = []
+        for advisor in self.advisors:
+            missing = self.capability_summary.missing_required(
+                required_capabilities_for_advisor(advisor.advisor_type)
+            )
+            if missing:
+                inactive.append(
+                    {
+                        "advisor_id": advisor.advisor_id,
+                        "advisor_type": advisor.advisor_type,
+                        "missing_capabilities": missing,
+                    }
+                )
+        return inactive
+
+    def _advisor_capabilities_present(self, advisor: Advisor) -> bool:
+        if not self.capability_summary:
+            return True
+        return not self.capability_summary.missing_required(
+            required_capabilities_for_advisor(advisor.advisor_type)
+        )
 
     def as_dict(self) -> dict[str, Any]:
         ordered = self.active()
         return {
             "advisors": [advisor.as_dict() for advisor in ordered],
             "count": len(ordered),
+            "inactive": self.inactive(),
             "household": self.household.as_dict() if self.household else None,
+            "capability_summary": self.capability_summary.as_dict() if self.capability_summary else None,
         }
+
+
+def required_capabilities_for_advisor(advisor_type: str) -> list[str]:
+    return {
+        "EV_CHARGING": ["ev", "tariff"],
+        "COST": ["grid_smart_meter", "tariff"],
+        "SOLAR": ["solar", "grid_smart_meter"],
+        "EFFICIENCY": ["grid_smart_meter"],
+    }.get(advisor_type, [])
 
 
 @dataclass(frozen=True)

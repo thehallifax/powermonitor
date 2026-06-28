@@ -305,6 +305,7 @@ def dashboard_data(
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
+        capability_summary = context_engine.get_household_capability_summary(current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings, household_context)
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
@@ -370,7 +371,11 @@ def dashboard_data(
         generated_at,
         household_context,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency], household=household_context.household)
+    advisors = AdvisorCollection(
+        [charging_advice.advisor, cost, solar, efficiency],
+        household=household_context.household,
+        capability_summary=capability_summary,
+    )
     briefing = briefing_engine(household_context).build(advisors, current_day)
     goals = goals_engine(household_context).evaluate(advisors)
     return {
@@ -378,6 +383,7 @@ def dashboard_data(
         "household": household_context.household.as_dict(),
         "account": household_context.account.as_dict(),
         "household_membership": household_context.membership.as_dict(),
+        "capability_summary": capability_summary.as_dict(),
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -2864,7 +2870,30 @@ def data_completeness_html(summary: Summary, settings: Settings) -> str:
     """
 
 
-def system_page_html(health: dict, settings: Settings, summary: Summary) -> str:
+def capability_summary_html(capability_summary) -> str:
+    if not capability_summary:
+        return ""
+    rows = []
+    for capability in capability_summary.capabilities:
+        state = "Ready" if capability.enabled else "Not detected"
+        rows.append(
+            f"""
+            <div class="completeness-row {'good' if capability.enabled else 'bad'}">
+              <span>{html.escape(capability.label)}</span>
+              <strong>{html.escape(state)}</strong>
+              <small>{html.escape(capability.reason)}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Capability summary</h3><span>Household scoped</span></div>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
+def system_page_html(health: dict, settings: Settings, summary: Summary, capability_summary=None) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
         f"<tr><td>{html.escape(item['source'])}</td><td>{item['sessions']}</td><td>{kwh(item['energy_kwh'])}</td><td>{money(item['cost'])}</td></tr>"
@@ -2889,6 +2918,7 @@ def system_page_html(health: dict, settings: Settings, summary: Summary) -> str:
         {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
       </div>
       <div class="system-grid">
+        {capability_summary_html(capability_summary)}
         {data_completeness_html(summary, settings)}
         <div class="system-card">
           <div class="chart-heading"><h3>EV source counts</h3><span>Grouped by source</span></div>
@@ -2908,7 +2938,7 @@ def system_page_html(health: dict, settings: Settings, summary: Summary) -> str:
     """
 
 
-def imports_page_html(history: Optional[list[dict]] = None) -> str:
+def imports_page_html(history: Optional[list[dict]] = None, capability_summary=None) -> str:
     try:
         history = history if history is not None else data_engine().get_import_history()
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
@@ -2930,9 +2960,21 @@ def imports_page_html(history: Optional[list[dict]] = None) -> str:
     else:
         rows = '<tr><td colspan="5">No import history yet.</td></tr>'
 
+    capability_note = ""
+    if capability_summary:
+        ev = capability_summary.get("ev")
+        imports = capability_summary.get("imports")
+        capability_note = f"""
+        <div class="config-grid">
+          <div><span>Upload can add</span><strong>{html.escape(ev.label if ev else "EV charging")}</strong></div>
+          <div><span>Import framework</span><strong>{html.escape("Available" if imports and imports.available else "Unavailable")}</strong></div>
+        </div>
+        """
+
     return f"""
     <section class="report-section import-panel">
       <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Ocular EV charging history</p></div>
+      {capability_note}
       <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
         <label><span>Supported file</span><input type="file" name="import_file" accept=".xlsx,.xlsm" required></label>
         <button type="submit">Preview import</button>
@@ -3113,6 +3155,10 @@ def write_html(
     timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
     billing_summary = billing_summary or period_summary
     household_context = report_household_context()
+    try:
+        capability_summary = data_engine().get_household_capability_summary(local_today(), settings)
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        capability_summary = None
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
@@ -3164,7 +3210,11 @@ def write_html(
         generated_dt,
         household_context,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency], household=household_context.household)
+    advisors = AdvisorCollection(
+        [charging_advice.advisor, cost, solar, efficiency],
+        household=household_context.household,
+        capability_summary=capability_summary,
+    )
     briefing = briefing_engine(household_context).build(advisors, local_today())
     goals = goals_engine(household_context).evaluate(advisors)
     glance = build_glance_state(
@@ -3228,11 +3278,11 @@ def write_html(
   </section>
   <section id="imports" class="page">
     <div class="page-heading"><h2>Upload household data</h2><p>Preview and import supported local household exports.</p></div>
-    {imports_page_html()}
+    {imports_page_html(capability_summary=capability_summary)}
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary)}
   </section>
 """
     )

@@ -26,7 +26,11 @@ class GoalsEngine:
     ) -> list[GoalProgress]:
         active_household = household_context or self.household_context
         if active_household and advisors.household is None:
-            advisors = AdvisorCollection(advisors.advisors, household=active_household.household)
+            advisors = AdvisorCollection(
+                advisors.advisors,
+                household=active_household.household,
+                capability_summary=advisors.capability_summary,
+            )
         ordered = advisors.active()
         return [
             self._progress_for_goal(goal, ordered)
