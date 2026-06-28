@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from engine.charging_advisor import ChargingAdvisor
+from engine.cost_advisor import CostAdvisor
 from engine.data_engine import DataEngine
 from engine.decision_engine import (
     Decision,
@@ -61,6 +62,10 @@ def financial_engine() -> FinancialEngine:
 
 def charging_advisor() -> ChargingAdvisor:
     return ChargingAdvisor()
+
+
+def cost_advisor() -> CostAdvisor:
+    return CostAdvisor()
 
 
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
@@ -217,6 +222,11 @@ def dashboard_data(
     settings = load_settings()
     selected = resolve_period(period_kind, settings, current_day, start, end)
     billing = resolve_period("current_billing_period", settings, current_day)
+    compared = (
+        resolve_period("previous_billing_period", settings, current_day)
+        if selected.kind == "current_billing_period"
+        else previous_equivalent(selected)
+    )
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
     with sqlite3.connect(DB_PATH) as conn:
@@ -228,13 +238,15 @@ def dashboard_data(
             if selected.start == billing.start and selected.end == billing.end
             else load_summary(conn, billing.start, billing.end, settings)
         )
+        compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings)
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
-        timeline_candidates = build_decision_timeline(period_summary, recommendations)
+        comparison = compare_summaries(selected, period_summary, compared, compared_summary)
+        timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
@@ -259,7 +271,17 @@ def dashboard_data(
         glance_projected,
         generated_at,
     )
-    advisors = AdvisorCollection([charging_advice.advisor])
+    cost = build_cost_advisor(
+        period_summary,
+        compared_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        comparison,
+        generated_at,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost])
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "ev_data_source": settings.ev_data_source,
@@ -278,6 +300,7 @@ def dashboard_data(
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": timeline.as_dict(),
+        "comparison": comparison,
         "advisors": advisors.as_dict(),
         "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
@@ -967,6 +990,28 @@ def build_charging_advice(
         health=health,
         recommendations=recommendations,
         projected_bill=projected_bill,
+        now=now,
+    )
+
+
+def build_cost_advisor(
+    current_summary: Summary,
+    previous_summary: Optional[Summary],
+    settings: Settings,
+    health: dict,
+    recommendations: list[Decision],
+    timeline: Optional[DecisionTimeline],
+    comparison: Optional[dict],
+    now: datetime,
+) -> Advisor:
+    return cost_advisor().advise(
+        current_summary=current_summary,
+        previous_summary=previous_summary,
+        settings=settings,
+        recommendations=recommendations,
+        timeline=timeline,
+        health=health,
+        comparison=comparison,
         now=now,
     )
 
@@ -2291,8 +2336,39 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
 def home_page_html(
     briefing: DailyBriefing,
     charging_advice: ChargingAdvice,
+    advisors: Optional[list[Advisor]] = None,
 ) -> str:
-    return charging_advice_home_html(charging_advice) + daily_briefing_html(briefing)
+    advisors = advisors or []
+    cost = next((advisor for advisor in advisors if advisor.advisor_id == "cost_advisor"), None)
+    cost_html = advisor_home_html(cost) if cost else ""
+    return cost_html + charging_advice_home_html(charging_advice) + daily_briefing_html(briefing)
+
+
+def advisor_home_html(advisor: Advisor) -> str:
+    tone = {
+        "IMPROVING": "green",
+        "ON_TRACK": "green",
+        "SLIGHTLY_HIGH": "amber",
+        "HIGH": "red",
+        "UNKNOWN": "amber",
+    }.get(advisor.status, "amber")
+    impact = advisor.estimated_financial_impact
+    impact_text = "Not quantified"
+    if impact and impact.billing_period is not None:
+        impact_text = money(impact.billing_period)
+    return f"""
+    <section class="source-status {tone}">
+      <div><span>{html.escape(advisor.advisor_type.replace("_", " ").title())} Advisor</span><h2>{html.escape(advisor.headline)}</h2></div>
+      <p>{html.escape(advisor.summary)}</p>
+      <div class="metrics">
+        {metric("Status", advisor.status.replace("_", " "), "Shared Advisor", "cost")}
+        {metric("Projection impact", impact_text, impact.basis if impact and impact.basis else "Financial Engine", "cost")}
+        {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
+        {metric("Next review", advisor.next_review_time or "Unavailable", advisor.freshness, "solar")}
+      </div>
+      {evidence_trail_html(advisor)}
+    </section>
+    """
 
 
 def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
@@ -2750,7 +2826,18 @@ def write_html(
         glance_projected,
         generated_dt,
     )
-    advisors = AdvisorCollection([charging_advice.advisor])
+    previous_summary = comparison.get("summary_b") if comparison else None
+    cost = build_cost_advisor(
+        period_summary,
+        previous_summary,
+        settings,
+        health,
+        recommendations,
+        timeline,
+        comparison,
+        generated_dt,
+    )
+    advisors = AdvisorCollection([charging_advice.advisor, cost])
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -2776,7 +2863,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, charging_advice)}
+    {home_page_html(briefing, charging_advice, advisors.active())}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>

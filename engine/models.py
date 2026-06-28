@@ -11,7 +11,12 @@ CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
 DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
 CHARGING_ADVICE_STATUSES = ("CHARGE_NOW", "WAIT", "AVOID", "UNKNOWN")
-ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES
+ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES + (
+    "ON_TRACK",
+    "SLIGHTLY_HIGH",
+    "HIGH",
+    "IMPROVING",
+)
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
 
@@ -383,9 +388,13 @@ class ChargingAdvice:
 def _advisor_sort_key(advisor: Advisor) -> tuple[int, float, int, str]:
     status_rank = {
         "AVOID": 0,
+        "HIGH": 0,
         "CHARGE_NOW": 1,
+        "SLIGHTLY_HIGH": 1,
+        "IMPROVING": 2,
+        "ON_TRACK": 3,
         "WAIT": 2,
-        "UNKNOWN": 3,
+        "UNKNOWN": 4,
     }.get(advisor.status, 4)
     impact = 0.0
     if advisor.estimated_financial_impact:

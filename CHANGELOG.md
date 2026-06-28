@@ -1,5 +1,19 @@
 # Changelog
 
+## Sprint 1.2.0 - Cost Advisor
+
+- Added a reusable `CostAdvisor` that answers whether the household is on
+  track financially using existing Financial Engine projection and billing
+  comparison data.
+- Added Cost Advisor output to the shared `Advisor` framework, dashboard API,
+  Home, and Recommendation Centre.
+- Added financial evidence trail items for projected bill, previous-period
+  comparison, import/export movement, EV contribution, tariff contribution,
+  recommendations, and timeline context.
+- Expanded shared advisor statuses for cost states: `ON_TRACK`,
+  `SLIGHTLY_HIGH`, `HIGH`, `IMPROVING`, and `UNKNOWN`.
+- Added Cost Advisor unit tests.
+
 ## Sprint 1.1.0 - Advisor Framework
 
 - Added shared `Advisor` and `AdvisorCollection` contracts for future

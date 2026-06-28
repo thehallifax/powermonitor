@@ -1,4 +1,5 @@
 from .charging_advisor import ChargingAdvisor
+from .cost_advisor import CostAdvisor
 from .decision_engine import generate_decisions, generate_ev_session_decisions
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
@@ -30,6 +31,7 @@ __all__ = [
     "BillPeriod",
     "ChargingAdvice",
     "ChargingAdvisor",
+    "CostAdvisor",
     "DataCompleteness",
     "DataEngine",
     "Decision",
