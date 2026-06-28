@@ -101,6 +101,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         end=self.param(params, "end"),
                     )
                 )
+            elif path in {"/api/setup_progress", "/api/setup_tasks", "/api/setup_sections"}:
+                self.send_json(self.setup_api_payload(path, params))
             elif path == "/api/compare":
                 self.send_json(self.compare_data(params))
             elif path == "/api/health":
@@ -152,6 +154,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.param(params, "end_b"),
         )
         return report.comparison_data(period_a, period_b, settings)
+
+    def setup_api_payload(self, path: str, params: dict) -> dict:
+        data = report.dashboard_data(
+            period_kind=self.param(params, "period", "current_billing_period"),
+            start=self.param(params, "start"),
+            end=self.param(params, "end"),
+        )
+        key = path.rsplit("/", 1)[-1]
+        return {key: data[key]}
 
     def update_recommendation_lifecycle(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)

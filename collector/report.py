@@ -42,8 +42,12 @@ from engine.models import (
     HouseholdCapability,
     HouseholdContext,
     HouseholdMembership,
+    SetupChecklist,
+    SetupSection,
+    SetupTask,
 )
 from engine.solar_advisor import SolarAdvisor
+from engine.setup_engine import SetupEngine
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -100,6 +104,16 @@ def briefing_engine(household_context: Optional[HouseholdContext] = None) -> Bri
 
 def goals_engine(household_context: Optional[HouseholdContext] = None) -> GoalsEngine:
     return GoalsEngine(household_context=household_context)
+
+
+def setup_engine(household_context: HouseholdContext) -> SetupEngine:
+    return SetupEngine(household_context)
+
+
+def setup_import_sources():
+    from import_ocular_export import OcularEVImporter
+
+    return [OcularEVImporter(DB_PATH).source]
 
 
 def default_household_context() -> HouseholdContext:
@@ -378,6 +392,16 @@ def dashboard_data(
     )
     briefing = briefing_engine(household_context).build(advisors, current_day)
     goals = goals_engine(household_context).evaluate(advisors)
+    setup_checklist = setup_engine(household_context).build_checklist(
+        capability_summary,
+        collector_health=health,
+        import_sources=setup_import_sources(),
+        advisors=advisors,
+        goals=goals,
+        recommendations=recommendations,
+        settings=settings,
+        now=generated_at,
+    )
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "household": household_context.household.as_dict(),
@@ -404,6 +428,10 @@ def dashboard_data(
         "advisors": advisors.as_dict(),
         "daily_briefing": briefing.as_dict(),
         "goals": [goal.as_dict() for goal in goals],
+        "setup_progress": setup_checklist.progress.as_dict(),
+        "setup_tasks": [task.as_dict() for task in setup_checklist.tasks],
+        "setup_sections": [section.as_dict() for section in setup_checklist.sections],
+        "setup_checklist": setup_checklist.as_dict(),
         "charging_advice": charging_advice.as_dict(),
         "glance": build_glance_state(
             billing_summary=billing_summary,
@@ -1896,6 +1924,7 @@ def period_controls_html(selected: Period) -> str:
 def nav_html() -> str:
     pages = (
         ("home", "Home"),
+        ("setup", "Setup"),
         ("glance", "Glance"),
         ("recommendations", "Recommendations"),
         ("bills", "Bills & Tariffs"),
@@ -2604,11 +2633,87 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
     """
 
 
+def setup_progress_card_html(setup: Optional[SetupChecklist]) -> str:
+    if not setup:
+        return ""
+    progress = setup.progress
+    if progress.complete:
+        return """
+        <section class="setup-progress-card complete">
+          <div><span>Setup</span><h3>Your household is fully configured.</h3></div>
+        </section>
+        """
+    remaining = "".join(
+        f"<li>{html.escape(task.title)}</li>"
+        for task in progress.remaining_tasks[:3]
+    )
+    return f"""
+    <section class="setup-progress-card">
+      <div>
+        <span>Setup</span>
+        <h3>{progress.completion_pct}% complete</h3>
+        <p>Remaining:</p>
+        <ul>{remaining}</ul>
+      </div>
+      <a href="#setup">Continue setup</a>
+    </section>
+    """
+
+
+def setup_task_html(task: SetupTask) -> str:
+    tone = "good" if task.status == "complete" else "neutral" if task.status == "future" else "bad"
+    status = task.status.replace("_", " ").title()
+    return f"""
+    <article class="setup-task {tone}">
+      <div class="setup-task-main">
+        <span>{html.escape(status)}</span>
+        <h3>{html.escape(task.title)}</h3>
+        <p>{html.escape(task.rationale)}</p>
+      </div>
+      <div class="setup-task-meta">
+        <div><span>Priority</span><strong>{html.escape(task.priority.value.title())}</strong></div>
+        <div><span>Estimated effort</span><strong>{html.escape(task.estimated_effort)}</strong></div>
+        <a href="{html.escape(task.action_href)}">{html.escape(task.action_label)}</a>
+      </div>
+    </article>
+    """
+
+
+def setup_section_html(section: SetupSection) -> str:
+    tasks = "".join(setup_task_html(task) for task in section.tasks) or '<p class="notice">No setup tasks for this section.</p>'
+    return f"""
+    <section class="report-section setup-section">
+      <div class="section-title">
+        <div><span class="eyebrow">{html.escape(section.title)}</span><h2>{section.completion_pct}% ready</h2></div>
+        <p>{section.completed_tasks} of {section.total_tasks} active tasks complete</p>
+      </div>
+      <div class="setup-task-list">{tasks}</div>
+    </section>
+    """
+
+
+def setup_page_html(setup: Optional[SetupChecklist]) -> str:
+    if not setup:
+        return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
+    sections = "".join(setup_section_html(section) for section in setup.sections)
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Setup</span><h2>{setup.progress.completion_pct}% complete</h2></div>
+        <p>{setup.progress.completed_tasks} of {setup.progress.total_tasks} active tasks complete</p>
+      </div>
+      <div class="setup-meter"><span style="width:{setup.progress.completion_pct}%"></span></div>
+    </section>
+    {sections}
+    """
+
+
 def home_page_html(
     briefing: DailyBriefing,
     goals: Optional[list[GoalProgress]] = None,
+    setup: Optional[SetupChecklist] = None,
 ) -> str:
-    return daily_briefing_html(briefing, goals or [])
+    return setup_progress_card_html(setup) + daily_briefing_html(briefing, goals or [])
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -2893,7 +2998,13 @@ def capability_summary_html(capability_summary) -> str:
     """
 
 
-def system_page_html(health: dict, settings: Settings, summary: Summary, capability_summary=None) -> str:
+def system_page_html(
+    health: dict,
+    settings: Settings,
+    summary: Summary,
+    capability_summary=None,
+    setup: Optional[SetupChecklist] = None,
+) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
         f"<tr><td>{html.escape(item['source'])}</td><td>{item['sessions']}</td><td>{kwh(item['energy_kwh'])}</td><td>{money(item['cost'])}</td></tr>"
@@ -2916,6 +3027,7 @@ def system_page_html(health: dict, settings: Settings, summary: Summary, capabil
         {metric("SolarEdge session", str(health.get("failure_type") or "ok"), "Auth/session status", "bad" if health.get("status") != "ok" else "good")}
         {metric("Report age", f"{float(health.get('report_age_minutes') or 0):.1f} minutes", "Freshness of generated dashboard", "grid")}
         {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
+        {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Continuous Setup Engine readiness", "good" if setup and setup.progress.complete else "grid")}
       </div>
       <div class="system-grid">
         {capability_summary_html(capability_summary)}
@@ -2938,7 +3050,11 @@ def system_page_html(health: dict, settings: Settings, summary: Summary, capabil
     """
 
 
-def imports_page_html(history: Optional[list[dict]] = None, capability_summary=None) -> str:
+def imports_page_html(
+    history: Optional[list[dict]] = None,
+    capability_summary=None,
+    setup: Optional[SetupChecklist] = None,
+) -> str:
     try:
         history = history if history is not None else data_engine().get_import_history()
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
@@ -2970,11 +3086,34 @@ def imports_page_html(history: Optional[list[dict]] = None, capability_summary=N
           <div><span>Import framework</span><strong>{html.escape("Available" if imports and imports.available else "Unavailable")}</strong></div>
         </div>
         """
+    setup_tasks = []
+    if setup:
+        setup_tasks = [
+            task for section in setup.sections
+            if section.section_id == "imports"
+            for task in section.tasks
+        ]
+    setup_task_rows = "".join(
+        f"""
+        <div class="completeness-row {'good' if task.status == 'complete' else 'bad'}">
+          <span>{html.escape(task.title)}</span>
+          <strong>{html.escape(task.status.replace("_", " ").title())}</strong>
+          <small>{html.escape(task.rationale)}</small>
+        </div>
+        """
+        for task in setup_tasks
+        if task.status != "future"
+    )
+    setup_task_html_block = (
+        f'<div class="system-card"><div class="chart-heading"><h3>Upload setup tasks</h3><span>Setup Engine</span></div><div class="completeness-grid">{setup_task_rows}</div></div>'
+        if setup_task_rows else ""
+    )
 
     return f"""
     <section class="report-section import-panel">
       <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Ocular EV charging history</p></div>
       {capability_note}
+      {setup_task_html_block}
       <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
         <label><span>Supported file</span><input type="file" name="import_file" accept=".xlsx,.xlsm" required></label>
         <button type="submit">Preview import</button>
@@ -3217,6 +3356,16 @@ def write_html(
     )
     briefing = briefing_engine(household_context).build(advisors, local_today())
     goals = goals_engine(household_context).evaluate(advisors)
+    setup_checklist = setup_engine(household_context).build_checklist(
+        capability_summary,
+        collector_health=health,
+        import_sources=setup_import_sources(),
+        advisors=advisors,
+        goals=goals,
+        recommendations=recommendations,
+        settings=settings,
+        now=generated_dt,
+    )
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -3242,7 +3391,11 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals)}
+    {home_page_html(briefing, goals, setup_checklist)}
+  </section>
+  <section id="setup" class="page">
+    <div class="page-heading"><h2>Finish household setup</h2><p>Continuous readiness guidance generated from household capability, import, collector, and recommendation state.</p></div>
+    {setup_page_html(setup_checklist)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
@@ -3278,11 +3431,11 @@ def write_html(
   </section>
   <section id="imports" class="page">
     <div class="page-heading"><h2>Upload household data</h2><p>Preview and import supported local household exports.</p></div>
-    {imports_page_html(capability_summary=capability_summary)}
+    {imports_page_html(capability_summary=capability_summary, setup=setup_checklist)}
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist)}
   </section>
 """
     )
@@ -3607,6 +3760,7 @@ def write_html(
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
+    body:has(#setup:target) .top-nav a[href="#setup"],
     body:has(#glance:target) .top-nav a[href="#glance"],
     body:has(#recommendations:target) .top-nav a[href="#recommendations"],
     body:has(#bills:target) .top-nav a[href="#bills"],
@@ -3624,7 +3778,24 @@ def write_html(
     .metric span {{ font-size:12px; font-weight:750; }} .metric strong {{ margin-top:24px; font-size:30px; }} .metric small {{ max-width:94%; font-size:11px; }}
     .metric.primary {{ background:linear-gradient(135deg,#111816,#1f6b50); }} .metric.primary strong {{ font-size:46px; }}
     .home-metrics .metric {{ min-height:154px; }} #home .compact-section {{ margin-top:14px; }}
-    .chart-card,.trend-card,.timeline-entry,.ev-session-card,.ev-session-recommendations,.ev-session-history,.system-card,.decision-grid div,.scenario-card,.action-card,.recommendation-card {{ border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .chart-card,.trend-card,.timeline-entry,.ev-session-card,.ev-session-recommendations,.ev-session-history,.system-card,.decision-grid div,.scenario-card,.action-card,.recommendation-card,.setup-task {{ border:0; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .setup-progress-card {{ display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:14px; padding:20px 22px; background:#fff; border-radius:24px; box-shadow:var(--shadow); }}
+    .setup-progress-card span,.setup-task-main span,.setup-task-meta span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .setup-progress-card h3 {{ margin:3px 0 0; font-size:24px; letter-spacing:-.04em; }}
+    .setup-progress-card p {{ margin:8px 0 0; color:var(--muted); font-size:12px; }}
+    .setup-progress-card ul {{ margin:4px 0 0; padding-left:18px; color:var(--muted); font-size:12px; }}
+    .setup-progress-card a,.setup-task-meta a {{ padding:10px 12px; color:#fff; background:var(--deep-2); border-radius:10px; text-decoration:none; font-size:12px; font-weight:750; }}
+    .setup-progress-card.complete {{ color:#226b50; background:#f3fbf7; }}
+    .setup-meter {{ height:12px; overflow:hidden; background:#eef3f0; border-radius:999px; }}
+    .setup-meter span {{ display:block; height:100%; min-width:2px; background:linear-gradient(90deg,#48b78d,var(--green)); border-radius:inherit; }}
+    .setup-task-list {{ display:grid; gap:12px; }}
+    .setup-task {{ display:grid; grid-template-columns:1fr 300px; gap:16px; padding:18px; background:#fff; }}
+    .setup-task.good {{ background:#f3fbf7; }} .setup-task.bad {{ background:#fff5f3; }} .setup-task.neutral {{ background:#f8fbf9; }}
+    .setup-task h3 {{ margin:6px 0 0; font-size:18px; letter-spacing:-.025em; }}
+    .setup-task p {{ margin:6px 0 0; color:var(--muted); font-size:12px; }}
+    .setup-task-meta {{ display:grid; grid-template-columns:1fr; gap:8px; align-content:start; }}
+    .setup-task-meta div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:11px; }}
+    .setup-task-meta strong {{ display:block; margin-top:3px; font-size:13px; }}
     .action-grid {{ gap:14px; }} .action-card {{ padding:20px; }}
     .action-card h3,.recommendation-card h3 {{ font-size:19px; letter-spacing:-.03em; }}
     .scenario-card {{ min-height:210px; padding:22px; }} .scenario-card strong {{ font-size:32px; }}
@@ -3635,7 +3806,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}

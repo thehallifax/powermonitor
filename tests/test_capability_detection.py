@@ -98,6 +98,13 @@ class CapabilityDetectionTests(unittest.TestCase):
                 }
                 self.assertIn("solar", capability_ids)
                 self.assertIn("imports", capability_ids)
+                self.assertIn("setup_progress", payload)
+                self.assertIn("setup_tasks", payload)
+                self.assertIn("setup_sections", payload)
+                self.assertIsInstance(payload["setup_progress"]["completion_pct"], int)
+                self.assertTrue(
+                    all("task_id" in item for item in payload["setup_tasks"])
+                )
             finally:
                 report.DB_PATH = original_db_path
 

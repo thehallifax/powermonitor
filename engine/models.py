@@ -39,6 +39,8 @@ ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES + (
 )
 ENGINE_STATES = ("idle", "ready", "running", "degraded", "failed")
 FRESHNESS_STATES = ("fresh", "stale", "expired", "unknown")
+SETUP_TASK_PRIORITIES = ("high", "medium", "low")
+SETUP_TASK_STATUSES = ("complete", "action_needed", "future")
 
 
 @dataclass
@@ -303,6 +305,136 @@ class HouseholdCapabilitySummary:
                 for capability in self.capabilities
                 if capability.enabled
             ],
+        }
+
+
+@dataclass(frozen=True)
+class SetupTaskPriority:
+    """User-facing setup urgency."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if self.value not in SETUP_TASK_PRIORITIES:
+            raise ValueError(f"Unsupported setup task priority: {self.value}")
+
+    def as_dict(self) -> dict[str, str]:
+        return {"value": self.value, "label": self.value.title()}
+
+
+@dataclass(frozen=True)
+class SetupTask:
+    """One actionable setup item derived from existing platform state."""
+
+    task_id: str
+    title: str
+    status: str
+    priority: SetupTaskPriority
+    estimated_effort: str
+    action_label: str
+    action_href: str
+    rationale: str
+    source: str
+
+    def __post_init__(self) -> None:
+        if self.status not in SETUP_TASK_STATUSES:
+            raise ValueError(f"Unsupported setup task status: {self.status}")
+
+    @property
+    def complete(self) -> bool:
+        return self.status in {"complete", "future"}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "title": self.title,
+            "status": self.status,
+            "priority": self.priority.as_dict(),
+            "estimated_effort": self.estimated_effort,
+            "action_label": self.action_label,
+            "action_href": self.action_href,
+            "rationale": self.rationale,
+            "source": self.source,
+            "complete": self.complete,
+        }
+
+
+@dataclass(frozen=True)
+class SetupSection:
+    """A setup task group for one part of the household configuration."""
+
+    section_id: str
+    title: str
+    tasks: list[SetupTask] = field(default_factory=list)
+
+    @property
+    def total_tasks(self) -> int:
+        return len([task for task in self.tasks if task.status != "future"])
+
+    @property
+    def completed_tasks(self) -> int:
+        return len([task for task in self.tasks if task.status == "complete"])
+
+    @property
+    def completion_pct(self) -> int:
+        if self.total_tasks == 0:
+            return 100
+        return int(round((self.completed_tasks / self.total_tasks) * 100))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "section_id": self.section_id,
+            "title": self.title,
+            "tasks": [task.as_dict() for task in self.tasks],
+            "total_tasks": self.total_tasks,
+            "completed_tasks": self.completed_tasks,
+            "completion_pct": self.completion_pct,
+        }
+
+
+@dataclass(frozen=True)
+class SetupProgress:
+    """Overall setup readiness for the active household."""
+
+    completion_pct: int
+    completed_tasks: int
+    total_tasks: int
+    remaining_tasks: list[SetupTask] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return self.total_tasks == 0 or self.completed_tasks >= self.total_tasks
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "completion_pct": self.completion_pct,
+            "completed_tasks": self.completed_tasks,
+            "total_tasks": self.total_tasks,
+            "remaining_tasks": [task.as_dict() for task in self.remaining_tasks],
+            "complete": self.complete,
+        }
+
+
+@dataclass(frozen=True)
+class SetupChecklist:
+    """Reusable setup guidance generated from current household readiness."""
+
+    household_id: str
+    generated_at: str
+    progress: SetupProgress
+    sections: list[SetupSection] = field(default_factory=list)
+
+    @property
+    def tasks(self) -> list[SetupTask]:
+        return [task for section in self.sections for task in section.tasks]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "household_id": self.household_id,
+            "generated_at": self.generated_at,
+            "progress": self.progress.as_dict(),
+            "sections": [section.as_dict() for section in self.sections],
+            "tasks": [task.as_dict() for task in self.tasks],
         }
 
 

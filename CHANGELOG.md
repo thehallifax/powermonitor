@@ -1,5 +1,17 @@
 # Changelog
 
+## PB-005 - Setup Engine
+
+- Added reusable `SetupEngine` and shared setup checklist, section, task,
+  priority, and progress models.
+- Derived continuous household setup guidance from existing capability,
+  collector health, data freshness, import, goal, and recommendation state.
+- Added a Setup page, Home setup progress card, System setup completion metric,
+  and Imports upload setup task integration.
+- Exposed `setup_progress`, `setup_tasks`, and `setup_sections` through the
+  dashboard API and dedicated setup API endpoints.
+- Added Setup Engine and API serialization regression tests.
+
 ## Housekeeping - Configurable Web Host
 
 - Made the embedded web dashboard host and port configurable through

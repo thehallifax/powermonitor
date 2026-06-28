@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Continuous household setup guidance for PowerMonitor."""
+
+from datetime import datetime, timedelta
+from typing import Any, Optional
+
+from .import_framework import ImportSource
+from .models import (
+    AdvisorCollection,
+    HouseholdCapabilitySummary,
+    HouseholdContext,
+    SetupChecklist,
+    SetupProgress,
+    SetupSection,
+    SetupTask,
+    SetupTaskPriority,
+)
+
+
+class SetupEngine:
+    """Derive setup readiness from existing household and engine state."""
+
+    name = "setup_engine"
+
+    def __init__(self, household_context: HouseholdContext) -> None:
+        self.household_context = household_context
+
+    def build_checklist(
+        self,
+        capability_summary: HouseholdCapabilitySummary,
+        *,
+        collector_health: Optional[dict[str, Any]] = None,
+        import_sources: Optional[list[ImportSource]] = None,
+        advisors: Optional[AdvisorCollection] = None,
+        goals: Optional[list[Any]] = None,
+        recommendations: Optional[list[Any]] = None,
+        settings: Optional[Any] = None,
+        now: Optional[datetime] = None,
+    ) -> SetupChecklist:
+        now = now or datetime.now().astimezone()
+        collector_health = collector_health or {}
+        import_sources = import_sources or []
+        recommendations = recommendations or []
+        goals = goals or []
+
+        sections = [
+            SetupSection(
+                "household",
+                "Household",
+                [
+                    self._tariff_task(capability_summary),
+                    self._billing_cycle_task(settings),
+                    self._goals_task(goals),
+                    self._notifications_task(),
+                ],
+            ),
+            SetupSection(
+                "energy_providers",
+                "Energy Providers",
+                self._provider_tasks(capability_summary),
+            ),
+            SetupSection(
+                "imports",
+                "Imports",
+                self._import_tasks(capability_summary, import_sources),
+            ),
+            SetupSection(
+                "data_quality",
+                "Data Quality",
+                [
+                    self._collector_task(collector_health),
+                    self._freshness_task(capability_summary, now),
+                ],
+            ),
+            SetupSection(
+                "recommendations",
+                "Recommendations",
+                [
+                    self._recommendation_centre_task(capability_summary, recommendations),
+                    self._energy_score_task(capability_summary),
+                ],
+            ),
+        ]
+        sections = [
+            SetupSection(section.section_id, section.title, [task for task in section.tasks if task])
+            for section in sections
+        ]
+        progress = self._progress(sections)
+        return SetupChecklist(
+            household_id=self.household_context.household.household_id,
+            generated_at=now.isoformat(timespec="seconds"),
+            progress=progress,
+            sections=sections,
+        )
+
+    def _progress(self, sections: list[SetupSection]) -> SetupProgress:
+        tasks = [task for section in sections for task in section.tasks if task.status != "future"]
+        completed = [task for task in tasks if task.status == "complete"]
+        remaining = sorted(
+            [task for task in tasks if task.status == "action_needed"],
+            key=lambda task: (_priority_rank(task.priority.value), task.title),
+        )
+        completion_pct = 100 if not tasks else int(round((len(completed) / len(tasks)) * 100))
+        return SetupProgress(
+            completion_pct=completion_pct,
+            completed_tasks=len(completed),
+            total_tasks=len(tasks),
+            remaining_tasks=remaining,
+        )
+
+    def _tariff_task(self, capability_summary: HouseholdCapabilitySummary) -> SetupTask:
+        tariff = capability_summary.get("tariff")
+        ready = bool(tariff and tariff.usable)
+        return task(
+            "configure_tariff",
+            "Configure electricity tariff",
+            ready,
+            "high",
+            "2 minutes",
+            "Go to Tariff Settings",
+            "#system",
+            tariff.reason if tariff else "Tariff capability is unavailable.",
+            "HouseholdCapabilitySummary.tariff",
+        )
+
+    def _billing_cycle_task(self, settings: Any) -> SetupTask:
+        ready = bool(
+            getattr(settings, "current_billing_period_start", None)
+            and getattr(settings, "current_billing_period_end", None)
+        )
+        return task(
+            "configure_billing_cycle",
+            "Configure billing cycle",
+            ready,
+            "medium",
+            "2 minutes",
+            "Go to System",
+            "#system",
+            "Billing cycle dates are configured." if ready else "Billing dates are using fallback period logic.",
+            "settings.current_billing_period",
+        )
+
+    def _goals_task(self, goals: list[Any]) -> SetupTask:
+        ready = bool(goals)
+        return task(
+            "configure_household_goals",
+            "Configure household goals",
+            ready,
+            "medium",
+            "3 minutes",
+            "Review Goals",
+            "#home",
+            "Goal Engine has active household goals." if ready else "Goal Engine has no active household goals to evaluate.",
+            "GoalsEngine",
+        )
+
+    def _notifications_task(self) -> SetupTask:
+        return SetupTask(
+            task_id="enable_notifications",
+            title="Enable notifications",
+            status="future",
+            priority=SetupTaskPriority("medium"),
+            estimated_effort="2 minutes",
+            action_label="Coming later",
+            action_href="#setup",
+            rationale="Notification setup is reserved for a future local workflow.",
+            source="future_placeholder",
+        )
+
+    def _provider_tasks(self, capability_summary: HouseholdCapabilitySummary) -> list[SetupTask]:
+        tasks = []
+        if self._household_declares("solar"):
+            solar = capability_summary.get("solar")
+            tasks.append(
+                task(
+                    "connect_solar_provider",
+                    "Connect solar provider",
+                    bool(solar and solar.usable),
+                    "high",
+                    "5 minutes",
+                    "Go to System",
+                    "#system",
+                    solar.reason if solar else "Solar capability is unavailable.",
+                    "HouseholdCapabilitySummary.solar",
+                )
+            )
+        return tasks
+
+    def _import_tasks(
+        self,
+        capability_summary: HouseholdCapabilitySummary,
+        import_sources: list[ImportSource],
+    ) -> list[SetupTask]:
+        tasks = []
+        if self._household_declares("ev"):
+            ev = capability_summary.get("ev")
+            supported = ", ".join(
+                sorted({extension for source in import_sources for extension in source.supported_extensions})
+            )
+            detail = ev.reason if ev else "EV charging capability is unavailable."
+            if supported:
+                detail = f"{detail} Supported upload paths: {supported}."
+            tasks.append(
+                task(
+                    "upload_ev_charging_history",
+                    "Upload EV charging history",
+                    bool(ev and ev.usable),
+                    "high",
+                    "4 minutes",
+                    "Upload EV History",
+                    "#imports",
+                    detail,
+                    "Import Framework",
+                )
+            )
+        return tasks
+
+    def _collector_task(self, collector_health: dict[str, Any]) -> SetupTask:
+        status = str(collector_health.get("status") or "unknown")
+        ready = status == "ok"
+        return task(
+            "collector_offline",
+            "Collector offline",
+            ready,
+            "high",
+            "3 minutes",
+            "Review Collector Health",
+            "#system",
+            str(collector_health.get("collector_message") or collector_health.get("message") or status),
+            "Collector Health",
+        )
+
+    def _freshness_task(
+        self,
+        capability_summary: HouseholdCapabilitySummary,
+        now: datetime,
+    ) -> SetupTask:
+        data_freshness = capability_summary.get("data_freshness")
+        observed_at = data_freshness.freshness.observed_at if data_freshness and data_freshness.freshness else None
+        latest = _parse_datetime(observed_at)
+        ready = bool(latest and now - latest <= timedelta(hours=24))
+        return task(
+            "data_older_than_24_hours",
+            "Data older than 24 hours",
+            ready,
+            "high",
+            "2 minutes",
+            "Review Data Quality",
+            "#system",
+            data_freshness.reason if data_freshness else "No data freshness capability is available.",
+            "DataEngine.freshness",
+        )
+
+    def _recommendation_centre_task(
+        self,
+        capability_summary: HouseholdCapabilitySummary,
+        recommendations: list[Any],
+    ) -> SetupTask:
+        recs = capability_summary.get("recommendations")
+        ready = bool(recs and recs.usable) or bool(recommendations)
+        return task(
+            "explore_recommendation_centre",
+            "Explore Recommendation Centre",
+            ready,
+            "low",
+            "2 minutes",
+            "Open Recommendation Centre",
+            "#recommendations",
+            "Recommendation Engine is producing household opportunities." if ready else "Recommendations are not ready yet.",
+            "Recommendation Engine",
+        )
+
+    def _energy_score_task(self, capability_summary: HouseholdCapabilitySummary) -> SetupTask:
+        freshness = capability_summary.get("data_freshness")
+        ready = bool(freshness and freshness.usable)
+        return task(
+            "review_energy_score",
+            "Review Energy Score",
+            ready,
+            "low",
+            "1 minute",
+            "Review Home",
+            "#home",
+            freshness.reason if freshness else "Energy Score needs household readings.",
+            "Energy Score",
+        )
+
+    def _household_declares(self, capability_id: str) -> bool:
+        for capability in self.household_context.household.capabilities:
+            if capability.capability_id == capability_id and capability.enabled:
+                return True
+        return False
+
+
+def task(
+    task_id: str,
+    title: str,
+    ready: bool,
+    priority: str,
+    estimated_effort: str,
+    action_label: str,
+    action_href: str,
+    rationale: str,
+    source: str,
+) -> SetupTask:
+    return SetupTask(
+        task_id=task_id,
+        title=title,
+        status="complete" if ready else "action_needed",
+        priority=SetupTaskPriority(priority),
+        estimated_effort=estimated_effort,
+        action_label=action_label,
+        action_href=action_href,
+        rationale=rationale,
+        source=source,
+    )
+
+
+def _priority_rank(priority: str) -> int:
+    return {"high": 0, "medium": 1, "low": 2}.get(priority, 3)
+
+
+def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed
