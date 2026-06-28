@@ -9,7 +9,7 @@ does not query SQLite, call connectors, render UI, or generate recommendations.
 from datetime import date, timedelta
 from typing import Any, Optional, Union
 
-from .models import EngineStatus, FinancialImpact
+from .models import EngineStatus, FinancialImpact, HouseholdContext
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 
@@ -18,6 +18,9 @@ class FinancialEngine:
     """Tariff-aware financial impact calculations."""
 
     name = "financial_engine"
+
+    def __init__(self, household_context: Optional[HouseholdContext] = None) -> None:
+        self.household_context = household_context
 
     def status(self) -> EngineStatus:
         return EngineStatus(name=self.name)

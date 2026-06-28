@@ -9,7 +9,7 @@ markup and it does not forecast future appliance behaviour.
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
-from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact
+from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
 TARIFF_LABELS = {
     "overnight": "Overnight",
@@ -29,6 +29,9 @@ class ChargingAdvisor:
     """Deterministic advisor for the question: should I charge my EV right now?"""
 
     name = "charging_advisor"
+
+    def __init__(self, household_context: Optional[HouseholdContext] = None) -> None:
+        self.household_context = household_context
 
     def advise(
         self,

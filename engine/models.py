@@ -10,6 +10,15 @@ RECOMMENDATION_CATEGORIES = ("billing", "solar", "EV", "tariff", "baseload", "da
 CONFIDENCE_LEVELS = ("Low", "Medium", "High", "Very High")
 DIFFICULTY_LEVELS = ("Easy", "Medium", "Hard")
 FINANCIAL_IMPACT_PERIODS = ("today", "billing_period", "yearly")
+HOUSEHOLD_CAPABILITIES = (
+    "solar",
+    "ev",
+    "battery",
+    "tariff",
+    "billing",
+    "baseload",
+    "recommendations",
+)
 CHARGING_ADVICE_STATUSES = ("CHARGE_NOW", "WAIT", "AVOID", "UNKNOWN")
 GOAL_STATUS_STATES = ("ON_TRACK", "AHEAD", "WATCH", "NEEDS_ATTENTION", "UNKNOWN")
 ADVISOR_STATUSES = CHARGING_ADVICE_STATUSES + (
@@ -144,6 +153,82 @@ class EngineStatus:
     def __post_init__(self) -> None:
         if self.state not in ENGINE_STATES:
             raise ValueError(f"Unsupported engine state: {self.state}")
+
+
+@dataclass(frozen=True)
+class Account:
+    """Owner account for one or more households."""
+
+    account_id: str
+    display_name: str
+    account_type: str = "local"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HouseholdCapability:
+    """A declared capability available for a household."""
+
+    capability_id: str
+    enabled: bool = True
+    source: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.capability_id not in HOUSEHOLD_CAPABILITIES:
+            raise ValueError(f"Unsupported household capability: {self.capability_id}")
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Household:
+    """Root entity for all household-scoped PowerMonitor intelligence."""
+
+    household_id: str
+    name: str
+    timezone: str
+    capabilities: list[HouseholdCapability] = field(default_factory=list)
+    is_default: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "household_id": self.household_id,
+            "name": self.name,
+            "timezone": self.timezone,
+            "capabilities": [capability.as_dict() for capability in self.capabilities],
+            "is_default": self.is_default,
+        }
+
+
+@dataclass(frozen=True)
+class HouseholdMembership:
+    """Relationship between an account and a household."""
+
+    account_id: str
+    household_id: str
+    role: str = "owner"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HouseholdContext:
+    """Convenience bundle passed through household-aware engines."""
+
+    account: Account
+    household: Household
+    membership: HouseholdMembership
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account.as_dict(),
+            "household": self.household.as_dict(),
+            "membership": self.membership.as_dict(),
+        }
 
 
 @dataclass
@@ -340,6 +425,7 @@ class AdvisorCollection:
     """Aggregates active advisors in deterministic priority order."""
 
     advisors: list[Advisor] = field(default_factory=list)
+    household: Optional[Household] = None
 
     def active(self) -> list[Advisor]:
         return sorted(self.advisors, key=_advisor_sort_key)
@@ -349,6 +435,7 @@ class AdvisorCollection:
         return {
             "advisors": [advisor.as_dict() for advisor in ordered],
             "count": len(ordered),
+            "household": self.household.as_dict() if self.household else None,
         }
 
 

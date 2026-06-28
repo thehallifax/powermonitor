@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .financial_engine import FinancialEngine
-from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact
+from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
 
 
 class EfficiencyAdvisor:
@@ -13,7 +13,12 @@ class EfficiencyAdvisor:
 
     name = "efficiency_advisor"
 
-    def __init__(self, financial_engine: Optional[FinancialEngine] = None) -> None:
+    def __init__(
+        self,
+        financial_engine: Optional[FinancialEngine] = None,
+        household_context: Optional[HouseholdContext] = None,
+    ) -> None:
+        self.household_context = household_context
         self.financial_engine = financial_engine or FinancialEngine()
 
     def advise(

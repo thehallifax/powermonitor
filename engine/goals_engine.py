@@ -3,7 +3,7 @@
 
 from typing import Optional
 
-from .models import Advisor, AdvisorCollection, Goal, GoalProgress, GoalStatus
+from .models import Advisor, AdvisorCollection, Goal, GoalProgress, GoalStatus, HouseholdContext
 
 
 class GoalsEngine:
@@ -11,10 +11,22 @@ class GoalsEngine:
 
     name = "goals_engine"
 
-    def __init__(self, goals: Optional[list[Goal]] = None) -> None:
+    def __init__(
+        self,
+        goals: Optional[list[Goal]] = None,
+        household_context: Optional[HouseholdContext] = None,
+    ) -> None:
         self.goals = goals or default_goals()
+        self.household_context = household_context
 
-    def evaluate(self, advisors: AdvisorCollection) -> list[GoalProgress]:
+    def evaluate(
+        self,
+        advisors: AdvisorCollection,
+        household_context: Optional[HouseholdContext] = None,
+    ) -> list[GoalProgress]:
+        active_household = household_context or self.household_context
+        if active_household and advisors.household is None:
+            advisors = AdvisorCollection(advisors.advisors, household=active_household.household)
         ordered = advisors.active()
         return [
             self._progress_for_goal(goal, ordered)

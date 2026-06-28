@@ -14,6 +14,7 @@ from .models import (
     Decision,
     DecisionExplanation,
     FinancialImpact,
+    HouseholdContext,
     Recommendation,
     RecommendationDismissal,
     RecommendationImpact,
@@ -70,7 +71,12 @@ class RecommendationEngine:
 
     name = "recommendation_engine"
 
-    def __init__(self, financial_engine: Optional[FinancialEngine] = None) -> None:
+    def __init__(
+        self,
+        financial_engine: Optional[FinancialEngine] = None,
+        household_context: Optional[HouseholdContext] = None,
+    ) -> None:
+        self.household_context = household_context
         self.financial_engine = financial_engine or FinancialEngine()
 
     def generate(
@@ -78,7 +84,11 @@ class RecommendationEngine:
         observations: dict[str, Any],
         thresholds: dict[str, Any],
         include_inactive: bool = False,
+        household_context: Optional[HouseholdContext] = None,
     ) -> list[Recommendation]:
+        active_household = household_context or self.household_context
+        if active_household:
+            observations.setdefault("household_id", active_household.household.household_id)
         recommendations = [
             item
             for item in (
@@ -530,8 +540,13 @@ def generate_recommendations(
     context: dict[str, Any],
     thresholds: dict[str, Any],
     include_inactive: bool = False,
+    household_context: Optional[HouseholdContext] = None,
 ) -> list[Recommendation]:
-    return RecommendationEngine().generate(context, thresholds, include_inactive=include_inactive)
+    return RecommendationEngine(household_context=household_context).generate(
+        context,
+        thresholds,
+        include_inactive=include_inactive,
+    )
 
 
 def generate_recommendations_from_data_engine(
@@ -541,14 +556,21 @@ def generate_recommendations_from_data_engine(
     thresholds: dict[str, Any],
     previous_summary: Optional[dict[str, Any]] = None,
     include_inactive: bool = False,
+    household_context: Optional[HouseholdContext] = None,
 ) -> list[Recommendation]:
     context = build_recommendation_context(
         current_summary,
         settings,
         data_engine,
         previous_summary=previous_summary,
+        household_context=household_context,
     )
-    return generate_recommendations(context, thresholds, include_inactive=include_inactive)
+    return generate_recommendations(
+        context,
+        thresholds,
+        include_inactive=include_inactive,
+        household_context=household_context,
+    )
 
 
 def build_recommendation_context(
@@ -556,6 +578,7 @@ def build_recommendation_context(
     settings,
     data_engine,
     previous_summary: Optional[dict[str, Any]] = None,
+    household_context: Optional[HouseholdContext] = None,
 ) -> dict[str, Any]:
     financial_engine = FinancialEngine()
     projected_days = current_summary["supply_days"]
@@ -569,6 +592,8 @@ def build_recommendation_context(
         if hasattr(data_engine, "get_recommendation_lifecycle")
         else {}
     )
+    if household_context is None and hasattr(data_engine, "get_household_context"):
+        household_context = data_engine.get_household_context()
 
     if settings.current_billing_period_start and settings.current_billing_period_end:
         projected_end = settings.current_billing_period_end
@@ -593,6 +618,7 @@ def build_recommendation_context(
         "overnight_baseload_watts": overnight_baseload,
         "timeline_history": timeline_history,
         "recommendation_lifecycle": recommendation_lifecycle,
+        "household_id": household_context.household.household_id if household_context else None,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
         "projected_net_cost": projected_bill[0],

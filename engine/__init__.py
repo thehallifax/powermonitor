@@ -10,6 +10,7 @@ from .solar_advisor import SolarAdvisor
 from .models import (
     Advisor,
     AdvisorCollection,
+    Account,
     BriefingPriority,
     BriefingSection,
     Confidence,
@@ -26,6 +27,10 @@ from .models import (
     Goal,
     GoalProgress,
     GoalStatus,
+    Household,
+    HouseholdCapability,
+    HouseholdContext,
+    HouseholdMembership,
     Insight,
     Recommendation,
     RecommendationDismissal,
@@ -36,6 +41,7 @@ from .recommendation_engine import RecommendationEngine
 
 __all__ = [
     "Confidence",
+    "Account",
     "Advisor",
     "AdvisorCollection",
     "BillPeriod",
@@ -62,6 +68,10 @@ __all__ = [
     "GoalProgress",
     "GoalStatus",
     "GoalsEngine",
+    "Household",
+    "HouseholdCapability",
+    "HouseholdContext",
+    "HouseholdMembership",
     "HouseholdSnapshot",
     "Insight",
     "Recommendation",

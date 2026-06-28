@@ -15,9 +15,32 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .models import DecisionTimeline, EngineStatus, Evidence, Freshness, TimelineEntry
+from .models import (
+    Account,
+    DecisionTimeline,
+    EngineStatus,
+    Evidence,
+    Freshness,
+    Household,
+    HouseholdCapability,
+    HouseholdContext,
+    HouseholdMembership,
+    TimelineEntry,
+)
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
+DEFAULT_ACCOUNT_ID = "local_account"
+DEFAULT_HOUSEHOLD_ID = "default_household"
+DEFAULT_HOUSEHOLD_NAME = "Default household"
+DEFAULT_HOUSEHOLD_TIMEZONE = "Australia/Perth"
+DEFAULT_HOUSEHOLD_CAPABILITIES = (
+    "solar",
+    "ev",
+    "tariff",
+    "billing",
+    "baseload",
+    "recommendations",
+)
 EV_BUCKET_LABELS = {
     "super_off_peak": "9am-3pm super off-peak / EV solar window",
     "overnight": "11pm-6am overnight",
@@ -84,12 +107,14 @@ class DataEngine:
         collect_log_path: Optional[Path] = None,
         report_path: Optional[Path] = None,
         health_loader: Optional[Callable[[], dict]] = None,
+        household_context: Optional[HouseholdContext] = None,
     ) -> None:
         self.db_path = Path(db_path) if db_path else None
         self.connection = connection
         self.collect_log_path = Path(collect_log_path) if collect_log_path else None
         self.report_path = Path(report_path) if report_path else None
         self.health_loader = health_loader or (lambda: {})
+        self.household_context = household_context
 
     def status(self) -> EngineStatus:
         try:
@@ -110,6 +135,95 @@ class DataEngine:
 
     def validate_database(self) -> None:
         return self._with_connection(self.validate_connection)
+
+    def get_household_context(self, household_id: Optional[str] = None) -> HouseholdContext:
+        """Return household context, falling back to the default single-household mode."""
+
+        if self.household_context and (
+            household_id is None
+            or self.household_context.household.household_id == household_id
+        ):
+            return self.household_context
+
+        def query(conn):
+            self.validate_connection(conn)
+            selected_id = household_id or DEFAULT_HOUSEHOLD_ID
+            household_row = conn.execute(
+                """
+                SELECT household_id, name, timezone, is_default
+                FROM households
+                WHERE household_id = ?
+                """,
+                (selected_id,),
+            ).fetchone()
+            if household_row is None and household_id is None:
+                household_row = conn.execute(
+                    """
+                    SELECT household_id, name, timezone, is_default
+                    FROM households
+                    WHERE is_default = 1
+                    ORDER BY household_id
+                    LIMIT 1
+                    """
+                ).fetchone()
+            if household_row is None:
+                raise RuntimeError(f"Household not found: {selected_id}")
+
+            account_row = conn.execute(
+                """
+                SELECT a.account_id, a.display_name, a.account_type, m.role
+                FROM household_memberships m
+                JOIN accounts a ON a.account_id = m.account_id
+                WHERE m.household_id = ?
+                ORDER BY CASE m.role WHEN 'owner' THEN 0 ELSE 1 END, a.account_id
+                LIMIT 1
+                """,
+                (household_row[0],),
+            ).fetchone()
+            if account_row is None:
+                account_row = (DEFAULT_ACCOUNT_ID, "Local account", "local", "owner")
+            capability_rows = conn.execute(
+                """
+                SELECT capability_id, enabled, source
+                FROM household_capabilities
+                WHERE household_id = ?
+                ORDER BY capability_id
+                """,
+                (household_row[0],),
+            ).fetchall()
+            account = Account(
+                account_id=account_row[0],
+                display_name=account_row[1],
+                account_type=account_row[2],
+            )
+            household = Household(
+                household_id=household_row[0],
+                name=household_row[1],
+                timezone=household_row[2],
+                is_default=bool(household_row[3]),
+                capabilities=[
+                    HouseholdCapability(
+                        capability_id=row[0],
+                        enabled=bool(row[1]),
+                        source=row[2],
+                    )
+                    for row in capability_rows
+                ],
+            )
+            return HouseholdContext(
+                account=account,
+                household=household,
+                membership=HouseholdMembership(
+                    account_id=account.account_id,
+                    household_id=household.household_id,
+                    role=account_row[3],
+                ),
+            )
+
+        context = self._with_connection(query)
+        if household_id is None:
+            self.household_context = context
+        return context
 
     @staticmethod
     def validate_connection(conn: sqlite3.Connection) -> None:
@@ -226,7 +340,84 @@ class DataEngine:
             ON recommendation_lifecycle(state)
             """
         )
+        DataEngine._ensure_household_tables(conn)
         conn.commit()
+
+    @staticmethod
+    def _ensure_household_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                account_type TEXT NOT NULL DEFAULT 'local'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS households (
+                household_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS household_capabilities (
+                household_id TEXT NOT NULL,
+                capability_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                source TEXT,
+                PRIMARY KEY (household_id, capability_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS household_memberships (
+                account_id TEXT NOT NULL,
+                household_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'owner',
+                PRIMARY KEY (account_id, household_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO accounts (account_id, display_name, account_type)
+            VALUES (?, ?, ?)
+            """,
+            (DEFAULT_ACCOUNT_ID, "Local account", "local"),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO households (household_id, name, timezone, is_default)
+            VALUES (?, ?, ?, 1)
+            """,
+            (DEFAULT_HOUSEHOLD_ID, DEFAULT_HOUSEHOLD_NAME, DEFAULT_HOUSEHOLD_TIMEZONE),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO household_memberships (account_id, household_id, role)
+            VALUES (?, ?, ?)
+            """,
+            (DEFAULT_ACCOUNT_ID, DEFAULT_HOUSEHOLD_ID, "owner"),
+        )
+        for capability in DEFAULT_HOUSEHOLD_CAPABILITIES:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO household_capabilities (
+                    household_id,
+                    capability_id,
+                    enabled,
+                    source
+                ) VALUES (?, ?, 1, ?)
+                """,
+                (DEFAULT_HOUSEHOLD_ID, capability, "default"),
+            )
 
     @staticmethod
     def _backfill_ev_tariff_columns(conn: sqlite3.Connection) -> None:

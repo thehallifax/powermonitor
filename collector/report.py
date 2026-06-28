@@ -28,7 +28,21 @@ from engine.decision_engine import (
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
-from engine.models import Advisor, AdvisorCollection, BriefingPriority, ChargingAdvice, DailyBriefing, DecisionTimeline, EnergyScore, GoalProgress
+from engine.models import (
+    Account,
+    Advisor,
+    AdvisorCollection,
+    BriefingPriority,
+    ChargingAdvice,
+    DailyBriefing,
+    DecisionTimeline,
+    EnergyScore,
+    GoalProgress,
+    Household,
+    HouseholdCapability,
+    HouseholdContext,
+    HouseholdMembership,
+)
 from engine.solar_advisor import SolarAdvisor
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
@@ -60,32 +74,60 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
     )
 
 
-def financial_engine() -> FinancialEngine:
-    return FinancialEngine()
+def financial_engine(household_context: Optional[HouseholdContext] = None) -> FinancialEngine:
+    return FinancialEngine(household_context=household_context)
 
 
-def charging_advisor() -> ChargingAdvisor:
-    return ChargingAdvisor()
+def charging_advisor(household_context: Optional[HouseholdContext] = None) -> ChargingAdvisor:
+    return ChargingAdvisor(household_context=household_context)
 
 
-def cost_advisor() -> CostAdvisor:
-    return CostAdvisor()
+def cost_advisor(household_context: Optional[HouseholdContext] = None) -> CostAdvisor:
+    return CostAdvisor(household_context=household_context)
 
 
-def solar_advisor() -> SolarAdvisor:
-    return SolarAdvisor()
+def solar_advisor(household_context: Optional[HouseholdContext] = None) -> SolarAdvisor:
+    return SolarAdvisor(household_context=household_context)
 
 
-def efficiency_advisor() -> EfficiencyAdvisor:
-    return EfficiencyAdvisor()
+def efficiency_advisor(household_context: Optional[HouseholdContext] = None) -> EfficiencyAdvisor:
+    return EfficiencyAdvisor(household_context=household_context)
 
 
-def briefing_engine() -> BriefingEngine:
-    return BriefingEngine()
+def briefing_engine(household_context: Optional[HouseholdContext] = None) -> BriefingEngine:
+    return BriefingEngine(household_context=household_context)
 
 
-def goals_engine() -> GoalsEngine:
-    return GoalsEngine()
+def goals_engine(household_context: Optional[HouseholdContext] = None) -> GoalsEngine:
+    return GoalsEngine(household_context=household_context)
+
+
+def default_household_context() -> HouseholdContext:
+    return HouseholdContext(
+        account=Account("local_account", "Local account", "local"),
+        household=Household(
+            "default_household",
+            "Default household",
+            str(LOCAL_TIMEZONE),
+            capabilities=[
+                HouseholdCapability("solar", source="default"),
+                HouseholdCapability("ev", source="default"),
+                HouseholdCapability("tariff", source="default"),
+                HouseholdCapability("billing", source="default"),
+                HouseholdCapability("baseload", source="default"),
+                HouseholdCapability("recommendations", source="default"),
+            ],
+            is_default=True,
+        ),
+        membership=HouseholdMembership("local_account", "default_household", "owner"),
+    )
+
+
+def report_household_context(conn: Optional[sqlite3.Connection] = None) -> HouseholdContext:
+    try:
+        return data_engine(conn).get_household_context()
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        return default_household_context()
 
 
 EV_BUCKET_ORDER = ("super_off_peak", "overnight", "off_peak", "peak")
@@ -251,6 +293,8 @@ def dashboard_data(
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
     with sqlite3.connect(DB_PATH) as conn:
         validate_database(conn)
+        context_engine = data_engine(conn)
+        household_context = context_engine.get_household_context()
         today_summary = load_summary(conn, current_day, current_day, settings)
         period_summary = load_summary(conn, selected.start, selected.end, settings)
         billing_summary = (
@@ -261,14 +305,14 @@ def dashboard_data(
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
-        all_recommendations = load_recommendations(conn, period_summary, settings)
+        all_recommendations = load_recommendations(conn, period_summary, settings, household_context)
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
-        recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
+        recommendation_lifecycle_counts = context_engine.get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
-        timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
-        overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
+        timeline = context_engine.persist_timeline_entries(timeline_candidates.entries)
+        overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
@@ -278,7 +322,7 @@ def dashboard_data(
         completeness,
         plan,
     )
-    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine().project_bill(
+    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
     )
@@ -291,6 +335,7 @@ def dashboard_data(
         recommendations,
         glance_projected,
         generated_at,
+        household_context,
     )
     cost = build_cost_advisor(
         period_summary,
@@ -301,6 +346,7 @@ def dashboard_data(
         timeline,
         comparison,
         generated_at,
+        household_context,
     )
     solar = build_solar_advisor(
         period_summary,
@@ -309,6 +355,7 @@ def dashboard_data(
         recommendations,
         timeline,
         generated_at,
+        household_context,
     )
     efficiency = build_efficiency_advisor(
         period_summary,
@@ -321,12 +368,16 @@ def dashboard_data(
         trends,
         overnight_baseload_watts,
         generated_at,
+        household_context,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
-    briefing = briefing_engine().build(advisors, current_day)
-    goals = goals_engine().evaluate(advisors)
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency], household=household_context.household)
+    briefing = briefing_engine(household_context).build(advisors, current_day)
+    goals = goals_engine(household_context).evaluate(advisors)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
+        "household": household_context.household.as_dict(),
+        "account": household_context.account.as_dict(),
+        "household_membership": household_context.membership.as_dict(),
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -995,9 +1046,13 @@ def load_daily_trends(
 
 
 def load_recommendations(
-    conn: sqlite3.Connection, current_summary: Summary, settings: Settings
+    conn: sqlite3.Connection,
+    current_summary: Summary,
+    settings: Settings,
+    household_context: Optional[HouseholdContext] = None,
 ) -> list[Decision]:
     engine = data_engine(conn)
+    household_context = household_context or engine.get_household_context()
     previous_summary = None
     if settings.previous_billing_period_start and settings.previous_billing_period_end:
         candidate = load_summary(
@@ -1016,6 +1071,7 @@ def load_recommendations(
         settings.recommendation_thresholds,
         previous_summary=previous_summary,
         include_inactive=True,
+        household_context=household_context,
     )
 
 
@@ -1027,8 +1083,9 @@ def build_charging_advice(
     recommendations: list[Decision],
     projected_bill: Optional[float],
     now: datetime,
+    household_context: Optional[HouseholdContext] = None,
 ) -> ChargingAdvice:
-    return charging_advisor().advise(
+    return charging_advisor(household_context).advise(
         today_summary=today_summary,
         billing_summary=billing_summary,
         settings=settings,
@@ -1048,8 +1105,9 @@ def build_cost_advisor(
     timeline: Optional[DecisionTimeline],
     comparison: Optional[dict],
     now: datetime,
+    household_context: Optional[HouseholdContext] = None,
 ) -> Advisor:
-    return cost_advisor().advise(
+    return cost_advisor(household_context).advise(
         current_summary=current_summary,
         previous_summary=previous_summary,
         settings=settings,
@@ -1068,8 +1126,9 @@ def build_solar_advisor(
     recommendations: list[Decision],
     timeline: Optional[DecisionTimeline],
     now: datetime,
+    household_context: Optional[HouseholdContext] = None,
 ) -> Advisor:
-    return solar_advisor().advise(
+    return solar_advisor(household_context).advise(
         summary=summary,
         settings=settings,
         recommendations=recommendations,
@@ -1090,8 +1149,9 @@ def build_efficiency_advisor(
     trends: list[DailyTrend],
     overnight_baseload_watts: float,
     now: datetime,
+    household_context: Optional[HouseholdContext] = None,
 ) -> Advisor:
-    return efficiency_advisor().advise(
+    return efficiency_advisor(household_context).advise(
         summary=summary,
         previous_summary=previous_summary,
         settings=settings,
@@ -3006,7 +3066,8 @@ def write_html(
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
     timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
     billing_summary = billing_summary or period_summary
-    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine().project_bill(
+    household_context = report_household_context()
+    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
     )
@@ -3021,6 +3082,7 @@ def write_html(
         recommendations,
         glance_projected,
         generated_dt,
+        household_context,
     )
     previous_summary = comparison.get("summary_b") if comparison else None
     cost = build_cost_advisor(
@@ -3032,6 +3094,7 @@ def write_html(
         timeline,
         comparison,
         generated_dt,
+        household_context,
     )
     solar = build_solar_advisor(
         period_summary,
@@ -3040,6 +3103,7 @@ def write_html(
         recommendations,
         timeline,
         generated_dt,
+        household_context,
     )
     efficiency = build_efficiency_advisor(
         period_summary,
@@ -3052,10 +3116,11 @@ def write_html(
         trends,
         overnight_baseload_watts,
         generated_dt,
+        household_context,
     )
-    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency])
-    briefing = briefing_engine().build(advisors, local_today())
-    goals = goals_engine().evaluate(advisors)
+    advisors = AdvisorCollection([charging_advice.advisor, cost, solar, efficiency], household=household_context.household)
+    briefing = briefing_engine(household_context).build(advisors, local_today())
+    goals = goals_engine(household_context).evaluate(advisors)
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,

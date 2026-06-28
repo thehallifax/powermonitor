@@ -13,6 +13,7 @@ from .models import (
     BriefingSection,
     DailyBriefing,
     FinancialImpact,
+    HouseholdContext,
 )
 
 
@@ -21,11 +22,18 @@ class BriefingEngine:
 
     name = "briefing_engine"
 
+    def __init__(self, household_context: Optional[HouseholdContext] = None) -> None:
+        self.household_context = household_context
+
     def build(
         self,
         advisors: AdvisorCollection,
         briefing_date: Optional[date] = None,
+        household_context: Optional[HouseholdContext] = None,
     ) -> DailyBriefing:
+        active_household = household_context or self.household_context
+        if active_household and advisors.household is None:
+            advisors = AdvisorCollection(advisors.advisors, household=active_household.household)
         ordered = advisors.active()
         priorities = _orchestrated_section(ordered, "priority")[:1]
         used_advisor_ids = _supporting_ids(priorities)

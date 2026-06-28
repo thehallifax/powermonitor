@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-001 - Multi Household Foundation
+
+- Added shared multi-household platform models: `Account`, `Household`,
+  `HouseholdCapability`, `HouseholdMembership`, and `HouseholdContext`.
+- Added default household context ownership to `DataEngine`, including local
+  account, household, membership, and capability table seeding.
+- Made active engines household-aware through optional household context while
+  preserving existing advisor and calculation behaviour.
+- Scoped `AdvisorCollection`, Briefing Engine, Goals Engine, Recommendation
+  Engine, and Decision Engine outputs to household context where available.
+- Added household, account, and membership metadata to dashboard API
+  serialization.
+- Added multi-household foundation tests for model serialization, default
+  household seeding, and household-scoped orchestration.
+
 ## Sprint 1.7.0 - Goals Engine
 
 - Added reusable `GoalsEngine` for tracking household progress from

@@ -10,6 +10,7 @@ from .models import (
     Decision,
     DecisionExplanation,
     FinancialImpact,
+    HouseholdContext,
 )
 from .recommendation_engine import (
     generate_ev_session_recommendations,
@@ -772,11 +773,13 @@ def generate_decisions(
     context: dict,
     thresholds: dict,
     include_inactive: bool = False,
+    household_context: Optional[HouseholdContext] = None,
 ) -> list[Decision]:
     recommendations = generate_shared_recommendations(
         context,
         thresholds,
         include_inactive=include_inactive,
+        household_context=household_context,
     )
     return [
         _validate_decision(decision)
@@ -792,6 +795,7 @@ def build_decision_context(
     settings,
     data_engine,
     previous_summary: Optional[dict] = None,
+    household_context: Optional[HouseholdContext] = None,
 ) -> dict:
     projected_days = current_summary["supply_days"]
     projected_end = _as_date(current_summary["end"])
@@ -799,6 +803,8 @@ def build_decision_context(
     end = _as_date(current_summary["end"])
     overnight_baseload = data_engine.get_overnight_baseload_watts(start, end)
     timeline_history = data_engine.get_timeline_entries(limit=100)
+    if household_context is None and hasattr(data_engine, "get_household_context"):
+        household_context = data_engine.get_household_context()
 
     if settings.current_billing_period_start and settings.current_billing_period_end:
         projected_end = settings.current_billing_period_end
@@ -822,6 +828,7 @@ def build_decision_context(
         "ev_baseline_watts": settings.ev_baseline_watts,
         "overnight_baseload_watts": overnight_baseload,
         "timeline_history": timeline_history,
+        "household_id": household_context.household.household_id if household_context else None,
         "projected_period_days": projected_days,
         "projected_period_end": projected_end.isoformat(),
         "projected_net_cost": projected_bill[0],
@@ -842,6 +849,7 @@ def generate_decisions_from_data_engine(
     thresholds: dict,
     previous_summary: Optional[dict] = None,
     include_inactive: bool = False,
+    household_context: Optional[HouseholdContext] = None,
 ) -> list[Decision]:
     recommendations = generate_shared_recommendations_from_data_engine(
         current_summary,
@@ -850,13 +858,21 @@ def generate_decisions_from_data_engine(
         thresholds,
         previous_summary=previous_summary,
         include_inactive=include_inactive,
+        household_context=household_context,
     )
     expires_at = current_summary.get("end")
     return [_validate_decision(decision) for decision in recommendations_to_decisions(recommendations, expires_at=str(expires_at))]
 
 
-def generate_recommendations(context: dict, thresholds: dict) -> list[dict]:
-    return [decision.as_dict() for decision in generate_decisions(context, thresholds)]
+def generate_recommendations(
+    context: dict,
+    thresholds: dict,
+    household_context: Optional[HouseholdContext] = None,
+) -> list[dict]:
+    return [
+        decision.as_dict()
+        for decision in generate_decisions(context, thresholds, household_context=household_context)
+    ]
 
 
 def generate_ev_session_decisions(sessions: list[dict], import_rates: dict) -> list[Decision]:
