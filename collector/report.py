@@ -432,6 +432,22 @@ def dashboard_data(
             "normal_daily_cost": compared_summary.average_daily_net_cost,
         },
     )
+    household_decision_output = snapshot_engine.get_household_decisions(
+        household_state=household_state,
+        context=household_current_context,
+        behaviour=household_behaviour,
+        anomalies=household_anomalies,
+        capability_summary=capability_summary,
+        financial_metadata={
+            "projected_bill": glance_projected,
+            "high_cost_threshold": settings.recommendation_thresholds.get("high_cost_threshold"),
+        },
+        provider_health=provider_management,
+        state_changes=recent_state_changes,
+        now=generated_at,
+    )
+    household_decisions = household_decision_output["decisions"]
+    decision_summary = household_decision_output["summary"]
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -502,6 +518,7 @@ def dashboard_data(
         state_changes=recent_state_changes,
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
+        household_decisions=household_decisions,
         advisors=advisors,
         setup=setup_checklist,
         preferences=notification_preferences,
@@ -527,6 +544,8 @@ def dashboard_data(
         "household_state": household_state.as_dict(),
         "household_behaviour": household_behaviour.as_dict(),
         "household_anomalies": household_anomalies,
+        "household_decisions": household_decisions,
+        "decision_summary": decision_summary,
         "latest_household_state_snapshot": latest_state_snapshot,
         "recent_household_state_snapshots": recent_state_snapshots,
         "household_state_snapshot": state_snapshot,
@@ -3566,6 +3585,44 @@ def household_anomalies_html(anomalies: Optional[list[dict]]) -> str:
     """
 
 
+def household_decisions_html(
+    decisions: Optional[list[dict]],
+    summary: Optional[dict],
+) -> str:
+    if not decisions:
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Decision Summary</h3><span>0 active</span></div>
+      <p class="notice">No active household decisions are currently emitted.</p>
+    </div>
+    """
+    rows = []
+    for decision in decisions[:8]:
+        priority = str(decision.get("priority") or "medium")
+        confidence = str(decision.get("confidence") or "UNKNOWN")
+        tone = "bad" if priority in {"high", "critical"} else "neutral" if priority == "medium" else "good"
+        reasons = decision.get("reasons") or []
+        reason = reasons[0].get("summary") if reasons and isinstance(reasons[0], dict) else decision.get("type")
+        evidence = decision.get("evidence") or []
+        evidence_summary = evidence[0].get("signal") if evidence and isinstance(evidence[0], dict) else "supporting evidence"
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(decision.get("type") or "Decision").replace("_", " ").title())}</span>
+              <strong>{html.escape(priority.title())} / {html.escape(confidence.title())}</strong>
+              <small>{html.escape(str(reason or ""))} Evidence: {html.escape(str(evidence_summary))}</small>
+            </div>
+            """
+        )
+    active_count = int((summary or {}).get("active_count") or len(decisions))
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Decision Summary</h3><span>{active_count} active</span></div>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
 def state_changes_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3679,6 +3736,8 @@ def system_page_html(
     household_state=None,
     household_behaviour: Optional[dict] = None,
     household_anomalies: Optional[list[dict]] = None,
+    household_decisions: Optional[list[dict]] = None,
+    decision_summary: Optional[dict] = None,
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
@@ -3717,6 +3776,7 @@ def system_page_html(
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {household_behaviour_html(household_behaviour)}
         {household_anomalies_html(household_anomalies)}
+        {household_decisions_html(household_decisions, decision_summary)}
         {state_changes_html(state_change_summary)}
         {notification_preferences_html(notification_preferences)}
         {notification_readiness_html(notification_readiness_summary)}
@@ -4122,6 +4182,22 @@ def write_html(
             ),
         },
     )
+    household_decision_output = snapshot_engine.get_household_decisions(
+        household_state=household_state,
+        context=household_current_context,
+        behaviour=household_behaviour,
+        anomalies=household_anomalies,
+        capability_summary=capability_summary,
+        financial_metadata={
+            "projected_bill": glance_projected,
+            "high_cost_threshold": settings.recommendation_thresholds.get("high_cost_threshold"),
+        },
+        provider_health=provider_management,
+        state_changes=recent_state_changes,
+        now=generated_dt,
+    )
+    household_decisions = household_decision_output["decisions"]
+    decision_summary = household_decision_output["summary"]
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -4193,6 +4269,7 @@ def write_html(
         state_changes=recent_state_changes,
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
+        household_decisions=household_decisions,
         advisors=advisors,
         setup=setup_checklist,
         preferences=notification_preferences,
@@ -4273,7 +4350,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
     )

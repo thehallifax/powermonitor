@@ -258,6 +258,7 @@ class NotificationEngine:
         state_changes: Optional[list[Any]] = None,
         household_state_snapshot: Optional[Any] = None,
         context: Optional[Any] = None,
+        household_decisions: Optional[list[Any]] = None,
         advisors: Optional[Any] = None,
         setup: Optional[Any] = None,
         evidence_quality: Optional[Any] = None,
@@ -277,6 +278,9 @@ class NotificationEngine:
 
         for change in state_changes or []:
             candidate = self._candidate_from_state_change(change, household_id, created, quality, context, advisors, setup, preferences, recent_keys)
+            self._append_candidate(candidates, seen_keys, candidate)
+
+        for candidate in self._candidates_from_decisions(household_decisions, household_id, created, quality, context, setup, advisors, preferences, recent_keys):
             self._append_candidate(candidates, seen_keys, candidate)
 
         for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, preferences, recent_keys):
@@ -341,6 +345,61 @@ class NotificationEngine:
         )
         reason = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
         return self._with_suppression(candidate, reason)
+
+    def _candidates_from_decisions(
+        self,
+        household_decisions: Optional[list[Any]],
+        household_id: str,
+        created: datetime,
+        quality: EvidenceQuality,
+        context: Optional[Any],
+        setup: Optional[Any],
+        advisors: Optional[Any],
+        preferences: NotificationPreferences,
+        recent_keys: set[str],
+    ) -> list[NotificationCandidate]:
+        candidates = []
+        mapping = {
+            "CHARGE_NOW": (NotificationType.CHARGE_NOW, NotificationPriority.HIGH),
+            "WAIT_FOR_CHEAPER_WINDOW": (NotificationType.WAIT_FOR_CHEAPER_WINDOW, NotificationPriority.MEDIUM),
+            "WAIT_FOR_SOLAR": (NotificationType.SOLAR_OPPORTUNITY, NotificationPriority.MEDIUM),
+            "REVIEW_PROVIDER": (NotificationType.PROVIDER_ERROR, NotificationPriority.HIGH),
+            "REVIEW_SETUP": (NotificationType.SETUP_INCOMPLETE, NotificationPriority.LOW),
+            "REVIEW_BILLING": (NotificationType.BILL_TRACKING_HIGH, NotificationPriority.HIGH),
+            "MONITOR_USAGE": (NotificationType.PEAK_PERIOD_STARTED, NotificationPriority.MEDIUM),
+            "INVESTIGATE_ANOMALY": (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.MEDIUM),
+            "DATA_INSUFFICIENT": (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.HIGH),
+        }
+        for decision in household_decisions or []:
+            decision_type = str(self._get(decision, "decision_type") or self._get(decision, "type") or "")
+            status = str(self._get(decision, "status") or "active")
+            if status != "active" or decision_type not in mapping:
+                continue
+            notification_type, default_priority = mapping[decision_type]
+            priority = self._priority_from_decision(decision, default_priority)
+            reason = self._decision_reason(decision)
+            evidence = [
+                NotificationEvidence(
+                    source="DecisionEngine",
+                    summary=reason,
+                    quality=self._decision_quality(decision) or quality,
+                    observed_at=self._get(decision, "created_at"),
+                )
+            ]
+            candidate = self._candidate(
+                household_id,
+                notification_type,
+                decision_type.replace("_", " ").title(),
+                reason,
+                priority,
+                created,
+                evidence,
+                f"decision:{self._get(decision, 'decision_id') or decision_type}",
+                expires_at=self._get(decision, "valid_until"),
+            )
+            suppression = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
+            candidates.append(self._with_suppression(candidate, suppression))
+        return candidates
 
     def _candidates_from_advisors(
         self,
@@ -579,6 +638,34 @@ class NotificationEngine:
             except ValueError:
                 return None
         return None
+
+    def _decision_quality(self, decision: Any) -> Optional[EvidenceQuality]:
+        confidence = str(self._get(decision, "confidence") or "")
+        if confidence in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
+            return EvidenceQuality(confidence)
+        return None
+
+    def _priority_from_decision(
+        self,
+        decision: Any,
+        default: NotificationPriority,
+    ) -> NotificationPriority:
+        priority = str(self._get(decision, "priority") or "").lower()
+        return {
+            "low": NotificationPriority.LOW,
+            "medium": NotificationPriority.MEDIUM,
+            "high": NotificationPriority.HIGH,
+            "critical": NotificationPriority.CRITICAL,
+        }.get(priority, default)
+
+    def _decision_reason(self, decision: Any) -> str:
+        reasons = list(self._get(decision, "reasons") or [])
+        if reasons:
+            return str(self._get(reasons[0], "summary") or self._get(reasons[0], "code") or "Decision Engine output.")
+        outcome = self._get(decision, "outcome")
+        if outcome:
+            return str(self._get(outcome, "expected_effect") or self._get(outcome, "status") or "Decision Engine output.")
+        return "Decision Engine output."
 
     def _active_advisors(self, advisors: Optional[Any]) -> list[Any]:
         if advisors is None:

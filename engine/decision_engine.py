@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import hashlib
+from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
-from typing import Callable, Optional
+from enum import Enum
+from typing import Any, Callable, Optional
 
 from .financial_engine import FinancialEngine
 from .models import (
@@ -34,9 +37,631 @@ EV_BUCKET_LABELS = {
 }
 
 
+class DecisionType(str, Enum):
+    CHARGE_NOW = "CHARGE_NOW"
+    WAIT_FOR_CHEAPER_WINDOW = "WAIT_FOR_CHEAPER_WINDOW"
+    WAIT_FOR_SOLAR = "WAIT_FOR_SOLAR"
+    NO_ACTION = "NO_ACTION"
+    REVIEW_PROVIDER = "REVIEW_PROVIDER"
+    REVIEW_SETUP = "REVIEW_SETUP"
+    REVIEW_BILLING = "REVIEW_BILLING"
+    MONITOR_USAGE = "MONITOR_USAGE"
+    INVESTIGATE_ANOMALY = "INVESTIGATE_ANOMALY"
+    DATA_INSUFFICIENT = "DATA_INSUFFICIENT"
+
+
+class DecisionPriority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class DecisionConfidence(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    UNKNOWN = "UNKNOWN"
+
+
+class DecisionStatus(str, Enum):
+    ACTIVE = "active"
+    SUPPRESSED = "suppressed"
+    MONITORING = "monitoring"
+    RESOLVED = "resolved"
+
+
+@dataclass(frozen=True)
+class DecisionEvidence:
+    source: str
+    signal: str
+    value: Any = None
+    quality: DecisionConfidence = DecisionConfidence.UNKNOWN
+    observed_at: Optional[str] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "signal": self.signal,
+            "value": self.value,
+            "quality": self.quality.value,
+            "observed_at": self.observed_at,
+        }
+
+
+@dataclass(frozen=True)
+class DecisionReason:
+    code: str
+    summary: str
+    weight: float = 1.0
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DecisionOutcome:
+    status: str
+    expected_effect: str
+    financial_impact: Optional[dict[str, Any]] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class HouseholdDecision:
+    decision_id: str
+    household_id: str
+    decision_type: DecisionType
+    priority: DecisionPriority
+    confidence: DecisionConfidence
+    status: DecisionStatus
+    created_at: str
+    reasons: list[DecisionReason] = field(default_factory=list)
+    evidence: list[DecisionEvidence] = field(default_factory=list)
+    outcome: Optional[DecisionOutcome] = None
+    financial_impact: Optional[dict[str, Any]] = None
+    data_sources_used: list[str] = field(default_factory=list)
+    valid_until: Optional[str] = None
+    related_anomaly_ids: list[str] = field(default_factory=list)
+    related_state_change_ids: list[str] = field(default_factory=list)
+    required_capabilities: list[str] = field(default_factory=list)
+    available_capabilities: list[str] = field(default_factory=list)
+    missing_capabilities: list[str] = field(default_factory=list)
+
+    @property
+    def type(self) -> str:
+        return self.decision_type.value
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "decision_id": self.decision_id,
+            "household_id": self.household_id,
+            "type": self.decision_type.value,
+            "decision_type": self.decision_type.value,
+            "priority": self.priority.value,
+            "confidence": self.confidence.value,
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "valid_until": self.valid_until,
+            "reasons": [item.as_dict() for item in self.reasons],
+            "evidence": [item.as_dict() for item in self.evidence],
+            "outcome": self.outcome.as_dict() if self.outcome else None,
+            "financial_impact": self.financial_impact,
+            "data_sources_used": list(self.data_sources_used),
+            "related_anomaly_ids": list(self.related_anomaly_ids),
+            "related_state_change_ids": list(self.related_state_change_ids),
+            "required_capabilities": list(self.required_capabilities),
+            "available_capabilities": list(self.available_capabilities),
+            "missing_capabilities": list(self.missing_capabilities),
+        }
+
+
+class DecisionEngine:
+    """Single authority for normalized household decisions.
+
+    The engine consumes existing platform state and emits decision contracts.
+    It does not render wording, HTML, or UI-specific copy.
+    """
+
+    def build(
+        self,
+        *,
+        household_state: Any = None,
+        context: Any = None,
+        behaviour: Any = None,
+        anomalies: Optional[list[Any]] = None,
+        evidence_quality: Any = None,
+        notification_readiness: Any = None,
+        capability_summary: Any = None,
+        financial_metadata: Optional[dict[str, Any]] = None,
+        provider_health: Any = None,
+        state_changes: Optional[list[Any]] = None,
+        now: Optional[Any] = None,
+    ) -> list[HouseholdDecision]:
+        del behaviour, notification_readiness
+        created_at = _iso_now(now, household_state, context)
+        household_id = str(_get(household_state, "household_id") or _get(context, "household_id") or "default_household")
+        capabilities = _capability_map(capability_summary)
+        evidence_confidence = _decision_confidence(
+            evidence_quality
+            or _get(_get(household_state, "evidence"), "confidence")
+            or _get(context, "confidence")
+        )
+        decisions: list[HouseholdDecision] = []
+
+        self._setup_decisions(decisions, household_id, created_at, capabilities, evidence_confidence)
+        self._provider_decisions(decisions, household_id, created_at, provider_health, household_state, evidence_confidence)
+        self._data_quality_decisions(decisions, household_id, created_at, household_state, context, evidence_confidence)
+        self._anomaly_decisions(decisions, household_id, created_at, anomalies or [], evidence_confidence)
+        self._charging_decision(decisions, household_id, created_at, household_state, context, capabilities, financial_metadata or {}, evidence_confidence)
+        self._billing_decision(decisions, household_id, created_at, household_state, context, financial_metadata or {}, evidence_confidence)
+        self._state_change_decisions(decisions, household_id, created_at, state_changes or [], evidence_confidence)
+
+        if not decisions:
+            decisions.append(self._decision(
+                household_id,
+                DecisionType.NO_ACTION,
+                DecisionPriority.LOW,
+                evidence_confidence,
+                created_at,
+                [DecisionReason("no_active_action", "Current platform signals do not require an immediate household action.")],
+                [DecisionEvidence("HouseholdState", "current_status", _get(_get(household_state, "summary"), "current_status"), evidence_confidence, created_at)],
+                outcome=DecisionOutcome("monitor", "Continue monitoring current household state."),
+                data_sources=_data_sources_from_state(household_state, context),
+            ))
+        return sorted(decisions, key=_household_decision_sort_key)
+
+    def summary(self, decisions: list[HouseholdDecision]) -> dict[str, Any]:
+        counts_by_type: dict[str, int] = {}
+        counts_by_priority: dict[str, int] = {}
+        counts_by_status: dict[str, int] = {}
+        for decision in decisions:
+            counts_by_type[decision.decision_type.value] = counts_by_type.get(decision.decision_type.value, 0) + 1
+            counts_by_priority[decision.priority.value] = counts_by_priority.get(decision.priority.value, 0) + 1
+            counts_by_status[decision.status.value] = counts_by_status.get(decision.status.value, 0) + 1
+        primary = decisions[0].as_dict() if decisions else None
+        return {
+            "count": len(decisions),
+            "active_count": len([item for item in decisions if item.status == DecisionStatus.ACTIVE]),
+            "counts_by_type": counts_by_type,
+            "counts_by_priority": counts_by_priority,
+            "counts_by_status": counts_by_status,
+            "primary_decision": primary,
+        }
+
+    def _setup_decisions(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        capabilities: dict[str, Any],
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        required = ["grid_smart_meter", "tariff"]
+        missing = [capability for capability in required if not _capability_usable(capabilities.get(capability))]
+        if not missing:
+            return
+        available = [capability for capability in required if capability not in missing]
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.REVIEW_SETUP,
+            DecisionPriority.HIGH,
+            _cap_confidence(evidence_confidence, DecisionConfidence.MEDIUM),
+            created_at,
+            [DecisionReason("required_capability_missing", f"Required capability missing: {', '.join(missing)}.")],
+            [
+                DecisionEvidence("CapabilitySummary", capability, _capability_state(capabilities.get(capability)), evidence_confidence, created_at)
+                for capability in required
+            ],
+            outcome=DecisionOutcome("setup_required", "Complete required platform setup before relying on household decisions."),
+            data_sources=["Capability Summary"],
+            required_capabilities=required,
+            available_capabilities=available,
+            missing_capabilities=missing,
+        ))
+
+    def _provider_decisions(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        provider_health: Any,
+        household_state: Any,
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        degraded = _provider_degraded(provider_health)
+        collector = _get(household_state, "collector")
+        collector_healthy = _get(collector, "healthy")
+        if not degraded and collector_healthy is not False:
+            return
+        reasons = []
+        evidence = []
+        if degraded:
+            reasons.append(DecisionReason("provider_degraded", "One or more providers report degraded health."))
+            evidence.append(DecisionEvidence("ProviderHealth", "provider_health", "degraded", evidence_confidence, created_at))
+        if collector_healthy is False:
+            reasons.append(DecisionReason("collector_unhealthy", "Collector health is not currently good."))
+            evidence.append(DecisionEvidence("HouseholdState", "collector_status", _get(collector, "status"), evidence_confidence, created_at))
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.REVIEW_PROVIDER,
+            DecisionPriority.HIGH if collector_healthy is False else DecisionPriority.MEDIUM,
+            _cap_confidence(evidence_confidence, DecisionConfidence.MEDIUM),
+            created_at,
+            reasons,
+            evidence,
+            outcome=DecisionOutcome("provider_review", "Provider or collector health should be reviewed before acting on dependent advice."),
+            data_sources=["Provider Health", "Household State"],
+        ))
+
+    def _data_quality_decisions(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        household_state: Any,
+        context: Any,
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        if evidence_confidence not in {DecisionConfidence.LOW, DecisionConfidence.UNKNOWN}:
+            return
+        evidence_state = _get(household_state, "evidence")
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.DATA_INSUFFICIENT,
+            DecisionPriority.MEDIUM,
+            evidence_confidence,
+            created_at,
+            [DecisionReason("evidence_insufficient", "Available evidence is not strong enough for high-confidence household action.")],
+            [
+                DecisionEvidence("HouseholdState", "evidence_quality", _get(evidence_state, "quality"), evidence_confidence, created_at),
+                DecisionEvidence("HouseholdContext", "context_evidence", _get(context, "evidence"), evidence_confidence, created_at),
+            ],
+            outcome=DecisionOutcome("do_not_escalate", "Avoid high-confidence action decisions until evidence improves."),
+            data_sources=_data_sources_from_state(household_state, context),
+        ))
+
+    def _anomaly_decisions(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        anomalies: list[Any],
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        active = [
+            anomaly for anomaly in anomalies
+            if str(_get(anomaly, "severity") or "").lower() in {"warning", "critical", "watch"}
+        ]
+        if not active:
+            return
+        top = sorted(active, key=lambda item: _anomaly_rank(_get(item, "severity")), reverse=True)[0]
+        anomaly_confidence = _decision_confidence(_get(top, "confidence") or evidence_confidence)
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.INVESTIGATE_ANOMALY,
+            DecisionPriority.HIGH if str(_get(top, "severity")).lower() in {"warning", "critical"} else DecisionPriority.MEDIUM,
+            _cap_confidence(evidence_confidence, anomaly_confidence),
+            created_at,
+            [DecisionReason("household_anomaly_active", str(_get(top, "summary") or _get(top, "title") or "A household anomaly is active."))],
+            [DecisionEvidence("AnomalyEngine", str(_get(top, "category") or "anomaly"), _get(top, "title"), anomaly_confidence, _get(top, "first_detected") or created_at)],
+            outcome=DecisionOutcome("investigate", "Investigate the active anomaly using its evidence trail."),
+            data_sources=list(_get(top, "data_sources_used") or ["Anomaly Engine"]),
+            related_anomaly_ids=[str(_get(top, "anomaly_id") or "")],
+        ))
+
+    def _charging_decision(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        household_state: Any,
+        context: Any,
+        capabilities: dict[str, Any],
+        financial_metadata: dict[str, Any],
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        if not _capability_usable(capabilities.get("ev")):
+            return
+        tariff = str(_get(context, "tariff") or "")
+        charging = str(_get(context, "charging") or "")
+        solar = str(_get(context, "solar") or "")
+        current_rate = _get(_get(household_state, "tariff"), "active_rate")
+        financial_impact = _financial_impact_dict(financial_metadata.get("charging"))
+        evidence = [
+            DecisionEvidence("HouseholdContext", "tariff", tariff, evidence_confidence, created_at),
+            DecisionEvidence("HouseholdContext", "charging", charging, evidence_confidence, created_at),
+            DecisionEvidence("HouseholdState", "active_rate", current_rate, evidence_confidence, created_at),
+        ]
+        if evidence_confidence in {DecisionConfidence.LOW, DecisionConfidence.UNKNOWN}:
+            return
+        if charging == "CHEAP_WINDOW_ACTIVE" or tariff == "LOWEST_COST":
+            decisions.append(self._decision(
+                household_id,
+                DecisionType.CHARGE_NOW,
+                DecisionPriority.HIGH,
+                evidence_confidence,
+                created_at,
+                [DecisionReason("cheap_window_active", "The current tariff context is the lowest-cost charging window.")],
+                evidence,
+                outcome=DecisionOutcome("charge_now", "Charging now aligns with current tariff context.", financial_impact),
+                financial_impact=financial_impact,
+                data_sources=_data_sources_from_state(household_state, context, "Capability Summary"),
+                required_capabilities=["ev", "tariff"],
+                available_capabilities=["ev", "tariff"],
+            ))
+        elif tariff in {"HIGH_COST", "HIGHEST_COST"}:
+            decisions.append(self._decision(
+                household_id,
+                DecisionType.WAIT_FOR_CHEAPER_WINDOW,
+                DecisionPriority.HIGH if tariff == "HIGHEST_COST" else DecisionPriority.MEDIUM,
+                evidence_confidence,
+                created_at,
+                [DecisionReason("current_tariff_high", "The current tariff context is high-cost and a cheaper window is known.")],
+                evidence + [DecisionEvidence("HouseholdState", "next_lower_cost_window", _get(_get(household_state, "tariff"), "next_lower_cost_window"), evidence_confidence, created_at)],
+                outcome=DecisionOutcome("wait", "Wait for the next lower-cost tariff window.", financial_impact),
+                financial_impact=financial_impact,
+                data_sources=_data_sources_from_state(household_state, context, "Capability Summary"),
+                required_capabilities=["ev", "tariff"],
+                available_capabilities=["ev", "tariff"],
+            ))
+        elif solar == "SOLAR_SURPLUS_POSSIBLE":
+            decisions.append(self._decision(
+                household_id,
+                DecisionType.WAIT_FOR_SOLAR,
+                DecisionPriority.MEDIUM,
+                evidence_confidence,
+                created_at,
+                [DecisionReason("solar_surplus_possible", "Solar context suggests surplus may support flexible charging.")],
+                evidence + [DecisionEvidence("HouseholdContext", "solar", solar, evidence_confidence, created_at)],
+                outcome=DecisionOutcome("wait_for_solar", "Wait for solar-supported charging evidence."),
+                data_sources=_data_sources_from_state(household_state, context, "Capability Summary"),
+                required_capabilities=["ev", "solar"],
+                available_capabilities=["ev", "solar"],
+            ))
+
+    def _billing_decision(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        household_state: Any,
+        context: Any,
+        financial_metadata: dict[str, Any],
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        billing = str(_get(context, "billing") or "")
+        projected = financial_metadata.get("projected_bill")
+        if billing not in {"HIGH_SPEND", "BILL_END_APPROACHING"} and not _high_projected_bill(financial_metadata):
+            return
+        priority = DecisionPriority.HIGH if billing == "HIGH_SPEND" or _high_projected_bill(financial_metadata) else DecisionPriority.MEDIUM
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.REVIEW_BILLING,
+            priority,
+            evidence_confidence,
+            created_at,
+            [DecisionReason("billing_context_review", f"Billing context is {billing or 'available for review'}.")],
+            [
+                DecisionEvidence("HouseholdContext", "billing", billing, evidence_confidence, created_at),
+                DecisionEvidence("FinancialEngine", "projected_bill", projected, evidence_confidence, created_at),
+            ],
+            outcome=DecisionOutcome("review_billing", "Review bill trajectory and tariff exposure.", _financial_impact_dict(financial_metadata.get("billing"))),
+            financial_impact=_financial_impact_dict(financial_metadata.get("billing")),
+            data_sources=_data_sources_from_state(household_state, context, "FinancialEngine"),
+        ))
+
+    def _state_change_decisions(
+        self,
+        decisions: list[HouseholdDecision],
+        household_id: str,
+        created_at: str,
+        state_changes: list[Any],
+        evidence_confidence: DecisionConfidence,
+    ) -> None:
+        peak_changes = [
+            change for change in state_changes
+            if str(_get(change, "change_type") or "") in {"entered_peak", "tariff_window_changed"}
+        ]
+        if not peak_changes:
+            return
+        latest = peak_changes[0]
+        decisions.append(self._decision(
+            household_id,
+            DecisionType.MONITOR_USAGE,
+            DecisionPriority.MEDIUM,
+            evidence_confidence,
+            created_at,
+            [DecisionReason("state_change_monitoring", str(_get(latest, "summary") or "A relevant household state change occurred."))],
+            [DecisionEvidence("StateChangeEngine", str(_get(latest, "change_type") or "state_change"), _get(latest, "title"), evidence_confidence, _get(latest, "detected_at") or created_at)],
+            outcome=DecisionOutcome("monitor", "Monitor usage while this state change is active."),
+            data_sources=["StateChangeEngine"],
+            related_state_change_ids=[str(_get(latest, "change_id") or "")],
+        ))
+
+    def _decision(
+        self,
+        household_id: str,
+        decision_type: DecisionType,
+        priority: DecisionPriority,
+        confidence: DecisionConfidence,
+        created_at: str,
+        reasons: list[DecisionReason],
+        evidence: list[DecisionEvidence],
+        *,
+        outcome: Optional[DecisionOutcome] = None,
+        financial_impact: Optional[dict[str, Any]] = None,
+        data_sources: Optional[list[str]] = None,
+        related_anomaly_ids: Optional[list[str]] = None,
+        related_state_change_ids: Optional[list[str]] = None,
+        required_capabilities: Optional[list[str]] = None,
+        available_capabilities: Optional[list[str]] = None,
+        missing_capabilities: Optional[list[str]] = None,
+        status: DecisionStatus = DecisionStatus.ACTIVE,
+    ) -> HouseholdDecision:
+        reason_key = "|".join(reason.code for reason in reasons) or "none"
+        evidence_key = "|".join(str(item.value) for item in evidence[:3])
+        decision_id = hashlib.sha256(f"{household_id}|{decision_type.value}|{reason_key}|{evidence_key}".encode("utf-8")).hexdigest()[:24]
+        return HouseholdDecision(
+            decision_id=decision_id,
+            household_id=household_id,
+            decision_type=decision_type,
+            priority=priority,
+            confidence=confidence,
+            status=status,
+            created_at=created_at,
+            reasons=reasons,
+            evidence=evidence,
+            outcome=outcome,
+            financial_impact=financial_impact,
+            data_sources_used=list(dict.fromkeys(data_sources or [])),
+            related_anomaly_ids=[item for item in (related_anomaly_ids or []) if item],
+            related_state_change_ids=[item for item in (related_state_change_ids or []) if item],
+            required_capabilities=required_capabilities or [],
+            available_capabilities=available_capabilities or [],
+            missing_capabilities=missing_capabilities or [],
+        )
+
+
 Rule = Callable[[dict, dict], Optional[Decision]]
 
 financial_engine = FinancialEngine()
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    value = getattr(obj, key, default)
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _iso_now(now: Optional[Any], household_state: Any, context: Any) -> str:
+    if now is not None:
+        return now.isoformat(timespec="seconds") if hasattr(now, "isoformat") else str(now)
+    return str(_get(household_state, "generated_at") or _get(context, "observed_at") or date.today().isoformat())
+
+
+def _decision_confidence(value: Any) -> DecisionConfidence:
+    if isinstance(value, DecisionConfidence):
+        return value
+    text = str(value or "").upper()
+    if text in {"VERY HIGH", "VERY_HIGH", "HIGH"}:
+        return DecisionConfidence.HIGH
+    if text == "MEDIUM":
+        return DecisionConfidence.MEDIUM
+    if text == "LOW":
+        return DecisionConfidence.LOW
+    return DecisionConfidence.UNKNOWN
+
+
+def _cap_confidence(*values: DecisionConfidence) -> DecisionConfidence:
+    order = {
+        DecisionConfidence.UNKNOWN: 0,
+        DecisionConfidence.LOW: 1,
+        DecisionConfidence.MEDIUM: 2,
+        DecisionConfidence.HIGH: 3,
+    }
+    return min(values, key=lambda item: order[item]) if values else DecisionConfidence.UNKNOWN
+
+
+def _capability_map(capability_summary: Any) -> dict[str, Any]:
+    capabilities = _get(capability_summary, "capabilities") or []
+    result = {}
+    for capability in capabilities:
+        capability_id = _get(capability, "capability_id")
+        if capability_id:
+            result[str(capability_id)] = capability
+    return result
+
+
+def _capability_usable(capability: Any) -> bool:
+    if capability is None:
+        return False
+    usable = _get(capability, "usable")
+    if usable is not None:
+        return bool(usable)
+    return bool(_get(capability, "present") or _get(capability, "configured") or _get(capability, "available"))
+
+
+def _capability_state(capability: Any) -> str:
+    if capability is None:
+        return "missing"
+    if _capability_usable(capability):
+        return "usable"
+    if _get(capability, "configured"):
+        return "configured"
+    if _get(capability, "available"):
+        return "available"
+    return "missing"
+
+
+def _provider_degraded(provider_health: Any) -> bool:
+    if provider_health is None:
+        return False
+    data = provider_health.as_dict() if hasattr(provider_health, "as_dict") else provider_health
+    providers = _get(data, "providers") or []
+    if isinstance(data, dict) and not providers:
+        providers = data.get("provider_status") or data.get("latest") or []
+    for provider in providers:
+        state = str(_get(provider, "lifecycle_state") or _get(provider, "connection_status") or _get(provider, "status") or "").upper()
+        if state in {"DEGRADED", "ERROR", "FAILED"}:
+            return True
+    return False
+
+
+def _data_sources_from_state(household_state: Any, context: Any, *extra: str) -> list[str]:
+    evidence = _get(household_state, "evidence")
+    sources = list(_get(evidence, "data_sources_used") or [])
+    sources.extend(_get(context, "data_sources_used") or [])
+    sources.extend(extra)
+    return list(dict.fromkeys(str(source) for source in sources if source))
+
+
+def _financial_impact_dict(value: Any) -> Optional[dict[str, Any]]:
+    if value is None:
+        return None
+    if isinstance(value, FinancialImpact):
+        return value.as_dict()
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "as_dict"):
+        return value.as_dict()
+    return None
+
+
+def _high_projected_bill(financial_metadata: dict[str, Any]) -> bool:
+    projected = financial_metadata.get("projected_bill")
+    threshold = financial_metadata.get("high_cost_threshold")
+    try:
+        return projected is not None and threshold is not None and float(projected) > float(threshold)
+    except (TypeError, ValueError):
+        return False
+
+
+def _anomaly_rank(severity: Any) -> int:
+    return {"critical": 4, "warning": 3, "watch": 2, "info": 1}.get(str(severity or "").lower(), 0)
+
+
+def _household_decision_sort_key(decision: HouseholdDecision) -> tuple[int, int, str]:
+    priority = {
+        DecisionPriority.CRITICAL: 0,
+        DecisionPriority.HIGH: 1,
+        DecisionPriority.MEDIUM: 2,
+        DecisionPriority.LOW: 3,
+    }.get(decision.priority, 4)
+    confidence = {
+        DecisionConfidence.HIGH: 0,
+        DecisionConfidence.MEDIUM: 1,
+        DecisionConfidence.LOW: 2,
+        DecisionConfidence.UNKNOWN: 3,
+    }.get(decision.confidence, 4)
+    return (priority, confidence, decision.decision_type.value)
 
 
 def _impact(

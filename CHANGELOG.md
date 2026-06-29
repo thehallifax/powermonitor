@@ -1,5 +1,23 @@
 # Changelog
 
+## PB-022 - Decision Engine
+
+- Added normalized `DecisionEngine` household decision contracts for decision
+  type, priority, confidence, evidence, reasons, outcomes, status, capability
+  requirements, financial metadata, and serialization.
+- Added DataEngine-backed household decision generation from Household State,
+  Household Context, Behaviour, Anomalies, capabilities, provider health,
+  financial metadata, and State Changes.
+- Exposed `household_decisions` and `decision_summary` through dashboard/API
+  output without replacing existing recommendation cards.
+- Updated Notification Readiness to consume normalized Household Decisions in
+  addition to state changes and advisors.
+- Added a System page Decision Summary card showing active decisions,
+  confidence, priority, reasons, and supporting evidence.
+- Added Decision Engine tests for charging, insufficient evidence, high-cost
+  waiting, anomaly investigation, capability-aware setup, serialization, and
+  notification consumption.
+
 ## PB-021 - Behaviour-Aware Anomaly Engine
 
 - Added `AnomalyEngine` with household-relative anomaly models for baseload,

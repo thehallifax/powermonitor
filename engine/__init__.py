@@ -1,7 +1,19 @@
 from .briefing_engine import BriefingEngine
 from .charging_advisor import ChargingAdvisor
 from .cost_advisor import CostAdvisor
-from .decision_engine import generate_decisions, generate_ev_session_decisions
+from .decision_engine import (
+    DecisionConfidence,
+    DecisionEngine,
+    DecisionEvidence,
+    DecisionOutcome,
+    DecisionPriority,
+    DecisionReason,
+    DecisionStatus,
+    DecisionType,
+    HouseholdDecision,
+    generate_decisions,
+    generate_ev_session_decisions,
+)
 from .efficiency_advisor import EfficiencyAdvisor
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
@@ -76,6 +88,14 @@ __all__ = [
     "DataEngine",
     "DailyBriefing",
     "Decision",
+    "DecisionConfidence",
+    "DecisionEngine",
+    "DecisionEvidence",
+    "DecisionOutcome",
+    "DecisionPriority",
+    "DecisionReason",
+    "DecisionStatus",
+    "DecisionType",
     "EfficiencyAdvisor",
     "EngineStatus",
     "Evidence",
@@ -92,6 +112,7 @@ __all__ = [
     "Household",
     "HouseholdCapability",
     "HouseholdContext",
+    "HouseholdDecision",
     "HouseholdMembership",
     "HouseholdSnapshot",
     "Insight",

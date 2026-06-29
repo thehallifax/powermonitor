@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
 from .anomaly_engine import AnomalyEngine, HouseholdAnomaly
 from .behaviour_engine import BehaviourEngine, HouseholdBehaviour
+from .decision_engine import DecisionEngine
 from .models import (
     Account,
     CapabilityStatus,
@@ -1151,6 +1152,40 @@ class DataEngine:
             current_observations=current_observations,
         )
         return [anomaly.as_dict() for anomaly in anomalies]
+
+    def get_household_decisions(
+        self,
+        *,
+        household_state: Any,
+        context: Any,
+        behaviour: Any = None,
+        anomalies: Optional[list[Any]] = None,
+        evidence_quality: Any = None,
+        notification_readiness: Any = None,
+        capability_summary: Any = None,
+        financial_metadata: Optional[dict[str, Any]] = None,
+        provider_health: Any = None,
+        state_changes: Optional[list[Any]] = None,
+        now: Any = None,
+    ) -> dict[str, Any]:
+        engine = DecisionEngine()
+        decisions = engine.build(
+            household_state=household_state,
+            context=context,
+            behaviour=behaviour,
+            anomalies=anomalies or [],
+            evidence_quality=evidence_quality,
+            notification_readiness=notification_readiness,
+            capability_summary=capability_summary,
+            financial_metadata=financial_metadata or {},
+            provider_health=provider_health,
+            state_changes=state_changes or [],
+            now=now,
+        )
+        return {
+            "decisions": [decision.as_dict() for decision in decisions],
+            "summary": engine.summary(decisions),
+        }
 
     def get_ev_source_counts(self) -> list[dict[str, Any]]:
         household_id = self._active_household_id()
