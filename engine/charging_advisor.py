@@ -67,6 +67,10 @@ class ChargingAdvisor:
         bucket = context.current_tariff_bucket or current_tariff_bucket(observed_at)
         available, freshness, confidence = self._data_is_available(today_summary, billing_summary, health)
         solar_status, has_solar_surplus = solar_signal(today_summary)
+        if not context.daylight:
+            has_solar_surplus = False
+            if solar_status != "Solar unavailable":
+                solar_status = "Solar is not available at night"
         tariff_rates = self._import_rates(settings)
         top_priority = self._top_priority(recommendations)
         bill_is_high = any(item.id == "high_cost_alert" for item in recommendations)

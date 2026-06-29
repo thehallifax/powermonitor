@@ -2,6 +2,7 @@
 import html
 import json
 import logging
+import math
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
@@ -170,6 +171,8 @@ DEFAULT_SETTINGS = {
     "current_billing_period_end": None,
     "previous_billing_period_start": None,
     "previous_billing_period_end": None,
+    "billing_cycle_configured": False,
+    "retailer": "",
     "current_plan": "synergy_ev_add_on",
     "comparison_plan": "previous_flat_or_home_plan",
     "comparison_plan_rates": {
@@ -208,6 +211,8 @@ class Settings:
     current_billing_period_end: Optional[date]
     previous_billing_period_start: Optional[date]
     previous_billing_period_end: Optional[date]
+    billing_cycle_configured: bool
+    retailer: str
     current_plan: str
     comparison_plan: str
     comparison_plan_rates: dict
@@ -327,7 +332,12 @@ def dashboard_data(
         hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = context_engine.get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
-        timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
+        timeline_candidates = build_decision_timeline(
+            period_summary,
+            recommendations,
+            comparison,
+            include_billing_period=selected.kind == "current_billing_period",
+        )
         timeline = context_engine.persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
         provider_observations = context_engine.get_provider_observation_summary()
@@ -535,6 +545,8 @@ def load_settings() -> Settings:
         current_billing_period_end=optional_date("current_billing_period_end"),
         previous_billing_period_start=optional_date("previous_billing_period_start"),
         previous_billing_period_end=optional_date("previous_billing_period_end"),
+        billing_cycle_configured=bool(raw.get("billing_cycle_configured")),
+        retailer=str(raw.get("retailer") or ""),
         current_plan=str(raw["current_plan"]),
         comparison_plan=str(raw["comparison_plan"]),
         comparison_plan_rates={
@@ -628,8 +640,18 @@ def format_time_from_minutes(minutes: Optional[float]) -> Optional[str]:
 def average_clock_time(datetimes: list[datetime]) -> Optional[str]:
     if not datetimes:
         return None
-    minutes = [(value.hour * 60 + value.minute + value.second / 60) for value in datetimes]
-    return format_time_from_minutes(sum(minutes) / len(minutes))
+    angles = [
+        ((value.hour * 60 + value.minute + value.second / 60) / (24 * 60)) * 2 * math.pi
+        for value in datetimes
+    ]
+    sin_sum = sum(math.sin(angle) for angle in angles)
+    cos_sum = sum(math.cos(angle) for angle in angles)
+    if abs(sin_sum) < 1e-9 and abs(cos_sum) < 1e-9:
+        return None
+    mean_angle = math.atan2(sin_sum, cos_sum)
+    if mean_angle < 0:
+        mean_angle += 2 * math.pi
+    return format_time_from_minutes(mean_angle / (2 * math.pi) * 24 * 60)
 
 
 def format_duration(minutes: Optional[float]) -> str:
@@ -654,6 +676,7 @@ def session_brief(session: dict) -> Optional[dict]:
         "cost_per_kwh": session.get("cost_per_kwh"),
         "dominant_tariff": session.get("dominant_tariff"),
         "max_power_kw": session.get("max_power_kw"),
+        "max_power_source": session.get("max_power_source"),
     }
 
 
@@ -692,8 +715,13 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
     finishes = [value for value in finishes if value]
     cheapest = min(sessions, key=lambda session: session["cost"]) if sessions else None
     expensive = max(sessions, key=lambda session: session["cost"]) if sessions else None
-    longest = max(sessions, key=lambda session: session["duration_minutes"] or 0) if sessions else None
-    highest_power = max(sessions, key=lambda session: session["max_power_kw"] or 0) if sessions else None
+    duration_sessions = [session for session in sessions if session.get("duration_minutes") is not None]
+    power_sessions = [
+        session for session in sessions
+        if session.get("max_power_kw") is not None and session.get("max_power_source") == "provided"
+    ]
+    longest = max(duration_sessions, key=lambda session: session["duration_minutes"]) if duration_sessions else None
+    highest_power = max(power_sessions, key=lambda session: session["max_power_kw"]) if power_sessions else None
 
     recommendations = generate_ev_session_decisions(sessions, settings.import_rates)
 
@@ -717,6 +745,12 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
             "charging_days": len({session["date"] for session in sessions if session["date"]}),
             "average_start_time": average_clock_time(starts),
             "average_finish_time": average_clock_time(finishes),
+            "average_duration_minutes": (
+                sum(session["duration_minutes"] for session in duration_sessions) / len(duration_sessions)
+                if duration_sessions else None
+            ),
+            "duration_sample_count": len(duration_sessions),
+            "highest_power_available": bool(highest_power),
         },
         "recommendations": recommendations,
         "sessions": history,
@@ -1522,13 +1556,14 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
             metric(
                 "Highest power session",
                 compact_session_label(highest)[0],
-                f"{float(highest.get('max_power_kw') or 0):.2f} kW" if highest else "No session data",
+                f"{float(highest.get('max_power_kw') or 0):.2f} kW from charger data" if highest else "Unavailable from imported sessions",
                 "ev",
             ),
+            metric("Average duration", format_duration(insights.get("average_duration_minutes")), f"{insights.get('duration_sample_count') or 0} sessions with reliable duration", "ev"),
             metric("Number of sessions", str(insights["session_count"]), "Imported charger sessions", "ev"),
             metric("Charging days", str(insights["charging_days"]), "Unique days with charging", "ev"),
-            metric("Average start time", insights.get("average_start_time") or "n/a", "Across imported sessions", "ev"),
-            metric("Average finish time", insights.get("average_finish_time") or "n/a", "Across imported sessions", "ev"),
+            metric("Average start time", insights.get("average_start_time") or "n/a", "Circular average across imported sessions", "ev"),
+            metric("Average finish time", insights.get("average_finish_time") or "n/a", "Circular average across imported sessions", "ev"),
         ]
     )
 
@@ -1940,7 +1975,11 @@ def period_controls_html(selected: Period) -> str:
         ("yesterday", "Yesterday"),
         ("last_7_days", "Last 7 days"),
         ("this_month", "This month"),
+        ("last_month", "Last month"),
+        ("year_to_date", "Year to date"),
+        ("last_calendar_year", "Last calendar year"),
         ("current_billing_period", "Current billing period"),
+        ("previous_billing_period", "Previous billing period"),
         ("custom", "Custom"),
     )
     options = "".join(
@@ -2750,6 +2789,7 @@ def setup_section_html(section: SetupSection) -> str:
 
 def setup_page_html(
     setup: Optional[SetupChecklist],
+    settings: Optional[Settings] = None,
     promotion_summary: Optional[dict] = None,
 ) -> str:
     if not setup:
@@ -2766,6 +2806,7 @@ def setup_page_html(
         """
     return f"""
     {conflict_notice}
+    {billing_cycle_setup_html(settings)}
     <section class="report-section compact-section">
       <div class="section-title">
         <div><span class="eyebrow">Setup</span><h2>{setup.progress.completion_pct}% complete</h2></div>
@@ -2774,6 +2815,36 @@ def setup_page_html(
       <div class="setup-meter"><span style="width:{setup.progress.completion_pct}%"></span></div>
     </section>
     {sections}
+    """
+
+
+def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
+    if not settings:
+        return ""
+    plan_options = (
+        ("synergy_ev_add_on", "Synergy EV Add On"),
+        ("synergy_home_plan", "Synergy Home Plan"),
+        ("previous_flat_or_home_plan", "Previous Flat/Home Plan"),
+    )
+    options = "".join(
+        f'<option value="{html.escape(value)}"{" selected" if settings.current_plan == value else ""}>{html.escape(label)}</option>'
+        for value, label in plan_options
+    )
+    retailer = html.escape(settings.retailer)
+    return f"""
+    <section id="setup-billing" class="report-section setup-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Setup</span><h2>Billing Cycle</h2></div>
+        <p>Used by bills, projections, comparisons, and setup readiness</p>
+      </div>
+      <form class="setup-config-form" method="post" action="/setup/billing-cycle">
+        <label><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
+        <label><span>Retailer</span><input type="text" name="retailer" value="{retailer}" placeholder="Optional"></label>
+        <label><span>Tariff plan</span><select name="current_plan">{options}</select></label>
+        <button type="submit">Save Billing Cycle</button>
+      </form>
+      <p class="notice">Saving this completes the Billing Cycle setup task immediately. Current billing-period date overrides can still be kept in <code>config/settings.json</code> for exact bill matching.</p>
+    </section>
     """
 
 
@@ -3116,7 +3187,7 @@ def provider_observations_html(summary: Optional[dict]) -> str:
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Latest provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations have been recorded yet.</p>'}</div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before the Provider Observation pipeline. New imports and collectors will populate observations as they run.</p>'}</div>
     </div>
     """
 
@@ -3208,8 +3279,9 @@ def system_page_html(
     <section class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">System</span><h2>Collector and data sources</h2></div></div>
       <div class="metrics">
-        {metric("Collector status", collector_status_text(health), str(health.get("collector_message") or ""), "grid")}
-        {metric("SolarEdge session", str(health.get("failure_type") or "ok"), "Auth/session status", "bad" if health.get("status") != "ok" else "good")}
+        {metric("Collector status", collector_status_text(health), "Current collector state", "good" if health.get("status") == "ok" else "bad")}
+        {metric("Last successful collection", display_timestamp(health.get("last_successful_collection")), "Most recent successful collector run", "grid")}
+        {metric("Last failure", display_timestamp(health.get("last_collection_failure")), str(health.get("collector_message") or health.get("failure_type") or "No recent failure recorded"), "bad" if health.get("status") != "ok" and health.get("last_collection_failure") else "grid")}
         {metric("Report age", f"{float(health.get('report_age_minutes') or 0):.1f} minutes", "Freshness of generated dashboard", "grid")}
         {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
         {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Continuous Setup Engine readiness", "good" if setup and setup.progress.complete else "grid")}
@@ -3501,7 +3573,12 @@ def write_html(
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
-    timeline = timeline or build_decision_timeline(period_summary, recommendations, comparison)
+    timeline = timeline or build_decision_timeline(
+        period_summary,
+        recommendations,
+        comparison,
+        include_billing_period=selected_period.kind == "current_billing_period",
+    )
     billing_summary = billing_summary or period_summary
     household_context = report_household_context()
     try:
@@ -3630,7 +3707,7 @@ def write_html(
   </section>
   <section id="setup" class="page">
     <div class="page-heading"><h2>Finish household setup</h2><p>Continuous readiness guidance generated from household capability, import, collector, and recommendation state.</p></div>
-    {setup_page_html(setup_checklist, promotion_summary)}
+    {setup_page_html(setup_checklist, settings, promotion_summary)}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
@@ -4031,6 +4108,10 @@ def write_html(
     .setup-task-meta {{ display:grid; grid-template-columns:1fr; gap:8px; align-content:start; }}
     .setup-task-meta div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:11px; }}
     .setup-task-meta strong {{ display:block; margin-top:3px; font-size:13px; }}
+    .setup-config-form {{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:12px; align-items:end; }}
+    .setup-config-form label span {{ display:block; margin-bottom:5px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .setup-config-form input,.setup-config-form select,.setup-config-form button {{ width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
+    .setup-config-form button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
     .action-grid {{ gap:14px; }} .action-card {{ padding:20px; }}
     .action-card h3,.recommendation-card h3 {{ font-size:19px; letter-spacing:-.03em; }}
     .scenario-card {{ min-height:210px; padding:22px; }} .scenario-card strong {{ font-size:32px; }}
@@ -4041,7 +4122,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task,.setup-config-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
     @media (max-width:620px) {{
       main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}
@@ -4131,7 +4212,12 @@ def build_live_html(
         hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
-        timeline_candidates = build_decision_timeline(selected_summary, recommendations, comparison)
+        timeline_candidates = build_decision_timeline(
+            selected_summary,
+            recommendations,
+            comparison,
+            include_billing_period=selected.kind == "current_billing_period",
+        )
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
     return write_html(
@@ -4179,7 +4265,12 @@ def main() -> None:
             previous,
             previous_summary,
         )
-        timeline_candidates = build_decision_timeline(period_summary, recommendations, comparison)
+        timeline_candidates = build_decision_timeline(
+            period_summary,
+            recommendations,
+            comparison,
+            include_billing_period=True,
+        )
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(period_start, period_end)
 

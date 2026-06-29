@@ -922,8 +922,7 @@ class DataEngine:
         if duration is None and start_dt and end_dt:
             duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
         max_power = float(row[9]) if row[9] is not None else None
-        if max_power is None and duration and duration > 0:
-            max_power = energy / (duration / 60)
+        max_power_source = "provided" if row[9] is not None else "unavailable"
         dominant = max(BUCKET_ORDER, key=lambda bucket: breakdown[bucket]["kwh"]) if energy > 0 else None
         return {
             "transaction_id": row[0],
@@ -940,6 +939,7 @@ class DataEngine:
             "source": row[7],
             "cost_partial": bool(row[6]),
             "max_power_kw": max_power,
+            "max_power_source": max_power_source,
             "dominant_tariff": dominant,
             "dominant_tariff_label": EV_BUCKET_LABELS.get(dominant, dominant or "n/a"),
             "tariff_breakdown": breakdown,
@@ -1743,6 +1743,18 @@ class DataEngine:
         def upsert(conn):
             now = datetime.now().astimezone().isoformat(timespec="seconds")
             for entry in entries:
+                event_key = self._timeline_event_key(entry, household_id)
+                if entry.event_type in {"billing_period", "billing_period_created", "billing_period_updated"}:
+                    conn.execute(
+                        """
+                        DELETE FROM timeline_entries
+                        WHERE household_id = ?
+                          AND timestamp = ?
+                          AND event_type IN ('billing_period', 'billing_period_created', 'billing_period_updated')
+                          AND event_key != ?
+                        """,
+                        (household_id, entry.timestamp, event_key),
+                    )
                 conn.execute(
                     """
                     INSERT INTO timeline_entries (
@@ -1771,7 +1783,7 @@ class DataEngine:
                     """,
                     (
                         household_id,
-                        self._timeline_event_key(entry, household_id),
+                        event_key,
                         entry.timestamp,
                         entry.title,
                         entry.summary,
@@ -1826,29 +1838,50 @@ class DataEngine:
                 (*params, int(limit)),
             ).fetchall()
             entries = []
+            seen_billing_periods = set()
             for row in rows:
                 try:
                     evidence_sources = json.loads(row[5]) if row[5] else []
                 except json.JSONDecodeError:
                     evidence_sources = []
-                entries.append(
-                    TimelineEntry(
-                        timestamp=row[0],
-                        title=row[1],
-                        summary=row[2],
-                        financial_impact=row[3],
-                        confidence=row[4],
-                        evidence_sources=list(evidence_sources),
-                        event_type=row[6],
-                    )
+                entry = TimelineEntry(
+                    timestamp=row[0],
+                    title=row[1],
+                    summary=row[2],
+                    financial_impact=row[3],
+                    confidence=row[4],
+                    evidence_sources=list(evidence_sources),
+                    event_type=row[6],
                 )
+                if entry.event_type in {"billing_period", "billing_period_created", "billing_period_updated"}:
+                    if entry.timestamp in seen_billing_periods:
+                        continue
+                    seen_billing_periods.add(entry.timestamp)
+                entries.append(entry)
+            billing_entries = [
+                entry for entry in entries
+                if entry.event_type in {"billing_period", "billing_period_created", "billing_period_updated"}
+            ]
+            if len(billing_entries) > 1:
+                latest_billing = max(billing_entries, key=lambda entry: entry.timestamp)
+                entries = [
+                    entry for entry in entries
+                    if entry.event_type not in {"billing_period", "billing_period_created", "billing_period_updated"}
+                    or entry is latest_billing
+                ]
             return DecisionTimeline(entries=entries)
 
         return self._with_connection(query)
 
     @staticmethod
     def _timeline_event_key(entry: TimelineEntry, household_id: str = DEFAULT_HOUSEHOLD_ID) -> str:
-        raw = "|".join((household_id, entry.event_type, entry.timestamp, entry.title))
+        event_type = (
+            "billing_period"
+            if entry.event_type in {"billing_period", "billing_period_created", "billing_period_updated"}
+            else entry.event_type
+        )
+        title = "" if event_type == "billing_period" else entry.title
+        raw = "|".join((household_id, event_type, entry.timestamp, title))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get_data_completeness(

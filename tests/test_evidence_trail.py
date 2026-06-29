@@ -111,7 +111,7 @@ class EvidenceTrailTests(unittest.TestCase):
             health={"status": "ok", "report_age_minutes": 4},
             recommendations=[],
             projected_bill=88.0,
-            now=datetime(2026, 6, 27, 18, tzinfo=LOCAL),
+            now=datetime(2026, 6, 27, 15, 30, tzinfo=LOCAL),
         )
 
         self.assertEqual(advice.status, "WAIT")

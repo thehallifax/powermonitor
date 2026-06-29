@@ -145,15 +145,30 @@ class ChargingAdvisorTests(unittest.TestCase):
             health={"status": "ok", "report_age_minutes": 5},
             recommendations=[],
             projected_bill=80.0,
-            now=datetime(2026, 6, 27, 8, tzinfo=LOCAL),
+            now=datetime(2026, 6, 27, 15, 30, tzinfo=LOCAL),
         )
 
-        self.assertEqual(current_tariff_bucket(datetime(2026, 6, 27, 8, tzinfo=LOCAL)), "off_peak")
+        self.assertEqual(current_tariff_bucket(datetime(2026, 6, 27, 15, 30, tzinfo=LOCAL)), "peak")
         self.assertEqual(advice.status, "WAIT")
         self.assertIn("cannot prove surplus solar exists right now", advice.explanation)
         self.assertEqual(advice.confidence, "Low")
         self.assertEqual(advice.advisor.evidence_summary.evidence_quality.value, "LOW")
         self.assertIn("Today's solar summary", advice.solar_data_status)
+
+    def test_night_context_does_not_discuss_immediate_solar_charging(self):
+        advice = ChargingAdvisor().advise(
+            today_summary=Summary(solar_generated_kwh=9.0, solar_exported_kwh=3.0, solar_export_pct=33.0),
+            billing_summary=Summary(),
+            settings=SETTINGS,
+            health={"status": "ok", "report_age_minutes": 5},
+            recommendations=[],
+            projected_bill=80.0,
+            now=datetime(2026, 6, 27, 23, 30, tzinfo=LOCAL),
+        )
+
+        self.assertNotIn("solar", advice.explanation.lower())
+        self.assertEqual(advice.supporting_evidence["solar_status"], "Solar is not available at night")
+        self.assertEqual(advice.supporting_evidence["context"]["time"], "NIGHT")
 
     def test_stale_data_returns_unknown(self):
         advice = ChargingAdvisor().advise(

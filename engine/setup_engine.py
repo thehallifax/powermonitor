@@ -129,6 +129,8 @@ class SetupEngine:
         ready = bool(
             getattr(settings, "current_billing_period_start", None)
             and getattr(settings, "current_billing_period_end", None)
+        ) or bool(getattr(settings, "billing_cycle_configured", False)) or bool(
+            getattr(settings, "billing_period_start_day", None)
         )
         return task(
             "configure_billing_cycle",
@@ -136,10 +138,10 @@ class SetupEngine:
             ready,
             "medium",
             "2 minutes",
-            "Go to System",
-            "#system",
-            "Billing cycle dates are configured." if ready else "Billing dates are using fallback period logic.",
-            "settings.current_billing_period",
+            "Edit Billing Cycle",
+            "#setup-billing",
+            "Billing cycle is configured." if ready else "Set the billing cycle start day used for reports and projections.",
+            "settings.billing_cycle",
         )
 
     def _goals_task(self, goals: list[Any]) -> SetupTask:

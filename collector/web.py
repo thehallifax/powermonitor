@@ -79,6 +79,49 @@ def parse_port(value) -> int:
     return port
 
 
+def update_billing_cycle_settings(
+    settings_path: Path,
+    *,
+    billing_period_start_day,
+    retailer: str,
+    current_plan: str,
+) -> dict:
+    try:
+        start_day = int(billing_period_start_day)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Billing cycle start day must be a number from 1 to 28") from exc
+    if not 1 <= start_day <= 28:
+        raise ValueError("Billing cycle start day must be from 1 to 28")
+    allowed_plans = {
+        "synergy_ev_add_on",
+        "synergy_home_plan",
+        "previous_flat_or_home_plan",
+    }
+    plan = str(current_plan or "synergy_ev_add_on")
+    if plan not in allowed_plans:
+        raise ValueError("Unsupported tariff plan")
+
+    if settings_path.exists():
+        try:
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("Settings file must contain valid JSON") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("Settings file must contain a JSON object")
+    else:
+        raw = {}
+
+    raw["billing_period_start_day"] = start_day
+    raw["retailer"] = str(retailer or "").strip()
+    raw["current_plan"] = plan
+    raw["billing_cycle_configured"] = True
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = settings_path.with_suffix(settings_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(settings_path)
+    return raw
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "PowerMonitor/1.0"
 
@@ -118,6 +161,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if request.path == "/recommendations/lifecycle":
                 self.update_recommendation_lifecycle()
+            elif request.path == "/setup/billing-cycle":
+                self.update_billing_cycle()
             elif request.path == "/imports/preview":
                 self.preview_import()
             elif request.path == "/imports/commit":
@@ -129,7 +174,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if request.path.startswith("/imports/"):
                 self.send_import_error("Import could not be completed.", status=400)
             else:
-                self.send_json({"error": "recommendation lifecycle update failed"}, status=500)
+                self.send_json({"error": "request update failed"}, status=500)
 
     @staticmethod
     def param(params: dict, name: str, default=None):
@@ -207,6 +252,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             reason=reason,
         )
         self.redirect("/#recommendations")
+
+    def update_billing_cycle(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        params = parse_qs(self.rfile.read(length).decode("utf-8"))
+        update_billing_cycle_settings(
+            SETTINGS_PATH,
+            billing_period_start_day=self.param(params, "billing_period_start_day"),
+            retailer=self.param(params, "retailer", ""),
+            current_plan=self.param(params, "current_plan", ""),
+        )
+        self.redirect("/#setup")
 
     def preview_import(self) -> None:
         filename, content = self.read_uploaded_file()

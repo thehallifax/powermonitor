@@ -103,7 +103,7 @@ class GlanceModeTests(unittest.TestCase):
         state = build_state(datetime(2026, 6, 27, 12, 0, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "CHARGE NOW")
-        self.assertIn("Super off peak", state.reason)
+        self.assertEqual(state.reason, "Use this window for charging or flexible loads.")
         self.assertEqual(state.current_tariff, "Super off peak")
         self.assertEqual(state.energy_score, 84)
         self.assertEqual(state.bill_current, 41.25)
@@ -111,12 +111,12 @@ class GlanceModeTests(unittest.TestCase):
 
     def test_export_only_solar_maps_to_wait_outside_super_off_peak(self):
         state = build_state(
-            datetime(2026, 6, 27, 7, 30, tzinfo=LOCAL),
+            datetime(2026, 6, 27, 15, 30, tzinfo=LOCAL),
             today=Summary(solar_generated_kwh=5.0, solar_exported_kwh=1.4, solar_export_pct=28.0),
         )
 
         self.assertEqual(state.status, "WAIT")
-        self.assertIn("cannot prove surplus solar exists right now", state.reason)
+        self.assertEqual(state.reason, "Wait 330 minutes for cheaper charging.")
         self.assertEqual(state.evidence_quality, "LOW")
         self.assertIn("Exporting solar", state.solar_status)
 
@@ -124,8 +124,8 @@ class GlanceModeTests(unittest.TestCase):
         state = build_state(datetime(2026, 6, 27, 18, 0, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "AVOID")
-        self.assertIn("Peak", state.reason)
-        self.assertEqual(state.current_recommendation, "Avoid charging during Peak")
+        self.assertEqual(state.reason, "Avoid charging now. Cheaper charging starts in 180 minutes.")
+        self.assertEqual(state.current_recommendation, "Use Off peak from 9:00 PM instead.")
         self.assertEqual(state.next_window, "Off peak from 9:00 PM")
         self.assertEqual(state.lowest_cost_window, "Super off peak from 9:00 AM")
 
@@ -133,7 +133,7 @@ class GlanceModeTests(unittest.TestCase):
         state = build_state(datetime(2026, 6, 27, 21, 30, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "WAIT")
-        self.assertIn("next cheaper", state.reason)
+        self.assertEqual(state.reason, "Wait 90 minutes for cheaper charging.")
         self.assertIn("Overnight", state.next_window)
         self.assertIn("Super off peak", state.lowest_cost_window)
 
@@ -144,7 +144,7 @@ class GlanceModeTests(unittest.TestCase):
         )
 
         self.assertEqual(state.status, "DATA UNAVAILABLE")
-        self.assertIn("fresh enough", state.reason)
+        self.assertEqual(state.reason, "Charging advice needs fresher data.")
         self.assertEqual(state.confidence, "Low")
         self.assertEqual(state.evidence_quality, "LOW")
 

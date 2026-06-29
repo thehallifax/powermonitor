@@ -13,6 +13,8 @@ SUPPORTED_PERIODS = (
     "last_week",
     "this_month",
     "last_month",
+    "year_to_date",
+    "last_calendar_year",
     "current_billing_period",
     "previous_billing_period",
     "custom",
@@ -67,6 +69,11 @@ def resolve_period(
     if kind == "last_month":
         month_end = _month_before(current)
         return Period(kind, "Last month", month_end.replace(day=1), month_end)
+    if kind == "year_to_date":
+        return Period(kind, "Year to date", current.replace(month=1, day=1), current)
+    if kind == "last_calendar_year":
+        year = current.year - 1
+        return Period(kind, "Last calendar year", date(year, 1, 1), date(year, 12, 31))
     if kind == "current_billing_period":
         period_start, period_end = _billing_fallback(current, settings.billing_period_start_day)
         if settings.current_billing_period_start:

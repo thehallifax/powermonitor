@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-012 - Beta Readiness & UX Polish
+
+- Added a Billing Cycle setup section with local editing for billing start
+  day, optional retailer, and supported tariff plan.
+- Added a local `/setup/billing-cycle` settings update route that completes the
+  related Setup task without storing secrets.
+- Extended visible period selection with previous billing period, last month,
+  year to date, and last calendar year.
+- Corrected EV analytics by using circular average clock times, suppressing
+  misleading derived highest-power values, and adding average session duration.
+- Updated timeline billing-period wording and persistence so created/updated
+  billing-period events do not duplicate.
+- Improved Collector Health, Provider Observation, Charging Advisor, and
+  Glance wording for beta clarity and context-aware relevance.
+
 ## PB-011 - Advisor Context Integration
 
 - Threaded shared `HouseholdContext` into Cost, Solar, Efficiency, and Briefing

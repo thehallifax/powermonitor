@@ -10,6 +10,7 @@ from presentation.timeline import build_decision_timeline
 class Summary:
     start: date = date(2026, 6, 6)
     end: date = date(2026, 6, 27)
+    intervals: int = 10
 
 
 def decision(
@@ -60,10 +61,16 @@ class DecisionTimelineTests(unittest.TestCase):
         )
 
         self.assertEqual([entry.timestamp for entry in timeline.entries], sorted(entry.timestamp for entry in timeline.entries))
-        self.assertEqual(timeline.entries[0].title, "New billing period")
+        self.assertEqual(timeline.entries[0].title, "Billing period updated")
         self.assertIn("Bill tracking improved", [entry.title for entry in timeline.entries])
         self.assertIn("High peak usage", [entry.title for entry in timeline.entries])
         self.assertIn("EV charged in cheapest tariff", [entry.title for entry in timeline.entries])
+
+    def test_billing_period_without_readings_is_created_event(self):
+        timeline = build_decision_timeline(Summary(intervals=0), [])
+
+        self.assertEqual(timeline.entries[0].title, "Billing period created")
+        self.assertEqual(timeline.entries[0].event_type, "billing_period_created")
 
     def test_timeline_entries_include_required_presentation_fields(self):
         timeline = build_decision_timeline(

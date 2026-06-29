@@ -63,12 +63,15 @@ def build_glance_state(
     evidence_summary = getattr(advisor, "evidence_summary", None)
     evidence_quality = evidence_summary.evidence_quality.value if evidence_summary else "UNKNOWN"
     evidence_reason = evidence_summary.reason if evidence_summary else advisor.confidence_reason
+    wait_minutes = charging_advice.recommended_wait_minutes
+    simple_reason = glance_reason(status, wait_minutes, charging_advice.next_lower_cost_window, advisor.summary)
+    simple_recommendation = glance_recommendation(status, wait_minutes, charging_advice.next_lower_cost_window, advisor.headline)
 
     return GlanceState(
         status=status,
         tone=tone,
-        current_recommendation=advisor.headline,
-        reason=advisor.summary,
+        current_recommendation=simple_recommendation,
+        reason=simple_reason,
         current_tariff=charging_advice.tariff_now_label or TARIFF_LABELS[bucket],
         current_tariff_bucket=bucket,
         next_window=charging_advice.next_lower_cost_window or charging_advice.next_window or next_better_window(now, bucket),
@@ -86,3 +89,37 @@ def build_glance_state(
         evidence_reason=evidence_reason,
         context=context.as_dict() if hasattr(context, "as_dict") else context,
     )
+
+
+def glance_reason(
+    status: str,
+    wait_minutes: Optional[int],
+    next_window: Optional[str],
+    fallback: str,
+) -> str:
+    if status == "WAIT" and wait_minutes is not None and wait_minutes > 0:
+        return f"Wait {wait_minutes} minutes for cheaper charging."
+    if status == "AVOID" and wait_minutes is not None and wait_minutes > 0:
+        return f"Avoid charging now. Cheaper charging starts in {wait_minutes} minutes."
+    if status == "CHARGE NOW":
+        return "Use this window for charging or flexible loads."
+    if status == "DATA UNAVAILABLE":
+        return "Charging advice needs fresher data."
+    return next_window or fallback
+
+
+def glance_recommendation(
+    status: str,
+    wait_minutes: Optional[int],
+    next_window: Optional[str],
+    fallback: str,
+) -> str:
+    if status == "WAIT" and wait_minutes is not None and wait_minutes > 0:
+        return f"Wait {wait_minutes} minutes, then charge."
+    if status == "AVOID":
+        return f"Use {next_window} instead." if next_window else "Avoid flexible loads for now."
+    if status == "CHARGE NOW":
+        return "Charge now if the load is flexible."
+    if status == "DATA UNAVAILABLE":
+        return "Check collector health before acting."
+    return fallback

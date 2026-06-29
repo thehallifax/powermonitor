@@ -105,6 +105,23 @@ class SetupEngineTests(unittest.TestCase):
         self.assertEqual(checklist.progress.completion_pct, 100)
         self.assertEqual(checklist.progress.remaining_tasks, [])
 
+    def test_billing_cycle_task_points_to_configuration_page(self):
+        checklist = SetupEngine(context_with("solar", "ev")).build_checklist(
+            capability_summary(
+                solar=True,
+                ev=True,
+                tariff=True,
+                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "ok"},
+            settings=settings(billing_configured=False),
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        tasks = {task.task_id: task for task in checklist.tasks}
+        self.assertEqual(tasks["configure_billing_cycle"].action_href, "#setup-billing")
+        self.assertEqual(tasks["configure_billing_cycle"].action_label, "Edit Billing Cycle")
+
 
 def context_with(*capabilities: str) -> HouseholdContext:
     return HouseholdContext(

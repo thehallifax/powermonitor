@@ -328,6 +328,69 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(second.entries[0].summary, "Peak usage was still high.")
         self.assertEqual(second.entries[0].event_type, "high_peak_usage")
 
+    def test_billing_period_timeline_events_update_without_duplicates(self):
+        created = TimelineEntry(
+            timestamp="2026-06-06",
+            title="Billing period created",
+            summary="Created billing-period tracking.",
+            financial_impact=None,
+            confidence="High",
+            evidence_sources=["Billing period settings"],
+            event_type="billing_period_created",
+        )
+        updated = TimelineEntry(
+            timestamp="2026-06-06",
+            title="Billing period updated",
+            summary="Updated billing-period tracking with readings.",
+            financial_impact=None,
+            confidence="High",
+            evidence_sources=["Billing period settings"],
+            event_type="billing_period_updated",
+        )
+
+        self.engine.persist_timeline_entries([created])
+        timeline = self.engine.persist_timeline_entries([updated])
+        billing_entries = [
+            entry for entry in timeline.entries
+            if entry.event_type in {"billing_period_created", "billing_period_updated"}
+        ]
+
+        self.assertEqual(len(billing_entries), 1)
+        self.assertEqual(billing_entries[0].title, "Billing period updated")
+
+    def test_timeline_readback_hides_older_billing_period_system_noise(self):
+        self.engine.persist_timeline_entries(
+            [
+                TimelineEntry(
+                    timestamp="2026-01-01",
+                    title="Billing period updated",
+                    summary="Old non-current billing row.",
+                    financial_impact=None,
+                    confidence="High",
+                    evidence_sources=["Billing period settings"],
+                    event_type="billing_period_updated",
+                ),
+                TimelineEntry(
+                    timestamp="2026-06-06",
+                    title="Billing period updated",
+                    summary="Current billing row.",
+                    financial_impact=None,
+                    confidence="High",
+                    evidence_sources=["Billing period settings"],
+                    event_type="billing_period_updated",
+                ),
+            ]
+        )
+
+        timeline = self.engine.get_timeline_entries()
+        billing_entries = [
+            entry for entry in timeline.entries
+            if entry.event_type == "billing_period_updated"
+        ]
+
+        self.assertEqual(len(billing_entries), 1)
+        self.assertEqual(billing_entries[0].timestamp, "2026-06-06")
+
     def test_timeline_entries_can_be_queried_by_period(self):
         entries = [
             TimelineEntry(

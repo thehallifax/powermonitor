@@ -96,8 +96,9 @@ generated printable dashboard at `/`, a kiosk-friendly Glance Mode at
 offline with no CDN or internet assets.
 
 The live dashboard period selector supports Today, Yesterday, Last 7 days,
-This month, Current billing period, and custom dates. The API also supports
-week and previous-month periods:
+This month, Last month, Year to date, Last calendar year, Current billing
+period, Previous billing period, and custom dates. The API also supports week
+periods:
 
 ```sh
 curl 'http://127.0.0.1:8765/api/summary?period=today'
@@ -108,9 +109,14 @@ curl 'http://127.0.0.1:8765/api/compare?start_a=2026-06-06&end_a=2026-06-12&star
 ```
 
 Supported period names are `today`, `yesterday`, `last_7_days`, `this_week`,
-`last_week`, `this_month`, `last_month`, `current_billing_period`,
-`previous_billing_period`, and `custom`. Period boundaries use local
-Australia/Perth calendar dates.
+`last_week`, `this_month`, `last_month`, `year_to_date`,
+`last_calendar_year`, `current_billing_period`, `previous_billing_period`, and
+`custom`. Period boundaries use local Australia/Perth calendar dates.
+
+The Setup page includes a Billing Cycle section for editing the billing cycle
+start day, optional retailer label, and supported tariff plan. Saving that
+local form updates `config/settings.json` and immediately completes the
+Billing Cycle setup task.
 
 Runtime logs are written to:
 

@@ -71,6 +71,39 @@ class WebConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     web.resolve_web_bind(settings)
 
+    def test_billing_cycle_settings_update_non_secret_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+            settings.write_text(
+                json.dumps({"current_plan": "synergy_ev_add_on", "import_rates": {"peak": 0.54}}),
+                encoding="utf-8",
+            )
+
+            updated = web.update_billing_cycle_settings(
+                settings,
+                billing_period_start_day="12",
+                retailer="Synergy",
+                current_plan="synergy_home_plan",
+            )
+            saved = json.loads(settings.read_text(encoding="utf-8"))
+
+        self.assertEqual(updated["billing_period_start_day"], 12)
+        self.assertTrue(saved["billing_cycle_configured"])
+        self.assertEqual(saved["retailer"], "Synergy")
+        self.assertEqual(saved["current_plan"], "synergy_home_plan")
+        self.assertEqual(saved["import_rates"], {"peak": 0.54})
+
+    def test_billing_cycle_start_day_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+            with self.assertRaises(ValueError):
+                web.update_billing_cycle_settings(
+                    settings,
+                    billing_period_start_day="31",
+                    retailer="",
+                    current_plan="synergy_ev_add_on",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

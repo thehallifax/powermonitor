@@ -11,10 +11,11 @@ def build_decision_timeline(
     period_summary: Any,
     decisions: Iterable[Decision],
     comparison: Optional[dict[str, Any]] = None,
+    include_billing_period: bool = True,
 ) -> DecisionTimeline:
     """Build a chronological memory from existing summaries and decisions."""
 
-    entries = [_billing_period_entry(period_summary)]
+    entries = [_billing_period_entry(period_summary)] if include_billing_period else []
     bill_entry = _bill_tracking_entry(comparison)
     if bill_entry:
         entries.append(bill_entry)
@@ -28,14 +29,21 @@ def build_decision_timeline(
 def _billing_period_entry(period_summary: Any) -> TimelineEntry:
     start = _value(period_summary, "start")
     end = _value(period_summary, "end")
+    has_readings = int(_value(period_summary, "intervals") or 0) > 0 if _has_value(period_summary, "intervals") else False
+    title = "Billing period updated" if has_readings else "Billing period created"
+    summary = (
+        f"Updated billing-period tracking for {_display_date(start)} to {_display_date(end)} with available readings."
+        if has_readings
+        else f"Created billing-period tracking for {_display_date(start)} to {_display_date(end)}."
+    )
     return TimelineEntry(
         timestamp=_iso_date(start),
-        title="New billing period",
-        summary=f"Tracking started for the billing period from {_display_date(start)} to {_display_date(end)}.",
+        title=title,
+        summary=summary,
         financial_impact=None,
         confidence="High",
         evidence_sources=["Billing period settings"],
-        event_type="billing_period",
+        event_type="billing_period_updated" if has_readings else "billing_period_created",
     )
 
 
@@ -116,6 +124,12 @@ def _value(source: Any, name: str) -> Any:
     if isinstance(source, dict):
         return source.get(name)
     return getattr(source, name)
+
+
+def _has_value(source: Any, name: str) -> bool:
+    if isinstance(source, dict):
+        return name in source
+    return hasattr(source, name)
 
 
 def _iso_date(value: Any) -> str:
