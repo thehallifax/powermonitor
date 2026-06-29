@@ -50,6 +50,7 @@ from engine.models import (
 )
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
+from engine.provider_runtime import ProviderRuntime
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from presentation.briefing import BriefingItem
@@ -432,6 +433,7 @@ def dashboard_data(
         promotion_summary=promotion_summary,
         settings=settings,
     )
+    provider_runtime = provider_runtime_data()
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -454,6 +456,8 @@ def dashboard_data(
         "provider_status": provider_registry.status_by_provider(),
         "provider_management": provider_management.as_dict(),
         "providers": provider_management.as_dict(),
+        "provider_runtime": provider_runtime.as_dict(),
+        "runtime": provider_runtime.as_dict(),
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -527,6 +531,12 @@ def provider_management_data() -> ProviderManager:
         promotion_summary=promotion_summary,
         settings=settings,
     )
+
+
+def provider_runtime_data(data_engine_instance=None) -> ProviderRuntime:
+    from collect_today import SolarEdgeAdapter
+
+    return ProviderRuntime([SolarEdgeAdapter()], data_engine=data_engine_instance)
 
 
 def setup_logging() -> None:
@@ -3241,6 +3251,34 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
     """
 
 
+def provider_runtime_html(provider_runtime: Optional[ProviderRuntime]) -> str:
+    if not provider_runtime:
+        return ""
+    data = provider_runtime.as_dict()
+    rows = []
+    for provider in data.get("providers", []):
+        health = provider.get("health", {})
+        rows.append(
+            f"""
+            <div class="completeness-row {'good' if health.get('state') in {'IDLE', 'SUCCESS'} else 'bad'}">
+              <span>{html.escape(str(provider.get("provider_id") or "provider"))}</span>
+              <strong>{html.escape(str(health.get("state") or "UNKNOWN").replace("_", " ").title())}</strong>
+              <small>Schedule: {html.escape(str(provider.get("schedule") or "manual"))}. Last execution: {html.escape(str(health.get("last_run") or "Never"))}. Next: {html.escape(str(health.get("next_run_at") or "Manual"))}.</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Provider Runtime</h3><span>{html.escape(str(data.get("scheduler_status") or "idle").title())}</span></div>
+      <div class="config-grid">
+        <div><span>Runtime health</span><strong>{html.escape(str(data.get("runtime_health") or "unknown").title())}</strong></div>
+        <div><span>Active providers</span><strong>{len(data.get("active_providers", []))}</strong></div>
+      </div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No runtime adapters are registered.</p>'}</div>
+    </div>
+    """
+
+
 def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3329,6 +3367,7 @@ def system_page_html(
     setup: Optional[SetupChecklist] = None,
     provider_registry: Optional[ProviderRegistry] = None,
     provider_management: Optional[ProviderManager] = None,
+    provider_runtime: Optional[ProviderRuntime] = None,
     provider_observations: Optional[dict] = None,
     promotion_summary: Optional[dict] = None,
     context=None,
@@ -3360,6 +3399,7 @@ def system_page_html(
       </div>
       <div class="system-grid">
         {provider_management_html(provider_management)}
+        {provider_runtime_html(provider_runtime)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3766,6 +3806,7 @@ def write_html(
         promotion_summary=promotion_summary,
         settings=settings,
     )
+    provider_runtime = provider_runtime_data()
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -3848,7 +3889,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_observations, promotion_summary, household_current_context)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context)}
   </section>
 """
     )

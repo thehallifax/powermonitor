@@ -1,5 +1,22 @@
 # Changelog
 
+## PB-014 - Provider Adapter Runtime
+
+- Added `ProviderRuntime` with standard adapter execution, schedules, retry
+  handling, exponential backoff, authentication refresh, metrics, runtime
+  health, and observation submission.
+- Added the shared `ProviderAdapter` contract and execution models for
+  authentication, schedules, execution results, metrics, and runtime health.
+- Added `SolarEdgeAdapter` as the reference adapter around the existing
+  SolarEdge collector while preserving the legacy `collect_today.py` entry
+  point.
+- Exposed Provider Runtime status through dashboard JSON and local
+  `/api/runtime`, `/api/runtime/providers`, and `/api/runtime/provider/<id>`
+  endpoints.
+- Added a System page Provider Runtime card and runtime tests covering
+  execution, scheduling, retries, authentication refresh, health, and
+  observation submission.
+
 ## PB-013 - Provider Management
 
 - Added `ProviderManager` with configuration, credential, lifecycle, health,

@@ -150,6 +150,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(self.providers_payload())
             elif path.startswith("/api/providers/"):
                 self.send_json(self.provider_payload(path))
+            elif path == "/api/runtime":
+                self.send_json(report.provider_runtime_data().as_dict())
+            elif path == "/api/runtime/providers":
+                self.send_json({"providers": report.provider_runtime_data().as_dict()["providers"]})
+            elif path.startswith("/api/runtime/provider/"):
+                self.send_json(self.runtime_provider_payload(path))
             elif path == "/api/compare":
                 self.send_json(self.compare_data(params))
             elif path == "/api/health":
@@ -232,6 +238,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[3] == "test":
             return {"test": manager.test_connection(provider_id).as_dict()}
         return {"provider": provider.as_dict()}
+
+    def runtime_provider_payload(self, path: str) -> dict:
+        provider_id = path.rsplit("/", 1)[-1]
+        runtime = report.provider_runtime_data()
+        return {"provider": runtime.provider_status(provider_id)}
 
     def update_provider(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]

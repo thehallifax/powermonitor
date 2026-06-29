@@ -8,6 +8,10 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from collector_health import (
     maybe_send_failure_notification,
     record_failure,
@@ -15,8 +19,16 @@ from collector_health import (
     record_report_success,
     record_success,
 )
+from engine.provider_framework import (
+    ProviderCapability,
+    ProviderFreshness,
+    ProviderObservation,
+    ProviderObservationQuality,
+    ProviderObservationType,
+    ProviderType,
+)
+from engine.provider_runtime import ProviderAuthentication, ProviderSchedule
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COOKIE_PATH = PROJECT_ROOT / "collector" / "solaredge_cookie.txt"
 OUTFILE = PROJECT_ROOT / "data" / "latest.json"
 TEMP_OUTFILE = OUTFILE.with_suffix(".json.tmp")
@@ -39,6 +51,98 @@ class CollectionBackfillFailure(RuntimeError):
 
 class SessionRefreshFailure(RuntimeError):
     pass
+
+
+class SolarEdgeAdapter:
+    """Reference provider adapter for the existing SolarEdge collector."""
+
+    provider_id = "solaredge"
+    schedule = ProviderSchedule.EVERY_5_MINUTES
+
+    def authenticate(self) -> ProviderAuthentication:
+        try:
+            read_session_header()
+        except (FileNotFoundError, ValueError) as exc:
+            return ProviderAuthentication(
+                authenticated=False,
+                refresh_required=True,
+                method="cookie",
+                message=safe_error_message(exc),
+            )
+        return ProviderAuthentication(authenticated=True, method="cookie")
+
+    def refresh_session(self) -> ProviderAuthentication:
+        try:
+            refresh_solaredge_session()
+            read_session_header()
+        except (SessionRefreshFailure, FileNotFoundError, ValueError) as exc:
+            return ProviderAuthentication(
+                authenticated=False,
+                refresh_required=True,
+                method="cookie",
+                message=safe_error_message(exc),
+            )
+        return ProviderAuthentication(authenticated=True, method="cookie")
+
+    def test_connection(self) -> dict:
+        output_path = TEMP_OUTFILE.with_name("solaredge-runtime-test.json.tmp")
+        output_path.unlink(missing_ok=True)
+        started = datetime.now().astimezone()
+        try:
+            status = fetch_solaredge(read_session_header(), date.today(), output_path)
+            measurements = validate_response(output_path, date.today())
+            success = True
+            warning = None
+        except Exception as exc:
+            status = "failed"
+            measurements = 0
+            success = False
+            warning = safe_error_message(exc)
+        finally:
+            output_path.unlink(missing_ok=True)
+        duration_ms = int((datetime.now().astimezone() - started).total_seconds() * 1000)
+        return {
+            "success": success,
+            "authentication_status": "authenticated" if success else "not_authenticated",
+            "provider_version": "solaredge-monitoring-local",
+            "available_datasets": ["interval_history", "daily_summary"] if success else [],
+            "warnings": [warning] if warning else [],
+            "response_time_ms": duration_ms,
+            "measurements": measurements,
+            "http_status": status,
+        }
+
+    def discover_capabilities(self) -> list[ProviderCapability]:
+        return [ProviderCapability.INTERVAL_HISTORY, ProviderCapability.DAILY_SUMMARY]
+
+    def collect_observations(self) -> list[ProviderObservation]:
+        collect_recent()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        return [
+            ProviderObservation(
+                capability=ProviderCapability.DAILY_SUMMARY,
+                name="solaredge_collection_complete",
+                value={"status": "collection_complete"},
+                provider_id=self.provider_id,
+                provider_type=ProviderType.SOLAR,
+                observation_type=ProviderObservationType.COLLECTOR_HEALTH,
+                observed_at=now,
+                freshness=ProviderFreshness(state="fresh", observed_at=now, age_minutes=0.0),
+                quality=ProviderObservationQuality.HIGH,
+                provenance="SolarEdgeAdapter",
+            )
+        ]
+
+    def collect_live_state(self) -> dict:
+        return {"live_power": None, "message": "Live state is not implemented for the legacy SolarEdge endpoint."}
+
+    def collect_diagnostics(self) -> dict:
+        return {
+            "cookie_configured": COOKIE_PATH.exists() and bool(COOKIE_PATH.read_text(encoding="utf-8").strip()),
+            "site_id_configured": bool(SITE_ID),
+            "schedule": self.schedule.value,
+            "collector": "collector/collect_today.py",
+        }
 
 
 def safe_error_message(exc: BaseException) -> str:
