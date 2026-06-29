@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-016 - Household State Snapshots
+
+- Added household-scoped `household_state_snapshots` persistence in DataEngine
+  with tariff, power, energy, solar, EV, battery, billing, collector, evidence,
+  provider provenance, context summary, and full state JSON columns.
+- Added material-hash duplicate suppression so repeated report generations do
+  not create excessive snapshots when household state has not changed.
+- Exposed `latest_household_state_snapshot`,
+  `recent_household_state_snapshots`, and the current
+  `household_state_snapshot` through dashboard/API output.
+- Updated the System Household State section with latest snapshot timestamp and
+  recent material state changes.
+- Added snapshot persistence, duplicate suppression, household isolation,
+  redaction, and API serialization tests.
+
 ## PB-015 - Household State Engine
 
 - Added `HouseholdStateEngine` with canonical household state models for power,

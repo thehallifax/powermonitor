@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from engine.data_engine import DataEngine
 from engine.decision_engine import generate_decisions_from_data_engine
@@ -14,6 +14,7 @@ from engine.provider_framework import (
     ProviderObservationType,
     ProviderType,
 )
+from engine.household_state_engine import HouseholdStateEngine
 
 
 @dataclass
@@ -214,6 +215,55 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertEqual(len(self.engine.get_provider_observations()), 1)
         self.assertEqual(engine_b.get_provider_observations(), [])
+
+    def test_household_state_snapshots_are_persisted_and_summarised(self):
+        state = household_state()
+
+        snapshot = self.engine.persist_household_state_snapshot(state, context={"time": "MIDDAY"})
+        latest = self.engine.get_latest_household_state_snapshot()
+        recent = self.engine.get_recent_household_state_snapshots()
+
+        self.assertTrue(snapshot["persisted"])
+        self.assertEqual(latest["snapshot_id"], snapshot["snapshot_id"])
+        self.assertEqual(latest["tariff_state"]["active_bucket"], "super_off_peak")
+        self.assertEqual(recent["count"], 1)
+        self.assertEqual(recent["snapshots"][0]["context_summary"]["time"], "MIDDAY")
+
+    def test_household_state_snapshot_duplicate_suppression(self):
+        state = household_state()
+
+        first = self.engine.persist_household_state_snapshot(state, captured_at="2026-06-27T12:00:00+08:00")
+        second = self.engine.persist_household_state_snapshot(state, captured_at="2026-06-27T12:05:00+08:00")
+        recent = self.engine.get_recent_household_state_snapshots()
+
+        self.assertTrue(first["persisted"])
+        self.assertFalse(second["persisted"])
+        self.assertTrue(second["duplicate_suppressed"])
+        self.assertEqual(recent["count"], 1)
+
+    def test_household_state_snapshots_are_household_scoped(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+
+        self.engine.persist_household_state_snapshot(household_state())
+
+        self.assertIsNotNone(self.engine.get_latest_household_state_snapshot())
+        self.assertIsNone(engine_b.get_latest_household_state_snapshot())
+
+    def test_household_state_snapshot_redacts_sensitive_values(self):
+        state = household_state().as_dict()
+        state["provider_provenance"] = {"cookie": "redaction-fixture-snapshot"}
+
+        snapshot = self.engine.persist_household_state_snapshot(state)
+
+        self.assertNotIn("redaction-fixture-snapshot", str(snapshot))
+        self.assertIn("REDACTED", str(snapshot))
 
     def test_provider_observations_are_promoted_to_trusted_read_models(self):
         self.engine.persist_provider_observations(
@@ -482,6 +532,31 @@ class DataEngineTests(unittest.TestCase):
             ["SolarEdge interval data", "Estimated EV charging"],
         )
         self.assertIn("overnight load", baseload.explanation.why_this_matters)
+
+@dataclass
+class StateSummary:
+    intervals: int = 3
+    reading_days: int = 1
+    supply_days: int = 1
+    grid_import_kwh: float = 0.18
+    solar_generated_kwh: float = 1.4
+    solar_used_kwh: float = 0.8
+    solar_exported_kwh: float = 0.6
+    solar_export_pct: float = 42.0
+    ev_charging_source: str = "ocular_export"
+    ev_charging_kwh: float = 7.5
+    net_cost: float = 3.0
+
+
+def household_state():
+    return HouseholdStateEngine().build(
+        today_summary=StateSummary(),
+        billing_summary=StateSummary(),
+        settings=Settings(),
+        health={"status": "ok", "report_age_minutes": 5, "latest_measurement_time": "2026-06-27T12:00:00+08:00"},
+        household_id="default_household",
+        now=datetime.fromisoformat("2026-06-27T12:00:00+08:00"),
+    )
 
 
 if __name__ == "__main__":

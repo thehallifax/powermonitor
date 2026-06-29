@@ -383,6 +383,7 @@ class DataEngine:
         )
         DataEngine._ensure_provider_observation_table(conn)
         DataEngine._ensure_promotion_table(conn)
+        DataEngine._ensure_household_state_snapshot_table(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -474,6 +475,44 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_household_state_snapshot_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS household_state_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                captured_at TEXT NOT NULL,
+                material_hash TEXT NOT NULL,
+                tariff_state_json TEXT NOT NULL,
+                power_state_json TEXT NOT NULL,
+                energy_state_json TEXT NOT NULL,
+                solar_state_json TEXT NOT NULL,
+                ev_state_json TEXT NOT NULL,
+                battery_state_json TEXT NOT NULL,
+                billing_state_json TEXT NOT NULL,
+                collector_state_json TEXT NOT NULL,
+                evidence_state_json TEXT NOT NULL,
+                provider_provenance_json TEXT NOT NULL,
+                context_summary_json TEXT,
+                state_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_household_state_snapshots_household_captured
+            ON household_state_snapshots(household_id, captured_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_household_state_snapshots_household_hash
+            ON household_state_snapshots(household_id, material_hash)
+            """
+        )
+
+    @staticmethod
     def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
         scoped_tables = (
             "readings",
@@ -483,6 +522,7 @@ class DataEngine:
             "import_jobs",
             "provider_observations",
             "promotion_decisions",
+            "household_state_snapshots",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -1420,6 +1460,141 @@ class DataEngine:
             "latest": observations[: min(limit, 10)],
         }
 
+    def persist_household_state_snapshot(
+        self,
+        household_state: Any,
+        *,
+        context: Optional[Any] = None,
+        captured_at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+        state = self._redact_household_state_snapshot_payload(
+            household_state.as_dict() if hasattr(household_state, "as_dict") else dict(household_state)
+        )
+        captured = captured_at or state.get("generated_at") or datetime.now().astimezone().isoformat(timespec="seconds")
+        context_summary = self._redact_household_state_snapshot_payload(
+            context.as_dict() if hasattr(context, "as_dict") else context
+        )
+        material_hash = self._household_state_material_hash(state, context_summary)
+        snapshot_id = hashlib.sha256(f"{household_id}|{captured}|{material_hash}".encode("utf-8")).hexdigest()[:32]
+        provider_provenance = {
+            "trusted_provider_data": state.get("evidence", {}).get("trusted_provider_data", []),
+            "data_sources_used": state.get("evidence", {}).get("data_sources_used", []),
+        }
+
+        def insert(conn):
+            DataEngine._ensure_household_state_snapshot_table(conn)
+            latest = self._latest_household_state_snapshot_row(conn, household_id)
+            if latest and latest[3] == material_hash:
+                snapshot = self._normalise_household_state_snapshot(latest)
+                snapshot["persisted"] = False
+                snapshot["duplicate_suppressed"] = True
+                return snapshot
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            row = (
+                snapshot_id,
+                household_id,
+                captured,
+                material_hash,
+                json.dumps(state.get("tariff", {}), sort_keys=True),
+                json.dumps(state.get("power", {}), sort_keys=True),
+                json.dumps(state.get("energy", {}), sort_keys=True),
+                json.dumps(state.get("solar", {}), sort_keys=True),
+                json.dumps(state.get("ev", {}), sort_keys=True),
+                json.dumps(state.get("battery", {}), sort_keys=True),
+                json.dumps(state.get("billing", {}), sort_keys=True),
+                json.dumps(state.get("collector", {}), sort_keys=True),
+                json.dumps(state.get("evidence", {}), sort_keys=True),
+                json.dumps(provider_provenance, sort_keys=True),
+                json.dumps(context_summary, sort_keys=True) if context_summary else None,
+                json.dumps(state, sort_keys=True),
+                now,
+            )
+            conn.execute(
+                """
+                INSERT INTO household_state_snapshots (
+                    snapshot_id,
+                    household_id,
+                    captured_at,
+                    material_hash,
+                    tariff_state_json,
+                    power_state_json,
+                    energy_state_json,
+                    solar_state_json,
+                    ev_state_json,
+                    battery_state_json,
+                    billing_state_json,
+                    collector_state_json,
+                    evidence_state_json,
+                    provider_provenance_json,
+                    context_summary_json,
+                    state_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row,
+            )
+            conn.commit()
+            snapshot = self._normalise_household_state_snapshot(row)
+            snapshot["persisted"] = True
+            snapshot["duplicate_suppressed"] = False
+            return snapshot
+
+        return self._with_connection(insert)
+
+    def get_latest_household_state_snapshot(self) -> Optional[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_household_state_snapshot_table(conn)
+            row = self._latest_household_state_snapshot_row(conn, household_id)
+            return self._normalise_household_state_snapshot(row) if row else None
+
+        return self._with_connection(query)
+
+    def get_recent_household_state_snapshots(self, limit: int = 10) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_household_state_snapshot_table(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    snapshot_id,
+                    household_id,
+                    captured_at,
+                    material_hash,
+                    tariff_state_json,
+                    power_state_json,
+                    energy_state_json,
+                    solar_state_json,
+                    ev_state_json,
+                    battery_state_json,
+                    billing_state_json,
+                    collector_state_json,
+                    evidence_state_json,
+                    provider_provenance_json,
+                    context_summary_json,
+                    state_json,
+                    created_at
+                FROM household_state_snapshots
+                WHERE household_id = ?
+                ORDER BY captured_at DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            snapshots = [self._normalise_household_state_snapshot(row) for row in rows]
+            return {
+                "household_id": household_id,
+                "count": len(snapshots),
+                "latest_captured_at": snapshots[0]["captured_at"] if snapshots else None,
+                "snapshots": snapshots,
+                "changes": self._household_state_changes(snapshots),
+            }
+
+        return self._with_connection(query)
+
     def promote_provider_observations(
         self,
         *,
@@ -1736,6 +1911,118 @@ class DataEngine:
             "created_at": row[13],
             "updated_at": row[14],
         }
+
+    @staticmethod
+    def _normalise_household_state_snapshot(row) -> dict[str, Any]:
+        def parse_json(raw):
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+
+        return {
+            "snapshot_id": row[0],
+            "household_id": row[1],
+            "captured_at": row[2],
+            "material_hash": row[3],
+            "tariff_state": parse_json(row[4]) or {},
+            "power_state": parse_json(row[5]) or {},
+            "energy_state": parse_json(row[6]) or {},
+            "solar_state": parse_json(row[7]) or {},
+            "ev_state": parse_json(row[8]) or {},
+            "battery_state": parse_json(row[9]) or {},
+            "billing_state": parse_json(row[10]) or {},
+            "collector_state": parse_json(row[11]) or {},
+            "evidence_state": parse_json(row[12]) or {},
+            "provider_provenance": parse_json(row[13]) or {},
+            "context_summary": parse_json(row[14]),
+            "state": parse_json(row[15]) or {},
+            "created_at": row[16],
+        }
+
+    @staticmethod
+    def _household_state_material_hash(state: dict[str, Any], context_summary: Optional[dict[str, Any]]) -> str:
+        material = {
+            "state": DataEngine._strip_volatile_state_fields(state),
+            "context": DataEngine._strip_volatile_state_fields(context_summary or {}),
+        }
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _strip_volatile_state_fields(value):
+        if isinstance(value, dict):
+            return {
+                key: DataEngine._strip_volatile_state_fields(item)
+                for key, item in value.items()
+                if key not in {"generated_at", "captured_at", "created_at", "observed_at"}
+            }
+        if isinstance(value, list):
+            return [DataEngine._strip_volatile_state_fields(item) for item in value]
+        return value
+
+    @staticmethod
+    def _redact_household_state_snapshot_payload(value):
+        sensitive_markers = ("password", "cookie", "api_key", "token", "secret", "authorization")
+        if isinstance(value, dict):
+            redacted = {}
+            for key, item in value.items():
+                if any(marker in str(key).lower() for marker in sensitive_markers):
+                    redacted[key] = "REDACTED"
+                else:
+                    redacted[key] = DataEngine._redact_household_state_snapshot_payload(item)
+            return redacted
+        if isinstance(value, list):
+            return [DataEngine._redact_household_state_snapshot_payload(item) for item in value]
+        return value
+
+    @staticmethod
+    def _latest_household_state_snapshot_row(conn: sqlite3.Connection, household_id: str):
+        return conn.execute(
+            """
+            SELECT
+                snapshot_id,
+                household_id,
+                captured_at,
+                material_hash,
+                tariff_state_json,
+                power_state_json,
+                energy_state_json,
+                solar_state_json,
+                ev_state_json,
+                battery_state_json,
+                billing_state_json,
+                collector_state_json,
+                evidence_state_json,
+                provider_provenance_json,
+                context_summary_json,
+                state_json,
+                created_at
+            FROM household_state_snapshots
+            WHERE household_id = ?
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """,
+            (household_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _household_state_changes(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        changes = []
+        for current, previous in zip(snapshots, snapshots[1:]):
+            changed = []
+            for key in ("tariff_state", "power_state", "solar_state", "ev_state", "battery_state", "billing_state", "collector_state", "evidence_state"):
+                if current.get(key) != previous.get(key):
+                    changed.append(key.replace("_state", ""))
+            if changed:
+                changes.append(
+                    {
+                        "captured_at": current["captured_at"],
+                        "changed": changed,
+                    }
+                )
+        return changes
 
     def persist_timeline_entries(self, entries: list[TimelineEntry]) -> DecisionTimeline:
         household_id = self._active_household_id()

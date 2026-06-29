@@ -395,6 +395,13 @@ def dashboard_data(
         now=generated_at,
         household_state=household_state,
     )
+    snapshot_engine = data_engine()
+    state_snapshot = snapshot_engine.persist_household_state_snapshot(
+        household_state,
+        context=household_current_context,
+    )
+    latest_state_snapshot = snapshot_engine.get_latest_household_state_snapshot()
+    recent_state_snapshots = snapshot_engine.get_recent_household_state_snapshots(limit=5)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -474,6 +481,9 @@ def dashboard_data(
         "provider_runtime": provider_runtime.as_dict(),
         "runtime": provider_runtime.as_dict(),
         "household_state": household_state.as_dict(),
+        "latest_household_state_snapshot": latest_state_snapshot,
+        "recent_household_state_snapshots": recent_state_snapshots,
+        "household_state_snapshot": state_snapshot,
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -3375,7 +3385,7 @@ def context_summary_html(context) -> str:
     """
 
 
-def household_state_html(household_state) -> str:
+def household_state_html(household_state, latest_snapshot=None, recent_snapshots=None) -> str:
     if not household_state:
         return ""
     data = household_state.as_dict() if hasattr(household_state, "as_dict") else dict(household_state)
@@ -3394,10 +3404,20 @@ def household_state_html(household_state) -> str:
         for label, value in rows.items()
     )
     sources = ", ".join(data.get("evidence", {}).get("data_sources_used", [])) or "No sources available"
+    latest_text = latest_snapshot.get("captured_at") if latest_snapshot else data.get("generated_at")
+    changes = []
+    if recent_snapshots:
+        for change in recent_snapshots.get("changes", [])[:4]:
+            changes.append(
+                f"<li>{html.escape(str(change.get('captured_at') or 'Unknown'))}: {html.escape(', '.join(change.get('changed', [])) or 'state changed')}</li>"
+            )
+    changes_html = f"<ul>{''.join(changes)}</ul>" if changes else '<p class="small">No recent material state changes recorded.</p>'
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Household State</h3><span>{html.escape(str(data.get("summary", {}).get("current_status") or "Current facts").title())}</span></div>
       <div class="config-grid">{row_html}</div>
+      <p class="small">Latest snapshot: {html.escape(str(latest_text or "Not captured"))}</p>
+      {changes_html}
       <p class="small">Sources: {html.escape(sources)}</p>
     </div>
     """
@@ -3416,6 +3436,8 @@ def system_page_html(
     promotion_summary: Optional[dict] = None,
     context=None,
     household_state=None,
+    latest_household_state_snapshot=None,
+    recent_household_state_snapshots=None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3445,7 +3467,7 @@ def system_page_html(
       <div class="system-grid">
         {provider_management_html(provider_management)}
         {provider_runtime_html(provider_runtime)}
-        {household_state_html(household_state)}
+        {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3812,6 +3834,13 @@ def write_html(
         now=generated_dt,
         household_state=household_state,
     )
+    snapshot_engine = data_engine()
+    state_snapshot = snapshot_engine.persist_household_state_snapshot(
+        household_state,
+        context=household_current_context,
+    )
+    latest_state_snapshot = snapshot_engine.get_latest_household_state_snapshot()
+    recent_state_snapshots = snapshot_engine.get_recent_household_state_snapshots(limit=5)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -3949,7 +3978,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots)}
   </section>
 """
     )
