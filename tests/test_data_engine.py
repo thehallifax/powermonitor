@@ -265,6 +265,49 @@ class DataEngineTests(unittest.TestCase):
         self.assertNotIn("redaction-fixture-snapshot", str(snapshot))
         self.assertIn("REDACTED", str(snapshot))
 
+    def test_state_changes_are_detected_and_persisted_once(self):
+        previous = household_state().as_dict()
+        current = household_state().as_dict()
+        previous["tariff"]["active_bucket"] = "off_peak"
+        previous["tariff"]["active_label"] = "Off Peak"
+        current["tariff"]["active_bucket"] = "peak"
+        current["tariff"]["active_label"] = "Peak"
+
+        self.engine.persist_household_state_snapshot(previous, captured_at="2026-06-27T11:55:00+08:00")
+        self.engine.persist_household_state_snapshot(current, captured_at="2026-06-27T12:00:00+08:00")
+
+        first = self.engine.detect_and_persist_state_changes()
+        second = self.engine.detect_and_persist_state_changes()
+        recent = self.engine.get_recent_state_changes()
+        summary = self.engine.get_state_change_summary()
+
+        self.assertEqual(first["count"], 2)
+        self.assertEqual(second["count"], 0)
+        self.assertEqual(len(recent), 2)
+        self.assertEqual(summary["counts"]["tariff_window_changed"], 1)
+        self.assertEqual(summary["counts"]["entered_peak"], 1)
+
+    def test_state_changes_are_household_scoped(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+        previous = household_state().as_dict()
+        current = household_state().as_dict()
+        previous["collector"]["healthy"] = True
+        current["collector"]["healthy"] = False
+
+        self.engine.persist_household_state_snapshot(previous, captured_at="2026-06-27T11:55:00+08:00")
+        self.engine.persist_household_state_snapshot(current, captured_at="2026-06-27T12:00:00+08:00")
+        self.engine.detect_and_persist_state_changes()
+
+        self.assertEqual(engine_b.get_recent_state_changes(), [])
+        self.assertEqual(engine_b.get_state_change_summary()["count"], 0)
+
     def test_provider_observations_are_promoted_to_trusted_read_models(self):
         self.engine.persist_provider_observations(
             [

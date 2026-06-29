@@ -39,6 +39,7 @@ from .provider_framework import (
     ProviderType,
 )
 from .promotion_engine import PromotionEngine, PromotionResult
+from .state_change_engine import StateChange, StateChangeEngine
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 DEFAULT_ACCOUNT_ID = "local_account"
@@ -384,6 +385,7 @@ class DataEngine:
         DataEngine._ensure_provider_observation_table(conn)
         DataEngine._ensure_promotion_table(conn)
         DataEngine._ensure_household_state_snapshot_table(conn)
+        DataEngine._ensure_state_change_table(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -513,6 +515,39 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_state_change_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS state_changes (
+                change_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                event_key TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                previous_snapshot_id TEXT NOT NULL,
+                current_snapshot_id TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_state_changes_household_event_key
+            ON state_changes(household_id, event_key)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_state_changes_household_detected
+            ON state_changes(household_id, detected_at DESC)
+            """
+        )
+
+    @staticmethod
     def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
         scoped_tables = (
             "readings",
@@ -523,6 +558,7 @@ class DataEngine:
             "provider_observations",
             "promotion_decisions",
             "household_state_snapshots",
+            "state_changes",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -1595,6 +1631,121 @@ class DataEngine:
 
         return self._with_connection(query)
 
+    def detect_and_persist_state_changes(self, limit: int = 2) -> dict[str, Any]:
+        recent = self.get_recent_household_state_snapshots(limit=max(limit, 2))
+        snapshots = recent.get("snapshots", [])
+        if len(snapshots) < 2:
+            return {
+                "household_id": self._active_household_id(),
+                "count": 0,
+                "changes": [],
+            }
+        current = snapshots[0]
+        previous = snapshots[1]
+        result = StateChangeEngine().detect(previous, current)
+        changes = self.persist_state_changes(result.changes)
+        return {
+            "household_id": result.household_id,
+            "previous_snapshot_id": result.previous_snapshot_id,
+            "current_snapshot_id": result.current_snapshot_id,
+            "count": len(changes),
+            "changes": changes,
+        }
+
+    def persist_state_changes(self, changes: list[StateChange]) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def upsert(conn):
+            DataEngine._ensure_state_change_table(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            rows = []
+            for change in changes:
+                if change.household_id != household_id:
+                    continue
+                evidence_json = json.dumps([item.as_dict() for item in change.evidence], sort_keys=True)
+                row = (
+                    change.change_id,
+                    household_id,
+                    change.event_key or change.change_id,
+                    change.change_type.value,
+                    change.severity.value,
+                    change.title,
+                    change.summary,
+                    change.detected_at,
+                    change.previous_snapshot_id,
+                    change.current_snapshot_id,
+                    evidence_json,
+                    now,
+                )
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO state_changes (
+                        change_id,
+                        household_id,
+                        event_key,
+                        change_type,
+                        severity,
+                        title,
+                        summary,
+                        detected_at,
+                        previous_snapshot_id,
+                        current_snapshot_id,
+                        evidence_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row,
+                )
+                if cursor.rowcount:
+                    rows.append(row)
+            conn.commit()
+            return [self._normalise_state_change(row) for row in rows]
+
+        return self._with_connection(upsert)
+
+    def get_recent_state_changes(self, limit: int = 20) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_state_change_table(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    change_id,
+                    household_id,
+                    event_key,
+                    change_type,
+                    severity,
+                    title,
+                    summary,
+                    detected_at,
+                    previous_snapshot_id,
+                    current_snapshot_id,
+                    evidence_json,
+                    created_at
+                FROM state_changes
+                WHERE household_id = ?
+                ORDER BY detected_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            return [self._normalise_state_change(row) for row in rows]
+
+        return self._with_connection(query)
+
+    def get_state_change_summary(self, limit: int = 20) -> dict[str, Any]:
+        changes = self.get_recent_state_changes(limit=limit)
+        counts: dict[str, int] = {}
+        for change in changes:
+            counts[change["change_type"]] = counts.get(change["change_type"], 0) + 1
+        return {
+            "household_id": self._active_household_id(),
+            "count": len(changes),
+            "counts": counts,
+            "latest": changes[: min(limit, 10)],
+        }
+
     def promote_provider_observations(
         self,
         *,
@@ -1940,6 +2091,27 @@ class DataEngine:
             "context_summary": parse_json(row[14]),
             "state": parse_json(row[15]) or {},
             "created_at": row[16],
+        }
+
+    @staticmethod
+    def _normalise_state_change(row) -> dict[str, Any]:
+        try:
+            evidence = json.loads(row[10]) if row[10] else []
+        except json.JSONDecodeError:
+            evidence = []
+        return {
+            "change_id": row[0],
+            "household_id": row[1],
+            "event_key": row[2],
+            "change_type": row[3],
+            "severity": row[4],
+            "title": row[5],
+            "summary": row[6],
+            "detected_at": row[7],
+            "previous_snapshot_id": row[8],
+            "current_snapshot_id": row[9],
+            "evidence": evidence,
+            "created_at": row[11],
         }
 
     @staticmethod

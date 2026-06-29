@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-017 - State Change Detection
+
+- Added `StateChangeEngine` to compare persisted Household State snapshots and
+  emit meaningful tariff, solar, power direction, collector, billing, evidence,
+  and provider change events.
+- Added household-scoped `state_changes` persistence in DataEngine with
+  duplicate suppression, evidence, severity, timestamps, and recent/summary
+  query APIs.
+- Exposed `state_change_summary` and `recent_state_changes` through
+  dashboard/API output.
+- Added recent state changes to the System page and included meaningful state
+  changes in the Decision Timeline.
+- Added state change detection, duplicate suppression, household isolation, and
+  API serialization tests.
+
 ## PB-016 - Household State Snapshots
 
 - Added household-scoped `household_state_snapshots` persistence in DataEngine

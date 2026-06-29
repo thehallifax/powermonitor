@@ -48,6 +48,7 @@ from engine.models import (
     SetupChecklist,
     SetupSection,
     SetupTask,
+    TimelineEntry,
 )
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
@@ -402,6 +403,9 @@ def dashboard_data(
     )
     latest_state_snapshot = snapshot_engine.get_latest_household_state_snapshot()
     recent_state_snapshots = snapshot_engine.get_recent_household_state_snapshots(limit=5)
+    state_change_detection = snapshot_engine.detect_and_persist_state_changes()
+    state_change_summary = snapshot_engine.get_state_change_summary()
+    recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -468,6 +472,7 @@ def dashboard_data(
         provider_management=provider_management,
         now=generated_at,
     )
+    display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "household": household_context.household.as_dict(),
@@ -484,6 +489,9 @@ def dashboard_data(
         "latest_household_state_snapshot": latest_state_snapshot,
         "recent_household_state_snapshots": recent_state_snapshots,
         "household_state_snapshot": state_snapshot,
+        "state_change_detection": state_change_detection,
+        "state_change_summary": state_change_summary,
+        "recent_state_changes": recent_state_changes,
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -504,7 +512,7 @@ def dashboard_data(
         "plan_comparison": plan,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
-        "timeline": timeline.as_dict(),
+        "timeline": display_timeline.as_dict(),
         "comparison": comparison,
         "advisors": advisors.as_dict(),
         "daily_briefing": briefing.as_dict(),
@@ -3052,6 +3060,27 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
     """
 
 
+def timeline_with_state_changes(timeline: DecisionTimeline, state_changes: list[dict]) -> DecisionTimeline:
+    entries = list(timeline.entries)
+    existing = {(entry.timestamp, entry.event_type, entry.title) for entry in entries}
+    for change in state_changes[:10]:
+        entry = TimelineEntry(
+            timestamp=str(change.get("detected_at") or ""),
+            title=str(change.get("title") or "Household state changed"),
+            summary=str(change.get("summary") or ""),
+            financial_impact=None,
+            confidence=str(change.get("severity") or "info").title(),
+            evidence_sources=["Household State snapshots"],
+            event_type=f"state_change:{change.get('change_type') or 'unknown'}",
+        )
+        key = (entry.timestamp, entry.event_type, entry.title)
+        if key not in existing:
+            entries.append(entry)
+            existing.add(key)
+    entries.sort(key=lambda item: item.timestamp, reverse=True)
+    return DecisionTimeline(entries)
+
+
 def solar_page_html(summary: Summary, recommendations: list[Decision]) -> str:
     solar_recs = [
         item for item in recommendations
@@ -3423,6 +3452,30 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
     """
 
 
+def state_changes_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return ""
+    rows = []
+    for change in summary.get("latest", [])[:8]:
+        severity = str(change.get("severity") or "info")
+        tone = "bad" if severity in {"warning", "critical"} else "good" if severity == "opportunity" else "neutral"
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(change.get("title") or "State changed"))}</span>
+              <strong>{html.escape(severity.title())}</strong>
+              <small>{html.escape(str(change.get("summary") or ""))} - {html.escape(str(change.get("detected_at") or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>State Changes</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No material household state changes recorded yet.</p>'}</div>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3438,6 +3491,7 @@ def system_page_html(
     household_state=None,
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
+    state_change_summary: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3468,6 +3522,7 @@ def system_page_html(
         {provider_management_html(provider_management)}
         {provider_runtime_html(provider_runtime)}
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
+        {state_changes_html(state_change_summary)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3841,6 +3896,9 @@ def write_html(
     )
     latest_state_snapshot = snapshot_engine.get_latest_household_state_snapshot()
     recent_state_snapshots = snapshot_engine.get_recent_household_state_snapshots(limit=5)
+    state_change_detection = snapshot_engine.detect_and_persist_state_changes()
+    state_change_summary = snapshot_engine.get_state_change_summary()
+    recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -3917,6 +3975,7 @@ def write_html(
         now=generated_dt,
         context=household_current_context,
     )
+    display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     body_class = ' class="glance-only"' if glance_only else ""
     chrome_html = "" if glance_only else f"""
   {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
@@ -3965,7 +4024,7 @@ def write_html(
   </section>
   <section id="timeline" class="page">
     <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
-    {timeline_html(timeline)}
+    {timeline_html(display_timeline)}
   </section>
   <section id="analytics" class="page">
     <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>
@@ -3978,7 +4037,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary)}
   </section>
 """
     )
