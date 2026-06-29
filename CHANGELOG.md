@@ -1,5 +1,19 @@
 # Changelog
 
+## PB-010 - Context Engine
+
+- Added `ContextEngine` with descriptive household context models for time,
+  solar, tariff, charging, billing, evidence, and confidence.
+- Centralized current tariff-window and charging-context classification for
+  Charging Advisor while preserving existing advice outcomes.
+- Exposed serialized household `context` through the dashboard API and Glance
+  state for future briefing and notification surfaces.
+- Added a System page Context Summary card showing inferred household state,
+  confidence, and data sources used.
+- Added Context Engine tests for daytime, nighttime, tariff transitions,
+  billing-period transitions, evidence degradation, serialization, and advisor
+  context output.
+
 ## PB-009 - Observation Promotion Engine
 
 - Added `PromotionEngine` with promotion candidates, decisions, reasons,

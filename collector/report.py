@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from engine.briefing_engine import BriefingEngine
 from engine.charging_advisor import ChargingAdvisor
+from engine.context_engine import ContextEngine
 from engine.cost_advisor import CostAdvisor
 from engine.data_engine import DataEngine
 from engine.decision_engine import (
@@ -345,6 +346,13 @@ def dashboard_data(
         settings,
     )
     generated_at = datetime.now().astimezone()
+    household_current_context = ContextEngine().build(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=settings,
+        health=health,
+        now=generated_at,
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -354,6 +362,7 @@ def dashboard_data(
         glance_projected,
         generated_at,
         household_context,
+        household_current_context,
     )
     cost = build_cost_advisor(
         period_summary,
@@ -425,6 +434,7 @@ def dashboard_data(
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
         "latest_promotions": promotion_summary["latest_promotions"],
+        "context": household_current_context.as_dict(),
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
         "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
@@ -457,6 +467,7 @@ def dashboard_data(
             projected_bill=glance_projected,
             bill_projection_basis=glance_basis,
             now=generated_at,
+            context=household_current_context,
         ).as_dict(),
         "ev_source_counts": ev_source_counts(),
         "data_completeness": completeness,
@@ -1140,6 +1151,7 @@ def build_charging_advice(
     projected_bill: Optional[float],
     now: datetime,
     household_context: Optional[HouseholdContext] = None,
+    context=None,
 ) -> ChargingAdvice:
     return charging_advisor(household_context).advise(
         today_summary=today_summary,
@@ -1149,6 +1161,7 @@ def build_charging_advice(
         recommendations=recommendations,
         projected_bill=projected_bill,
         now=now,
+        context=context,
     )
 
 
@@ -3124,6 +3137,39 @@ def promotion_summary_html(summary: Optional[dict]) -> str:
     """
 
 
+def context_summary_html(context) -> str:
+    if not context:
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Context summary</h3><span>Unavailable</span></div>
+      <p class="notice">Household context could not be inferred for this report.</p>
+    </div>
+    """
+    data = context.as_dict() if hasattr(context, "as_dict") else dict(context)
+    rows = {
+        "Time": data.get("time"),
+        "Solar": data.get("solar"),
+        "Tariff": data.get("tariff"),
+        "Charging": data.get("charging"),
+        "Billing": data.get("billing"),
+        "Evidence": data.get("evidence"),
+        "Confidence": data.get("confidence"),
+    }
+    row_html = "".join(
+        f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'Unknown').replace('_', ' ').title())}</strong></div>"
+        for label, value in rows.items()
+    )
+    sources = ", ".join(str(source) for source in data.get("data_sources_used", [])) or "No sources available"
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Context summary</h3><span>{html.escape(str(data.get('current_tariff_label') or 'Current state'))}</span></div>
+      <div class="config-grid">{row_html}</div>
+      <p class="notice">{html.escape(str(data.get("confidence_reason") or ""))}</p>
+      <p class="small">Sources: {html.escape(sources)}</p>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3133,6 +3179,7 @@ def system_page_html(
     provider_registry: Optional[ProviderRegistry] = None,
     provider_observations: Optional[dict] = None,
     promotion_summary: Optional[dict] = None,
+    context=None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3162,6 +3209,7 @@ def system_page_html(
         {provider_registry_html(provider_registry)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
+        {context_summary_html(context)}
         {capability_summary_html(capability_summary)}
         {data_completeness_html(summary, settings)}
         <div class="system-card">
@@ -3463,6 +3511,13 @@ def write_html(
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
     overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
+    household_current_context = ContextEngine().build(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=settings,
+        health=health,
+        now=generated_dt,
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -3472,6 +3527,7 @@ def write_html(
         glance_projected,
         generated_dt,
         household_context,
+        household_current_context,
     )
     previous_summary = comparison.get("summary_b") if comparison else None
     cost = build_cost_advisor(
@@ -3539,6 +3595,7 @@ def write_html(
         projected_bill=glance_projected,
         bill_projection_basis=glance_basis,
         now=generated_dt,
+        context=household_current_context,
     )
     body_class = ' class="glance-only"' if glance_only else ""
     chrome_html = "" if glance_only else f"""
@@ -3601,7 +3658,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations, promotion_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations, promotion_summary, household_current_context)}
   </section>
 """
     )

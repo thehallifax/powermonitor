@@ -6,7 +6,6 @@ decision, EV history, and freshness evidence. It does not render presentation
 markup and it does not forecast future appliance behaviour.
 """
 
-from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 
@@ -17,14 +16,18 @@ from .evidence_quality import (
     EvidenceSource,
     cap_confidence_for_evidence,
 )
-from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
-
-TARIFF_LABELS = {
-    "overnight": "Overnight",
-    "off_peak": "Off peak",
-    "super_off_peak": "Super off peak",
-    "peak": "Peak",
-}
+from .context_engine import (
+    ContextEngine,
+    HouseholdContext as CurrentHouseholdContext,
+    TARIFF_LABELS,
+    TariffWindow,
+    current_tariff_bucket as context_current_tariff_bucket,
+    lowest_cost_window as context_lowest_cost_window,
+    next_lower_cost_window as context_next_lower_cost_window,
+    upcoming_tariff_windows as context_upcoming_tariff_windows,
+    wait_minutes as context_wait_minutes,
+)
+from .models import Advisor, ChargingAdvice, Decision, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext as PlatformHouseholdContext
 EV_BUCKET_LABELS = {
     "super_off_peak": "9am-3pm super off-peak / EV solar window",
     "overnight": "11pm-6am overnight",
@@ -33,27 +36,12 @@ EV_BUCKET_LABELS = {
 }
 
 
-@dataclass(frozen=True)
-class TariffWindow:
-    bucket: str
-    label: str
-    start: Optional[datetime]
-    rate: Optional[float]
-
-    def display(self, reference: datetime) -> str:
-        if self.start is None:
-            return self.label
-        if self.start <= reference:
-            return f"{self.label} now"
-        return f"{self.label} from {self.start.strftime('%-I:%M %p')}"
-
-
 class ChargingAdvisor:
     """Deterministic advisor for the question: should I charge my EV right now?"""
 
     name = "charging_advisor"
 
-    def __init__(self, household_context: Optional[HouseholdContext] = None) -> None:
+    def __init__(self, household_context: Optional[PlatformHouseholdContext] = None) -> None:
         self.household_context = household_context
 
     def advise(
@@ -66,9 +54,17 @@ class ChargingAdvisor:
         recommendations: list[Decision],
         projected_bill: Optional[float] = None,
         now: Optional[datetime] = None,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> ChargingAdvice:
         observed_at = now or datetime.now().astimezone()
-        bucket = current_tariff_bucket(observed_at)
+        context = context or ContextEngine().build(
+            today_summary=today_summary,
+            billing_summary=billing_summary,
+            settings=settings,
+            health=health,
+            now=observed_at,
+        )
+        bucket = context.current_tariff_bucket or current_tariff_bucket(observed_at)
         available, freshness, confidence = self._data_is_available(today_summary, billing_summary, health)
         solar_status, has_solar_surplus = solar_signal(today_summary)
         tariff_rates = self._import_rates(settings)
@@ -126,6 +122,7 @@ class ChargingAdvisor:
             "top_recommendation_priority": top_priority,
             "health_status": health.get("status"),
             "report_age_minutes": health.get("report_age_minutes"),
+            "context": context.as_dict(),
         }
 
         if not available:
@@ -635,16 +632,7 @@ def solar_signal(today_summary: Any) -> tuple[str, bool]:
 
 
 def current_tariff_bucket(now: datetime) -> str:
-    current_time = now.astimezone().time()
-    if current_time >= time(23, 0) or current_time < time(6, 0):
-        return "overnight"
-    if time(6, 0) <= current_time < time(9, 0):
-        return "off_peak"
-    if time(9, 0) <= current_time < time(15, 0):
-        return "super_off_peak"
-    if time(15, 0) <= current_time < time(21, 0):
-        return "peak"
-    return "off_peak"
+    return context_current_tariff_bucket(now)
 
 
 def next_better_window(now: datetime, current_bucket: str) -> str:
@@ -652,58 +640,19 @@ def next_better_window(now: datetime, current_bucket: str) -> str:
 
 
 def next_lower_cost_window(now: datetime, current_bucket: str, rates: dict[str, float]) -> TariffWindow:
-    current_rate = rates.get(current_bucket)
-    if current_rate is None:
-        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, None)
-    if current_rate <= min(rates.values(), default=current_rate):
-        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
-    for start, bucket in upcoming_tariff_windows(now):
-        rate = rates.get(bucket)
-        if rate is not None and rate < current_rate:
-            return TariffWindow(bucket, TARIFF_LABELS[bucket], start, rate)
-    return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
+    return context_next_lower_cost_window(now, current_bucket, rates)
 
 
 def lowest_cost_window(now: datetime, current_bucket: str, rates: dict[str, float]) -> TariffWindow:
-    current_rate = rates.get(current_bucket)
-    if not rates:
-        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
-    lowest_rate = min(rates.values())
-    if current_rate == lowest_rate:
-        return TariffWindow(current_bucket, TARIFF_LABELS[current_bucket], now, current_rate)
-    for start, bucket in upcoming_tariff_windows(now):
-        rate = rates.get(bucket)
-        if rate == lowest_rate:
-            return TariffWindow(bucket, TARIFF_LABELS[bucket], start, rate)
-    lowest_bucket = min(rates, key=lambda item: rates[item])
-    return TariffWindow(lowest_bucket, TARIFF_LABELS[lowest_bucket], None, rates[lowest_bucket])
+    return context_lowest_cost_window(now, current_bucket, rates)
 
 
 def upcoming_tariff_windows(now: datetime) -> list[tuple[datetime, str]]:
-    local_now = now.astimezone()
-    day = local_now.date()
-    schedule = [
-        (time(6, 0), "off_peak"),
-        (time(9, 0), "super_off_peak"),
-        (time(15, 0), "peak"),
-        (time(21, 0), "off_peak"),
-        (time(23, 0), "overnight"),
-    ]
-    windows: list[tuple[datetime, str]] = []
-    for day_offset in range(3):
-        target_day = day + timedelta(days=day_offset)
-        for window_time, bucket in schedule:
-            start = datetime.combine(target_day, window_time, tzinfo=local_now.tzinfo)
-            if start > local_now:
-                windows.append((start, bucket))
-    windows.sort(key=lambda item: item[0])
-    return windows
+    return context_upcoming_tariff_windows(now)
 
 
 def wait_minutes(now: datetime, start: Optional[datetime]) -> int:
-    if start is None or start <= now:
-        return 0
-    return int(round((start - now).total_seconds() / 60))
+    return context_wait_minutes(now, start)
 
 
 def next_recommended_window(now: datetime, current_bucket: str) -> tuple[str, str, Optional[datetime]]:

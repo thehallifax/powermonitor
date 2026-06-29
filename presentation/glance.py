@@ -30,6 +30,7 @@ class GlanceState:
     confidence: str
     evidence_quality: str
     evidence_reason: str
+    context: Optional[dict[str, Any]] = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,6 +44,7 @@ def build_glance_state(
     projected_bill: float,
     bill_projection_basis: str,
     now: datetime,
+    context: Optional[Any] = None,
 ) -> GlanceState:
     advisor = charging_advice.advisor
     bucket = str(charging_advice.supporting_evidence.get("current_tariff_bucket") or current_tariff_bucket(now))
@@ -82,4 +84,5 @@ def build_glance_state(
         confidence=advisor.confidence,
         evidence_quality=evidence_quality,
         evidence_reason=evidence_reason,
+        context=context.as_dict() if hasattr(context, "as_dict") else context,
     )

@@ -70,6 +70,8 @@ class ChargingAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.confidence, "High")
         self.assertIsNotNone(advice.estimated_financial_benefit)
         self.assertEqual(advice.supporting_evidence["current_tariff_bucket"], "super_off_peak")
+        self.assertEqual(advice.supporting_evidence["context"]["tariff"], "LOWEST_COST")
+        self.assertEqual(advice.supporting_evidence["context"]["charging"], "CHEAP_WINDOW_ACTIVE")
         self.assertEqual(advice.current_window, "9am-3pm super off-peak / EV solar window")
         self.assertEqual(advice.current_window_label, "Super off peak")
         self.assertEqual(advice.current_window_rate, SETTINGS.import_rates["super_off_peak"])
