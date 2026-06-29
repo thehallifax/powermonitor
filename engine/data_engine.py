@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
+from .behaviour_engine import BehaviourEngine, HouseholdBehaviour
 from .models import (
     Account,
     CapabilityStatus,
@@ -1116,6 +1117,21 @@ class DataEngine:
         if len(ordered) % 2:
             return ordered[midpoint]
         return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+    def get_household_behaviour(
+        self,
+        start: date,
+        end: date,
+        *,
+        ev_sources: Optional[list[str]] = None,
+    ) -> HouseholdBehaviour:
+        ev_sources = ev_sources or ["ocular_export", "home_assistant_ocpp"]
+        return BehaviourEngine().build(
+            grid_intervals=self.get_grid_intervals(start, end),
+            solar_intervals=self.get_solar_intervals(start, end),
+            ev_sessions=self.get_ev_sessions(start, end, sources=ev_sources),
+            household_id=self._active_household_id(),
+        )
 
     def get_ev_source_counts(self) -> list[dict[str, Any]]:
         household_id = self._active_household_id()

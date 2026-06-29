@@ -336,6 +336,12 @@ def dashboard_data(
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = context_engine.get_recommendation_lifecycle_counts()
+        behaviour_start = current_day - timedelta(days=89)
+        household_behaviour = context_engine.get_household_behaviour(
+            behaviour_start,
+            current_day,
+            ev_sources=actual_ev_sources(settings),
+        )
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
         timeline_candidates = build_decision_timeline(
             period_summary,
@@ -409,6 +415,12 @@ def dashboard_data(
     recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
     notification_preferences = snapshot_engine.get_notification_preferences()
     notification_history = snapshot_engine.get_recent_notification_history(limit=50)
+    behaviour_end = current_day
+    household_behaviour = snapshot_engine.get_household_behaviour(
+        behaviour_end - timedelta(days=89),
+        behaviour_end,
+        ev_sources=actual_ev_sources(settings),
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -502,6 +514,7 @@ def dashboard_data(
         "provider_runtime": provider_runtime.as_dict(),
         "runtime": provider_runtime.as_dict(),
         "household_state": household_state.as_dict(),
+        "household_behaviour": household_behaviour.as_dict(),
         "latest_household_state_snapshot": latest_state_snapshot,
         "recent_household_state_snapshots": recent_state_snapshots,
         "household_state_snapshot": state_snapshot,
@@ -3482,6 +3495,33 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
     """
 
 
+def household_behaviour_html(behaviour: Optional[dict]) -> str:
+    if not behaviour:
+        return ""
+    baseload = behaviour.get("baseload") or {}
+    daily = behaviour.get("daily_usage") or {}
+    ev = behaviour.get("ev") or {}
+    solar = behaviour.get("solar") or {}
+    overnight = baseload.get("overnight_baseload_watts")
+    rows = {
+        "Overnight baseload": f"{float(overnight):.0f} W" if overnight is not None else "Unknown",
+        "Average wake time": daily.get("typical_wake_time") or "Unknown",
+        "EV charging": ev.get("preferred_charging_window") or "Unknown",
+        "Solar export tendency": solar.get("export_tendency") or "Unknown",
+        "Confidence": behaviour.get("confidence") or "Unknown",
+    }
+    row_html = "".join(
+        f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value).replace('_', ' ').title())}</strong></div>"
+        for label, value in rows.items()
+    )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Household Behaviour</h3><span>{int(behaviour.get("sample_days") or 0)} learned days</span></div>
+      <div class="config-grid">{row_html}</div>
+    </div>
+    """
+
+
 def state_changes_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3593,6 +3633,7 @@ def system_page_html(
     promotion_summary: Optional[dict] = None,
     context=None,
     household_state=None,
+    household_behaviour: Optional[dict] = None,
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
@@ -3629,6 +3670,7 @@ def system_page_html(
         {provider_management_html(provider_management)}
         {provider_runtime_html(provider_runtime)}
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
+        {household_behaviour_html(household_behaviour)}
         {state_changes_html(state_change_summary)}
         {notification_preferences_html(notification_preferences)}
         {notification_readiness_html(notification_readiness_summary)}
@@ -4011,6 +4053,12 @@ def write_html(
     recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
     notification_preferences = snapshot_engine.get_notification_preferences()
     notification_history = snapshot_engine.get_recent_notification_history(limit=50)
+    behaviour_end = selected_period.end
+    household_behaviour = snapshot_engine.get_household_behaviour(
+        behaviour_end - timedelta(days=89),
+        behaviour_end,
+        ev_sources=actual_ev_sources(settings),
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -4162,7 +4210,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
     )

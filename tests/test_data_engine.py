@@ -273,6 +273,22 @@ class DataEngineTests(unittest.TestCase):
         self.assertNotIn("redaction-fixture-snapshot", str(snapshot))
         self.assertIn("REDACTED", str(snapshot))
 
+    def test_household_behaviour_is_built_from_scoped_history(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+        behaviour_a = self.engine.get_household_behaviour(date(2026, 6, 1), date(2026, 6, 30))
+        behaviour_b = engine_b.get_household_behaviour(date(2026, 6, 1), date(2026, 6, 30))
+
+        self.assertGreater(behaviour_a.sample_days, 0)
+        self.assertEqual(behaviour_b.sample_days, 0)
+        self.assertEqual(behaviour_b.confidence.value, "UNKNOWN")
+
     def test_state_changes_are_detected_and_persisted_once(self):
         previous = household_state().as_dict()
         current = household_state().as_dict()

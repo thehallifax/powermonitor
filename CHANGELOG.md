@@ -1,5 +1,19 @@
 # Changelog
 
+## PB-020 - Household Behaviour Engine
+
+- Added `BehaviourEngine` with descriptive household behaviour profiles for
+  baseload, daily usage, EV charging behaviour, solar usage, and confidence.
+- Added DataEngine-backed behaviour generation from normalized historical grid
+  intervals, solar intervals, and EV sessions without querying SQLite outside
+  DataEngine.
+- Exposed `household_behaviour` through dashboard/API output.
+- Added a System page Household Behaviour card showing overnight baseload,
+  average wake time, typical EV charging behaviour, solar export tendency, and
+  confidence.
+- Added behaviour tests for weekday/weekend learning, sparse data confidence,
+  serialization, household isolation, and API output.
+
 ## PB-019 - Notification Preferences and History
 
 - Added household-scoped notification preferences for global enablement,
