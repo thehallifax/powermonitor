@@ -1,5 +1,21 @@
 # Changelog
 
+## PB-023 - Advisor Decision Migration
+
+- Added advisor presenter support that turns platform-owned Household Decisions
+  into advisor explanation cards with decision references, evidence, confidence,
+  and user-facing wording.
+- Refactored Daily Briefing to summarize Household Decisions when provided,
+  while retaining advisor-based briefing compatibility for existing callers.
+- Added Household Decision provenance to Recommendation Centre cards, API
+  recommendation serialization, advisor explanations, and System debugging.
+- Extended timeline entries so decision-backed events can reference
+  `decision_id` and `decision_type` where appropriate.
+- Updated Notification Readiness to prefer Household Decisions over advisor
+  outputs when decision data is available.
+- Added migration tests for advisor explanation, briefing, recommendation
+  mapping, notification mapping, timeline integration, and serialization.
+
 ## PB-022 - Decision Engine
 
 - Added normalized `DecisionEngine` household decision contracts for decision

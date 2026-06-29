@@ -12,6 +12,7 @@ def build_decision_timeline(
     decisions: Iterable[Decision],
     comparison: Optional[dict[str, Any]] = None,
     include_billing_period: bool = True,
+    household_decisions: Optional[Iterable[Any]] = None,
 ) -> DecisionTimeline:
     """Build a chronological memory from existing summaries and decisions."""
 
@@ -21,6 +22,7 @@ def build_decision_timeline(
         entries.append(bill_entry)
 
     entries.extend(_decision_entry(period_summary, decision) for decision in decisions)
+    entries.extend(_household_decision_entry(period_summary, decision) for decision in (household_decisions or []))
     return DecisionTimeline(
         entries=sorted(entries, key=lambda entry: (entry.timestamp, entry.title))
     )
@@ -118,6 +120,52 @@ def _decision_financial_impact(decision: Decision) -> Optional[str]:
         if value is not None:
             return f"{float(value):+,.2f} AUD {label}"
     return None
+
+
+def _household_decision_entry(period_summary: Any, decision: Any) -> TimelineEntry:
+    decision_type = str(_get(decision, "decision_type") or _get(decision, "type") or "HOUSEHOLD_DECISION")
+    reasons = list(_get(decision, "reasons") or [])
+    summary = _get(reasons[0], "summary") if reasons else decision_type.replace("_", " ").title()
+    return TimelineEntry(
+        timestamp=str(_get(decision, "created_at") or _iso_date(_value(period_summary, "end"))),
+        title=f"Household decision: {decision_type.replace('_', ' ').title()}",
+        summary=str(summary),
+        financial_impact=_household_decision_financial_impact(decision),
+        confidence=_display_confidence(_get(decision, "confidence")),
+        evidence_sources=list(_get(decision, "data_sources_used") or ["DecisionEngine"]),
+        event_type=f"household_decision_{decision_type.lower()}",
+        decision_id=_get(decision, "decision_id"),
+        decision_type=decision_type,
+    )
+
+
+def _household_decision_financial_impact(decision: Any) -> Optional[str]:
+    impact = _get(decision, "financial_impact")
+    if not isinstance(impact, dict):
+        return None
+    for key, label in (
+        ("today", "today"),
+        ("billing_period", "this billing period"),
+        ("yearly", "per year"),
+    ):
+        value = impact.get(key)
+        if value is not None:
+            return f"{float(value):+,.2f} AUD {label}"
+    return None
+
+
+def _display_confidence(value: Any) -> str:
+    text = str(value or "UNKNOWN").upper()
+    return {"HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "UNKNOWN": "Low"}.get(text, "Low")
+
+
+def _get(source: Any, name: str, default: Any = None) -> Any:
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(name, default)
+    value = getattr(source, name, default)
+    return getattr(value, "value", value)
 
 
 def _value(source: Any, name: str) -> Any:

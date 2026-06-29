@@ -283,8 +283,9 @@ class NotificationEngine:
         for candidate in self._candidates_from_decisions(household_decisions, household_id, created, quality, context, setup, advisors, preferences, recent_keys):
             self._append_candidate(candidates, seen_keys, candidate)
 
-        for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, preferences, recent_keys):
-            self._append_candidate(candidates, seen_keys, candidate)
+        if not household_decisions:
+            for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, preferences, recent_keys):
+                self._append_candidate(candidates, seen_keys, candidate)
 
         setup_candidate = self._candidate_from_setup(setup, household_id, created, quality, preferences, recent_keys)
         self._append_candidate(candidates, seen_keys, setup_candidate)

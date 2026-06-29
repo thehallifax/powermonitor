@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from engine.briefing_engine import BriefingEngine
+from engine.advisor_presenter import attach_decision_to_advisors, explain_household_decisions
 from engine.charging_advisor import ChargingAdvisor
 from engine.context_engine import ContextEngine
 from engine.cost_advisor import CostAdvisor
@@ -343,13 +344,6 @@ def dashboard_data(
             ev_sources=actual_ev_sources(settings),
         )
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
-        timeline_candidates = build_decision_timeline(
-            period_summary,
-            recommendations,
-            comparison,
-            include_billing_period=selected.kind == "current_billing_period",
-        )
-        timeline = context_engine.persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
         provider_observations = context_engine.get_provider_observation_summary()
         promotion_summary = context_engine.promote_provider_observations()
@@ -448,6 +442,14 @@ def dashboard_data(
     )
     household_decisions = household_decision_output["decisions"]
     decision_summary = household_decision_output["summary"]
+    timeline_candidates = build_decision_timeline(
+        period_summary,
+        recommendations,
+        comparison,
+        include_billing_period=selected.kind == "current_billing_period",
+        household_decisions=household_decisions,
+    )
+    timeline = snapshot_engine.persist_timeline_entries(timeline_candidates.entries)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -496,11 +498,22 @@ def dashboard_data(
         household_current_context,
     )
     advisors = AdvisorCollection(
-        [charging_advice.advisor, cost, solar, efficiency],
+        attach_decision_to_advisors([charging_advice.advisor, cost, solar, efficiency], household_decisions),
         household=household_context.household,
         capability_summary=capability_summary,
     )
-    briefing = briefing_engine(household_context).build(advisors, current_day, context=household_current_context)
+    decision_advisors = explain_household_decisions(household_decisions, existing_advisors=advisors.active())
+    advisor_explanations = AdvisorCollection(
+        decision_advisors,
+        household=household_context.household,
+        capability_summary=capability_summary,
+    )
+    briefing = briefing_engine(household_context).build(
+        advisor_explanations,
+        current_day,
+        context=household_current_context,
+        household_decisions=household_decisions,
+    )
     goals = goals_engine(household_context).evaluate(advisors)
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
@@ -519,7 +532,7 @@ def dashboard_data(
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
         household_decisions=household_decisions,
-        advisors=advisors,
+        advisors=None,
         setup=setup_checklist,
         preferences=notification_preferences,
         history=notification_history,
@@ -579,6 +592,7 @@ def dashboard_data(
         "timeline": display_timeline.as_dict(),
         "comparison": comparison,
         "advisors": advisors.as_dict(),
+        "advisor_explanations": advisor_explanations.as_dict(),
         "daily_briefing": briefing.as_dict(),
         "goals": [goal.as_dict() for goal in goals],
         "setup_progress": setup_checklist.progress.as_dict(),
@@ -599,8 +613,8 @@ def dashboard_data(
         "data_completeness": completeness,
         "energy_score": energy_score.as_dict(),
         "car_comparison": car_comparison(settings),
-        "recommendations": [decision.as_dict() for decision in recommendations],
-        "hidden_recommendations": [decision.as_dict() for decision in hidden],
+        "recommendations": [recommendation_with_decision_dict(decision, household_decisions) for decision in recommendations],
+        "hidden_recommendations": [recommendation_with_decision_dict(decision, household_decisions) for decision in hidden],
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
     }
@@ -2336,6 +2350,51 @@ def recommendation_evidence_html(decision: Decision) -> str:
     return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
 
 
+def decision_type_for_recommendation(decision: Decision) -> list[str]:
+    if decision.category == "EV":
+        return ["CHARGE_NOW", "WAIT_FOR_CHEAPER_WINDOW", "WAIT_FOR_SOLAR"]
+    if decision.category == "Bills":
+        return ["REVIEW_BILLING"]
+    if decision.category == "Solar":
+        return ["WAIT_FOR_SOLAR", "MONITOR_USAGE"]
+    if decision.category in {"Tariffs", "Behaviour"}:
+        return ["MONITOR_USAGE", "WAIT_FOR_CHEAPER_WINDOW", "INVESTIGATE_ANOMALY"]
+    if decision.action_type == "data_quality":
+        return ["DATA_INSUFFICIENT", "REVIEW_PROVIDER"]
+    return ["NO_ACTION", "MONITOR_USAGE"]
+
+
+def matching_household_decision(decision: Decision, household_decisions: Optional[list[dict]]) -> Optional[dict]:
+    if not household_decisions:
+        return None
+    preferred = decision_type_for_recommendation(decision)
+    for decision_type in preferred:
+        for household_decision in household_decisions:
+            if household_decision.get("type") == decision_type or household_decision.get("decision_type") == decision_type:
+                return household_decision
+    return household_decisions[0] if household_decisions else None
+
+
+def recommendation_decision_provenance_html(decision: Decision, household_decisions: Optional[list[dict]]) -> str:
+    household_decision = matching_household_decision(decision, household_decisions)
+    if not household_decision:
+        return '<p><strong>Household decision</strong>No matching HouseholdDecision emitted yet.</p>'
+    reasons = household_decision.get("reasons") or []
+    reason = reasons[0].get("summary") if reasons and isinstance(reasons[0], dict) else "Decision Engine reasoning"
+    return f"""
+      <p><strong>Household decision</strong>{html.escape(str(household_decision.get("type") or household_decision.get("decision_type") or "Decision").replace("_", " ").title())}</p>
+      <p><strong>Decision evidence</strong>{html.escape(str(reason))}</p>
+    """
+
+
+def recommendation_with_decision_dict(decision: Decision, household_decisions: Optional[list[dict]]) -> dict:
+    data = decision.as_dict()
+    household_decision = matching_household_decision(decision, household_decisions)
+    data["decision"] = household_decision
+    data["household_decision_id"] = household_decision.get("decision_id") if household_decision else None
+    return data
+
+
 def recommendation_controls_html(decision: Decision, hidden: bool = False) -> str:
     stable_id = html.escape(decision.id)
     if hidden:
@@ -2367,6 +2426,7 @@ def recommendation_centre_html(
     hidden: Optional[list[Decision]] = None,
     advisors: Optional[list[Advisor]] = None,
     goals: Optional[list[GoalProgress]] = None,
+    household_decisions: Optional[list[dict]] = None,
 ) -> str:
     ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
     hidden = sorted(hidden or [], key=lambda item: (-recommendation_priority_score(item), item.title))
@@ -2408,6 +2468,7 @@ def recommendation_centre_html(
               <div class="decision-lines">
                 <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
                 <p><strong>Why?</strong>{html.escape(why)}</p>
+                {recommendation_decision_provenance_html(decision, household_decisions)}
                 {goal_links}
               </div>
               <div class="recommendation-centre-evidence">
@@ -3623,6 +3684,42 @@ def household_decisions_html(
     """
 
 
+def decision_provenance_html(
+    decisions: Optional[list[dict]],
+    advisors: Optional[list[Advisor]],
+) -> str:
+    if not decisions:
+        return ""
+    advisors = advisors or []
+    advisor_by_decision = {
+        advisor.decision_id: advisor
+        for advisor in advisors
+        if advisor.decision_id
+    }
+    rows = []
+    for decision in decisions[:6]:
+        decision_id = decision.get("decision_id")
+        advisor = advisor_by_decision.get(decision_id)
+        evidence = decision.get("evidence") or []
+        evidence_text = evidence[0].get("source") if evidence and isinstance(evidence[0], dict) else "DecisionEngine"
+        advisor_text = advisor.headline if advisor else "No advisor explanation linked"
+        rows.append(
+            f"""
+            <div class="completeness-row neutral">
+              <span>{html.escape(str(decision.get("type") or "Decision").replace("_", " ").title())}</span>
+              <strong>{html.escape(advisor_text)}</strong>
+              <small>Evidence: {html.escape(str(evidence_text))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Decision Provenance</h3><span>Decision to advisor to evidence</span></div>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
 def state_changes_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3738,6 +3835,7 @@ def system_page_html(
     household_anomalies: Optional[list[dict]] = None,
     household_decisions: Optional[list[dict]] = None,
     decision_summary: Optional[dict] = None,
+    advisor_explanations: Optional[list[Advisor]] = None,
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
@@ -3777,6 +3875,7 @@ def system_page_html(
         {household_behaviour_html(household_behaviour)}
         {household_anomalies_html(household_anomalies)}
         {household_decisions_html(household_decisions, decision_summary)}
+        {decision_provenance_html(household_decisions, advisor_explanations)}
         {state_changes_html(state_change_summary)}
         {notification_preferences_html(notification_preferences)}
         {notification_readiness_html(notification_readiness_summary)}
@@ -4198,6 +4297,13 @@ def write_html(
     )
     household_decisions = household_decision_output["decisions"]
     decision_summary = household_decision_output["summary"]
+    timeline = build_decision_timeline(
+        period_summary,
+        recommendations,
+        comparison,
+        include_billing_period=selected_period.kind == "current_billing_period",
+        household_decisions=household_decisions,
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -4247,11 +4353,22 @@ def write_html(
         household_current_context,
     )
     advisors = AdvisorCollection(
-        [charging_advice.advisor, cost, solar, efficiency],
+        attach_decision_to_advisors([charging_advice.advisor, cost, solar, efficiency], household_decisions),
         household=household_context.household,
         capability_summary=capability_summary,
     )
-    briefing = briefing_engine(household_context).build(advisors, local_today(), context=household_current_context)
+    decision_advisors = explain_household_decisions(household_decisions, existing_advisors=advisors.active())
+    advisor_explanations = AdvisorCollection(
+        decision_advisors,
+        household=household_context.household,
+        capability_summary=capability_summary,
+    )
+    briefing = briefing_engine(household_context).build(
+        advisor_explanations,
+        local_today(),
+        context=household_current_context,
+        household_decisions=household_decisions,
+    )
     goals = goals_engine(household_context).evaluate(advisors)
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
@@ -4270,7 +4387,7 @@ def write_html(
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
         household_decisions=household_decisions,
-        advisors=advisors,
+        advisors=None,
         setup=setup_checklist,
         preferences=notification_preferences,
         history=notification_history,
@@ -4314,7 +4431,7 @@ def write_html(
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisors.active(), goals)}
+    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisor_explanations.active(), goals, household_decisions)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
@@ -4350,7 +4467,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
     )

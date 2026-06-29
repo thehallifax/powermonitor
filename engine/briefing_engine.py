@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Advisor orchestration for the PowerMonitor daily briefing."""
+"""Daily briefing presentation for PowerMonitor decisions and advisors."""
 
 from dataclasses import dataclass
 from datetime import date
@@ -32,6 +32,7 @@ class BriefingEngine:
         briefing_date: Optional[date] = None,
         household_context: Optional[HouseholdContext] = None,
         context: Optional[CurrentHouseholdContext] = None,
+        household_decisions: Optional[list] = None,
     ) -> DailyBriefing:
         active_household = household_context or self.household_context
         if active_household and advisors.household is None:
@@ -39,6 +40,13 @@ class BriefingEngine:
                 advisors.advisors,
                 household=active_household.household,
                 capability_summary=advisors.capability_summary,
+            )
+        if household_decisions:
+            return _decision_briefing(
+                household_decisions,
+                advisors,
+                briefing_date or date.today(),
+                context,
             )
         ordered = advisors.active()
         priorities = _orchestrated_section(ordered, "priority")[:1]
@@ -66,6 +74,38 @@ class BriefingEngine:
             read_time_minutes=_read_time_minutes(priorities, positives, watch_items),
             sections=sections,
         )
+
+
+def _decision_briefing(
+    household_decisions: list,
+    advisors: AdvisorCollection,
+    briefing_date: date,
+    context: Optional[CurrentHouseholdContext],
+) -> DailyBriefing:
+    ordered_decisions = sorted(household_decisions, key=_decision_sort_key)
+    items = [_briefing_priority_from_decision(decision, advisors) for decision in ordered_decisions]
+    priorities = [item for item in items if item.status in PRIORITY_STATUSES][:1]
+    positives = [item for item in items if item.status in POSITIVE_STATUSES][:1]
+    watch_items = [item for item in items if item.status in WATCH_STATUSES and item not in priorities][:1]
+    sections = [
+        BriefingSection("Today's Best Action", "top_priorities", priorities),
+        BriefingSection("You're doing well", "positive_outcomes", positives),
+        BriefingSection("Watch This", "items_to_watch", watch_items),
+    ]
+    return DailyBriefing(
+        greeting=_greeting(briefing_date),
+        overall_household_status=_decision_overall_status(ordered_decisions, context),
+        overall_confidence=_decision_overall_confidence(ordered_decisions),
+        overall_freshness="DecisionEngine",
+        top_priorities=priorities,
+        positive_outcomes=positives,
+        items_to_watch=watch_items,
+        suggested_next_action=_decision_suggested_action(priorities, watch_items, positives),
+        estimated_savings_opportunity=_decision_estimated_savings(ordered_decisions),
+        advisor_summary=items,
+        read_time_minutes=max(1, min(4, len(items))),
+        sections=sections,
+    )
 
 
 @dataclass(frozen=True)
@@ -233,6 +273,36 @@ def _briefing_priority(advisor: Advisor) -> BriefingPriority:
         freshness=advisor.freshness,
         estimated_financial_impact=advisor.estimated_financial_impact,
         supporting_advisors=[_advisor_label(advisor)],
+        decision_id=advisor.decision_id,
+        decision_type=advisor.decision_type,
+    )
+
+
+def _briefing_priority_from_decision(decision, advisors: AdvisorCollection) -> BriefingPriority:
+    decision_type = str(_decision_get(decision, "decision_type") or _decision_get(decision, "type") or "NO_ACTION")
+    supporting = [
+        _advisor_label(advisor)
+        for advisor in advisors.active()
+        if advisor.decision_id == _decision_get(decision, "decision_id")
+    ]
+    reasons = list(_decision_get(decision, "reasons") or [])
+    primary_reason = _decision_get(reasons[0], "summary") if reasons else None
+    outcome = _decision_get(decision, "outcome")
+    recommendation = _decision_get(outcome, "expected_effect") or primary_reason or "Continue monitoring."
+    return BriefingPriority(
+        advisor_id=f"decision:{_decision_get(decision, 'decision_id')}",
+        advisor_type="HOUSEHOLD_DECISION",
+        title=_decision_title(decision_type),
+        summary=primary_reason or recommendation,
+        recommendation=recommendation,
+        status=_decision_status(decision_type),
+        confidence=_display_confidence(_decision_get(decision, "confidence")),
+        confidence_reason=f"{_display_confidence(_decision_get(decision, 'confidence'))} confidence from Decision Engine reasoning.",
+        freshness="DecisionEngine",
+        estimated_financial_impact=_financial_impact_from_decision(decision),
+        supporting_advisors=supporting or ["Decision Engine"],
+        decision_id=_decision_get(decision, "decision_id"),
+        decision_type=decision_type,
     )
 
 
@@ -412,3 +482,116 @@ def _impact_value(impact: Optional[FinancialImpact]) -> float:
         return 0.0
     values = [value for value in impact.periods_dict().values() if value is not None]
     return max((abs(float(value)) for value in values), default=0.0)
+
+
+def _decision_sort_key(decision) -> tuple[int, int, str]:
+    priority = {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(str(_decision_get(decision, "priority") or "").lower(), 4)
+    confidence = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "UNKNOWN": 3}.get(str(_decision_get(decision, "confidence") or ""), 4)
+    return (priority, confidence, str(_decision_get(decision, "decision_id") or ""))
+
+
+def _decision_status(decision_type: str) -> str:
+    return {
+        "CHARGE_NOW": "CHARGE_NOW",
+        "WAIT_FOR_CHEAPER_WINDOW": "WAIT",
+        "WAIT_FOR_SOLAR": "WAIT",
+        "REVIEW_PROVIDER": "UNKNOWN",
+        "REVIEW_SETUP": "UNKNOWN",
+        "REVIEW_BILLING": "WATCH",
+        "MONITOR_USAGE": "WATCH",
+        "INVESTIGATE_ANOMALY": "WATCH",
+        "DATA_INSUFFICIENT": "UNKNOWN",
+        "NO_ACTION": "ON_TRACK",
+    }.get(decision_type, "WATCH")
+
+
+def _decision_title(decision_type: str) -> str:
+    return {
+        "CHARGE_NOW": "Charging window is favourable",
+        "WAIT_FOR_CHEAPER_WINDOW": "Wait for a cheaper window",
+        "WAIT_FOR_SOLAR": "Wait for solar evidence",
+        "REVIEW_PROVIDER": "Review provider health",
+        "REVIEW_SETUP": "Finish setup",
+        "REVIEW_BILLING": "Review bill trajectory",
+        "MONITOR_USAGE": "Monitor usage",
+        "INVESTIGATE_ANOMALY": "Investigate unusual behaviour",
+        "DATA_INSUFFICIENT": "Evidence is insufficient",
+        "NO_ACTION": "No immediate action",
+    }.get(decision_type, decision_type.replace("_", " ").title())
+
+
+def _display_confidence(value) -> str:
+    text = str(value or "UNKNOWN").upper()
+    return {"HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "UNKNOWN": "Low"}.get(text, "Low")
+
+
+def _financial_impact_from_decision(decision) -> Optional[FinancialImpact]:
+    impact = _decision_get(decision, "financial_impact")
+    if isinstance(impact, FinancialImpact):
+        return impact
+    if not isinstance(impact, dict):
+        return None
+    return FinancialImpact(
+        today=impact.get("today"),
+        billing_period=impact.get("billing_period"),
+        yearly=impact.get("yearly"),
+        currency=impact.get("currency", "AUD"),
+        basis=impact.get("basis"),
+    )
+
+
+def _decision_overall_status(decisions: list, context: Optional[CurrentHouseholdContext]) -> str:
+    if context and context.time == TimeContext.NIGHT:
+        return "Night context is active, and the briefing is summarising current Household Decisions."
+    if not decisions:
+        return "No active Household Decisions are available."
+    top_type = str(_decision_get(decisions[0], "decision_type") or _decision_get(decisions[0], "type") or "")
+    if top_type == "NO_ACTION":
+        return "Decision Engine does not see an immediate household action."
+    return "Decision Engine has identified the most relevant household action."
+
+
+def _decision_overall_confidence(decisions: list) -> str:
+    if not decisions:
+        return "Low"
+    rank = {"Low": 0, "Medium": 1, "High": 2}
+    return min((_display_confidence(_decision_get(item, "confidence")) for item in decisions), key=lambda value: rank.get(value, 0))
+
+
+def _decision_suggested_action(
+    priorities: list[BriefingPriority],
+    watch_items: list[BriefingPriority],
+    positives: list[BriefingPriority],
+) -> str:
+    if priorities:
+        return priorities[0].recommendation
+    if watch_items:
+        return watch_items[0].recommendation
+    if positives:
+        return positives[0].recommendation
+    return "No action is needed until more decision evidence is available."
+
+
+def _decision_estimated_savings(decisions: list) -> Optional[FinancialImpact]:
+    impacts = [_financial_impact_from_decision(item) for item in decisions]
+    impacts = [item for item in impacts if item]
+    if not impacts:
+        return None
+    today = sum(float(item.today or 0.0) for item in impacts)
+    billing = sum(float(item.billing_period or 0.0) for item in impacts)
+    yearly = sum(float(item.yearly or 0.0) for item in impacts)
+    return FinancialImpact(
+        today=today or None,
+        billing_period=billing or None,
+        yearly=yearly or None,
+        basis="Sum of measurable Household Decision financial impacts",
+    )
+
+
+def _decision_get(source, key: str, default=None):
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(key, default)
+    value = getattr(source, key, default)
+    return getattr(value, "value", value)

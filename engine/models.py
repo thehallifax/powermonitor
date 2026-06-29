@@ -614,6 +614,9 @@ class Advisor:
     supporting_data_sources: list[str]
     next_review_time: Optional[str] = None
     evidence_summary: Optional[AdvisorEvidenceSummary] = None
+    decision_id: Optional[str] = None
+    decision_type: Optional[str] = None
+    decision: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.status not in ADVISOR_STATUSES:
@@ -641,6 +644,10 @@ class Advisor:
             data["available_evidence"] = []
             data["missing_evidence"] = []
             data["unavailable_evidence"] = []
+        data["decision_reference"] = {
+            "decision_id": self.decision_id,
+            "decision_type": self.decision_type,
+        } if self.decision_id or self.decision_type else None
         return data
 
 
@@ -784,11 +791,17 @@ class BriefingPriority:
     freshness: str
     estimated_financial_impact: Optional[FinancialImpact] = None
     supporting_advisors: list[str] = field(default_factory=list)
+    decision_id: Optional[str] = None
+    decision_type: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
         if isinstance(self.estimated_financial_impact, FinancialImpact):
             data["estimated_financial_impact"] = self.estimated_financial_impact.as_dict()
+        data["decision_reference"] = {
+            "decision_id": self.decision_id,
+            "decision_type": self.decision_type,
+        } if self.decision_id or self.decision_type else None
         return data
 
 
@@ -953,9 +966,16 @@ class TimelineEntry:
     confidence: str
     evidence_sources: list[str]
     event_type: str
+    decision_id: Optional[str] = None
+    decision_type: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.decision_id is None:
+            data.pop("decision_id", None)
+        if self.decision_type is None:
+            data.pop("decision_type", None)
+        return data
 
 
 @dataclass(frozen=True)
