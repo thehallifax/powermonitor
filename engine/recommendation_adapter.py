@@ -70,6 +70,8 @@ class RecommendationPresentation:
     advisor_explanation: Optional[dict[str, Any]] = None
     state_change_ids: list[str] = field(default_factory=list)
     household_state: Optional[dict[str, Any]] = None
+    context: Optional[dict[str, Any]] = None
+    behaviour: Optional[dict[str, Any]] = None
     data_sources_used: list[str] = field(default_factory=list)
     status: str = "active"
     valid_until: Optional[str] = None
@@ -117,6 +119,8 @@ class RecommendationPresentation:
             "advisor_explanation": self.advisor_explanation,
             "state_change_ids": list(self.state_change_ids),
             "household_state": self.household_state,
+            "context": self.context,
+            "behaviour": self.behaviour,
             "data_sources_used": list(self.data_sources_used),
             "status": self.status,
             "valid_until": self.valid_until,
@@ -133,6 +137,8 @@ class RecommendationAdapter:
         *,
         advisor_explanations: Optional[list[Any]] = None,
         household_state: Optional[Any] = None,
+        context: Optional[Any] = None,
+        behaviour: Optional[Any] = None,
     ) -> list[RecommendationPresentation]:
         advisor_by_decision = {
             str(_get(advisor, "decision_id")): advisor
@@ -144,6 +150,8 @@ class RecommendationAdapter:
                 decision,
                 advisor_explanation=advisor_by_decision.get(str(_get(decision, "decision_id"))),
                 household_state=household_state,
+                context=context,
+                behaviour=behaviour,
             )
             for decision in decisions
         ]
@@ -155,6 +163,8 @@ class RecommendationAdapter:
         *,
         advisor_explanation: Optional[Any] = None,
         household_state: Optional[Any] = None,
+        context: Optional[Any] = None,
+        behaviour: Optional[Any] = None,
     ) -> RecommendationPresentation:
         decision_type = str(_get(decision, "decision_type") or _get(decision, "type") or "NO_ACTION")
         decision_id = str(_get(decision, "decision_id") or decision_type.lower())
@@ -192,6 +202,8 @@ class RecommendationAdapter:
             advisor_explanation=advisor_payload,
             state_change_ids=list(_get(decision, "related_state_change_ids") or []),
             household_state=household_state.as_dict() if hasattr(household_state, "as_dict") else household_state,
+            context=context.as_dict() if hasattr(context, "as_dict") else context,
+            behaviour=behaviour.as_dict() if hasattr(behaviour, "as_dict") else behaviour,
             data_sources_used=list(_get(decision, "data_sources_used") or ["DecisionEngine"]),
             status=str(_get(decision, "status") or "active"),
             valid_until=_get(decision, "valid_until"),
@@ -203,11 +215,15 @@ def adapt_recommendations(
     *,
     advisor_explanations: Optional[list[Any]] = None,
     household_state: Optional[Any] = None,
+    context: Optional[Any] = None,
+    behaviour: Optional[Any] = None,
 ) -> list[RecommendationPresentation]:
     return RecommendationAdapter().adapt(
         decisions,
         advisor_explanations=advisor_explanations,
         household_state=household_state,
+        context=context,
+        behaviour=behaviour,
     )
 
 

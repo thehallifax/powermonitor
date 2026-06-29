@@ -28,6 +28,7 @@ from engine.decision_engine import (
     generate_decisions_from_data_engine,
     generate_ev_session_decisions,
 )
+from engine.decision_pipeline import build_decision_pipeline_output
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
@@ -55,7 +56,7 @@ from engine.notification_engine import NotificationEngine
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
 from engine.provider_runtime import ProviderRuntime
-from engine.recommendation_adapter import RecommendationPresentation, adapt_recommendations
+from engine.recommendation_adapter import RecommendationPresentation
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from presentation.briefing import BriefingItem
@@ -509,11 +510,19 @@ def dashboard_data(
         household=household_context.household,
         capability_summary=capability_summary,
     )
+    decision_pipeline = build_decision_pipeline_output(
+        household_decisions,
+        advisor_explanations=advisor_explanations.active(),
+        household_state=household_state,
+        context=household_current_context,
+        behaviour=household_behaviour,
+    )
+    recommendation_presentations = decision_pipeline.recommendations
     briefing = briefing_engine(household_context).build(
         advisor_explanations,
         current_day,
         context=household_current_context,
-        household_decisions=household_decisions,
+        recommendation_presentations=recommendation_presentations,
     )
     goals = goals_engine(household_context).evaluate(advisors)
     setup_checklist = setup_engine(household_context).build_checklist(
@@ -533,6 +542,7 @@ def dashboard_data(
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
         household_decisions=household_decisions,
+        recommendation_presentations=recommendation_presentations,
         advisors=None,
         setup=setup_checklist,
         preferences=notification_preferences,
@@ -543,11 +553,6 @@ def dashboard_data(
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
-    recommendation_presentations = adapt_recommendations(
-        household_decisions,
-        advisor_explanations=advisor_explanations.active(),
-        household_state=household_state,
-    )
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,
@@ -4427,11 +4432,19 @@ def write_html(
         household=household_context.household,
         capability_summary=capability_summary,
     )
+    decision_pipeline = build_decision_pipeline_output(
+        household_decisions,
+        advisor_explanations=advisor_explanations.active(),
+        household_state=household_state,
+        context=household_current_context,
+        behaviour=household_behaviour,
+    )
+    recommendation_presentations = decision_pipeline.recommendations
     briefing = briefing_engine(household_context).build(
         advisor_explanations,
         local_today(),
         context=household_current_context,
-        household_decisions=household_decisions,
+        recommendation_presentations=recommendation_presentations,
     )
     goals = goals_engine(household_context).evaluate(advisors)
     setup_checklist = setup_engine(household_context).build_checklist(
@@ -4451,6 +4464,7 @@ def write_html(
         household_state_snapshot=latest_state_snapshot,
         context=household_current_context,
         household_decisions=household_decisions,
+        recommendation_presentations=recommendation_presentations,
         advisors=None,
         setup=setup_checklist,
         preferences=notification_preferences,
@@ -4460,11 +4474,6 @@ def write_html(
     notification_readiness_summary = notification_readiness.as_dict()
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
-    recommendation_presentations = adapt_recommendations(
-        household_decisions,
-        advisor_explanations=advisor_explanations.active(),
-        household_state=household_state,
-    )
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,

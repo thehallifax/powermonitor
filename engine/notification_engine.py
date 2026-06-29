@@ -259,12 +259,14 @@ class NotificationEngine:
         household_state_snapshot: Optional[Any] = None,
         context: Optional[Any] = None,
         household_decisions: Optional[list[Any]] = None,
+        recommendation_presentations: Optional[list[Any]] = None,
         advisors: Optional[Any] = None,
         setup: Optional[Any] = None,
         evidence_quality: Optional[Any] = None,
         preferences: Optional[NotificationPreferences] = None,
         history: Optional[list[Any]] = None,
         recently_notified_event_keys: Optional[set[str]] = None,
+        allow_legacy_advisor_notifications: bool = True,
         now: Optional[datetime] = None,
     ) -> NotificationReadiness:
         created = now or datetime.now().astimezone()
@@ -284,6 +286,10 @@ class NotificationEngine:
             self._append_candidate(candidates, seen_keys, candidate)
 
         if not household_decisions:
+            for candidate in self._candidates_from_presentations(recommendation_presentations, household_id, created, quality, context, setup, advisors, preferences, recent_keys):
+                self._append_candidate(candidates, seen_keys, candidate)
+
+        if not household_decisions and not recommendation_presentations and allow_legacy_advisor_notifications:
             for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, preferences, recent_keys):
                 self._append_candidate(candidates, seen_keys, candidate)
 
@@ -360,23 +366,13 @@ class NotificationEngine:
         recent_keys: set[str],
     ) -> list[NotificationCandidate]:
         candidates = []
-        mapping = {
-            "CHARGE_NOW": (NotificationType.CHARGE_NOW, NotificationPriority.HIGH),
-            "WAIT_FOR_CHEAPER_WINDOW": (NotificationType.WAIT_FOR_CHEAPER_WINDOW, NotificationPriority.MEDIUM),
-            "WAIT_FOR_SOLAR": (NotificationType.SOLAR_OPPORTUNITY, NotificationPriority.MEDIUM),
-            "REVIEW_PROVIDER": (NotificationType.PROVIDER_ERROR, NotificationPriority.HIGH),
-            "REVIEW_SETUP": (NotificationType.SETUP_INCOMPLETE, NotificationPriority.LOW),
-            "REVIEW_BILLING": (NotificationType.BILL_TRACKING_HIGH, NotificationPriority.HIGH),
-            "MONITOR_USAGE": (NotificationType.PEAK_PERIOD_STARTED, NotificationPriority.MEDIUM),
-            "INVESTIGATE_ANOMALY": (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.MEDIUM),
-            "DATA_INSUFFICIENT": (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.HIGH),
-        }
         for decision in household_decisions or []:
             decision_type = str(self._get(decision, "decision_type") or self._get(decision, "type") or "")
             status = str(self._get(decision, "status") or "active")
-            if status != "active" or decision_type not in mapping:
+            notification_type = self._notification_type_for_decision_type(decision_type)
+            if status != "active" or not notification_type:
                 continue
-            notification_type, default_priority = mapping[decision_type]
+            default_priority = self._default_priority_for_decision_type(decision_type)
             priority = self._priority_from_decision(decision, default_priority)
             reason = self._decision_reason(decision)
             evidence = [
@@ -397,6 +393,84 @@ class NotificationEngine:
                 evidence,
                 f"decision:{self._get(decision, 'decision_id') or decision_type}",
                 expires_at=self._get(decision, "valid_until"),
+            )
+            suppression = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
+            candidates.append(self._with_suppression(candidate, suppression))
+        return candidates
+
+    def _notification_type_for_decision_type(self, decision_type: str) -> Optional[NotificationType]:
+        return {
+            "CHARGE_NOW": NotificationType.CHARGE_NOW,
+            "WAIT_FOR_CHEAPER_WINDOW": NotificationType.WAIT_FOR_CHEAPER_WINDOW,
+            "WAIT_FOR_SOLAR": NotificationType.SOLAR_OPPORTUNITY,
+            "REVIEW_PROVIDER": NotificationType.PROVIDER_ERROR,
+            "REVIEW_SETUP": NotificationType.SETUP_INCOMPLETE,
+            "REVIEW_BILLING": NotificationType.BILL_TRACKING_HIGH,
+            "MONITOR_USAGE": NotificationType.PEAK_PERIOD_STARTED,
+            "INVESTIGATE_ANOMALY": NotificationType.EVIDENCE_DEGRADED,
+            "DATA_INSUFFICIENT": NotificationType.EVIDENCE_DEGRADED,
+        }.get(decision_type)
+
+    def _default_priority_for_decision_type(self, decision_type: str) -> NotificationPriority:
+        return {
+            "CHARGE_NOW": NotificationPriority.HIGH,
+            "WAIT_FOR_CHEAPER_WINDOW": NotificationPriority.MEDIUM,
+            "WAIT_FOR_SOLAR": NotificationPriority.MEDIUM,
+            "REVIEW_PROVIDER": NotificationPriority.HIGH,
+            "REVIEW_SETUP": NotificationPriority.LOW,
+            "REVIEW_BILLING": NotificationPriority.HIGH,
+            "MONITOR_USAGE": NotificationPriority.MEDIUM,
+            "INVESTIGATE_ANOMALY": NotificationPriority.MEDIUM,
+            "DATA_INSUFFICIENT": NotificationPriority.HIGH,
+        }.get(decision_type, NotificationPriority.LOW)
+
+    def _candidates_from_presentations(
+        self,
+        recommendation_presentations: Optional[list[Any]],
+        household_id: str,
+        created: datetime,
+        quality: EvidenceQuality,
+        context: Optional[Any],
+        setup: Optional[Any],
+        advisors: Optional[Any],
+        preferences: NotificationPreferences,
+        recent_keys: set[str],
+    ) -> list[NotificationCandidate]:
+        candidates = []
+        for presentation in recommendation_presentations or []:
+            decision = self._get(presentation, "decision") or {}
+            decision_type = str(self._get(decision, "decision_type") or self._get(decision, "type") or "")
+            decision_id = str(self._get(presentation, "decision_id") or self._get(decision, "decision_id") or decision_type)
+            if not decision_type or str(self._get(presentation, "status") or "active") != "active":
+                continue
+            notification_type = self._notification_type_for_decision_type(decision_type)
+            if not notification_type:
+                continue
+            priority = self._priority_from_presentation(presentation)
+            message = str(
+                self._get(presentation, "recommended_action")
+                or self._get(presentation, "rationale")
+                or self._get(presentation, "title")
+                or decision_type
+            )
+            evidence = [
+                NotificationEvidence(
+                    source="RecommendationPresentation",
+                    summary=str(self._get(presentation, "rationale") or message),
+                    quality=self._presentation_quality(presentation) or quality,
+                    observed_at=self._get(decision, "created_at"),
+                )
+            ]
+            candidate = self._candidate(
+                household_id,
+                notification_type,
+                str(self._get(presentation, "title") or decision_type.replace("_", " ").title()),
+                message,
+                priority,
+                created,
+                evidence,
+                f"decision:{decision_id}",
+                expires_at=self._get(presentation, "valid_until") or self._get(decision, "valid_until"),
             )
             suppression = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
             candidates.append(self._with_suppression(candidate, suppression))
@@ -658,6 +732,24 @@ class NotificationEngine:
             "high": NotificationPriority.HIGH,
             "critical": NotificationPriority.CRITICAL,
         }.get(priority, default)
+
+    def _priority_from_presentation(self, presentation: Any) -> NotificationPriority:
+        urgency = self._get(presentation, "urgency")
+        value = str(self._get(urgency, "value") or self._get(presentation, "priority") or "").lower()
+        return {
+            "low": NotificationPriority.LOW,
+            "medium": NotificationPriority.MEDIUM,
+            "high": NotificationPriority.HIGH,
+            "critical": NotificationPriority.CRITICAL,
+        }.get(value, NotificationPriority.LOW)
+
+    def _presentation_quality(self, presentation: Any) -> Optional[EvidenceQuality]:
+        confidence = str(self._get(presentation, "confidence") or "").upper().replace(" ", "_")
+        if confidence == "VERY_HIGH":
+            confidence = "HIGH"
+        if confidence in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
+            return EvidenceQuality(confidence)
+        return None
 
     def _decision_reason(self, decision: Any) -> str:
         reasons = list(self._get(decision, "reasons") or [])

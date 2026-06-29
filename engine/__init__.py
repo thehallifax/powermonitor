@@ -14,6 +14,7 @@ from .decision_engine import (
     generate_decisions,
     generate_ev_session_decisions,
 )
+from .decision_pipeline import DecisionPipeline, DecisionPipelineOutput
 from .efficiency_advisor import EfficiencyAdvisor
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
@@ -96,6 +97,8 @@ __all__ = [
     "DecisionReason",
     "DecisionStatus",
     "DecisionType",
+    "DecisionPipeline",
+    "DecisionPipelineOutput",
     "EfficiencyAdvisor",
     "EngineStatus",
     "Evidence",

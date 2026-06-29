@@ -1,5 +1,24 @@
 # Changelog
 
+## PB-025 - Decision Pipeline Cleanup
+
+- Added a canonical `DecisionPipeline` facade for the platform-owned flow from
+  `HouseholdDecision` to `RecommendationPresentation`.
+- Updated report/API assembly to build recommendation presentations once from
+  the Decision Pipeline and reuse them for Daily Briefing, Glance Mode,
+  Recommendation Centre, and notification readiness.
+- Refactored Daily Briefing to consume `RecommendationPresentation` directly;
+  Household Decision input now remains as a compatibility wrapper that adapts
+  through `RecommendationAdapter`.
+- Added notification generation from `RecommendationPresentation` and gated
+  advisor-derived notification generation behind an explicit legacy
+  compatibility flag.
+- Extended `RecommendationPresentation` lineage with explicit context and
+  behaviour payload links in addition to Household Decision, advisor
+  explanation, Household State, State Change IDs, and evidence.
+- Added PB-025 regression tests covering end-to-end pipeline output, briefing,
+  glance, notifications, recommendation ordering, and legacy fallback control.
+
 ## PB-024 - Decision Recommendation Adapter
 
 - Added a Decision Recommendation Adapter that converts Household Decisions into

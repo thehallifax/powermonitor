@@ -34,6 +34,7 @@ class BriefingEngine:
         household_context: Optional[HouseholdContext] = None,
         context: Optional[CurrentHouseholdContext] = None,
         household_decisions: Optional[list] = None,
+        recommendation_presentations: Optional[list] = None,
     ) -> DailyBriefing:
         active_household = household_context or self.household_context
         if active_household and advisors.household is None:
@@ -42,9 +43,20 @@ class BriefingEngine:
                 household=active_household.household,
                 capability_summary=advisors.capability_summary,
             )
+        if recommendation_presentations:
+            return _presentation_briefing(
+                recommendation_presentations,
+                advisors,
+                briefing_date or date.today(),
+                context,
+            )
         if household_decisions:
-            return _decision_briefing(
+            presentations = adapt_recommendations(
                 household_decisions,
+                advisor_explanations=advisors.active(),
+            )
+            return _presentation_briefing(
+                presentations,
                 advisors,
                 briefing_date or date.today(),
                 context,
@@ -77,21 +89,17 @@ class BriefingEngine:
         )
 
 
-def _decision_briefing(
-    household_decisions: list,
+def _presentation_briefing(
+    recommendation_presentations: list,
     advisors: AdvisorCollection,
     briefing_date: date,
     context: Optional[CurrentHouseholdContext],
 ) -> DailyBriefing:
-    ordered_decisions = sorted(household_decisions, key=_decision_sort_key)
-    presentations = adapt_recommendations(
-        ordered_decisions,
-        advisor_explanations=advisors.active(),
-    )
+    presentations = sorted(recommendation_presentations, key=lambda item: (-item.display_priority, item.title))
     items = [_briefing_priority_from_presentation(presentation, advisors) for presentation in presentations]
-    priorities = [item for item in items if item.status in PRIORITY_STATUSES][:1]
-    positives = [item for item in items if item.status in POSITIVE_STATUSES][:1]
-    watch_items = [item for item in items if item.status in WATCH_STATUSES and item not in priorities][:1]
+    priorities = [item for item in items if item.decision_type != "NO_ACTION"][:1]
+    positives = [item for item in items if item.status in POSITIVE_STATUSES and item not in priorities][:1]
+    watch_items = [item for item in items if item not in priorities and item not in positives][:1]
     sections = [
         BriefingSection("Today's Best Action", "top_priorities", priorities),
         BriefingSection("You're doing well", "positive_outcomes", positives),
@@ -99,14 +107,14 @@ def _decision_briefing(
     ]
     return DailyBriefing(
         greeting=_greeting(briefing_date),
-        overall_household_status=_decision_overall_status(ordered_decisions, context),
-        overall_confidence=_decision_overall_confidence(ordered_decisions),
+        overall_household_status=_presentation_overall_status(presentations, context),
+        overall_confidence=_presentation_overall_confidence(presentations),
         overall_freshness="DecisionEngine",
         top_priorities=priorities,
         positive_outcomes=positives,
         items_to_watch=watch_items,
-        suggested_next_action=_decision_suggested_action(priorities, watch_items, positives),
-        estimated_savings_opportunity=_decision_estimated_savings(ordered_decisions),
+        suggested_next_action=_presentation_suggested_action(priorities, watch_items, positives),
+        estimated_savings_opportunity=_presentation_estimated_savings(presentations),
         advisor_summary=items,
         read_time_minutes=max(1, min(4, len(items))),
         sections=sections,
@@ -542,25 +550,26 @@ def _financial_impact_from_decision(decision) -> Optional[FinancialImpact]:
     )
 
 
-def _decision_overall_status(decisions: list, context: Optional[CurrentHouseholdContext]) -> str:
+def _presentation_overall_status(presentations: list, context: Optional[CurrentHouseholdContext]) -> str:
     if context and context.time == TimeContext.NIGHT:
         return "Night context is active, and the briefing is summarising current Household Decisions."
-    if not decisions:
+    if not presentations:
         return "No active Household Decisions are available."
-    top_type = str(_decision_get(decisions[0], "decision_type") or _decision_get(decisions[0], "type") or "")
+    top = presentations[0]
+    top_type = str((top.decision or {}).get("decision_type") or (top.decision or {}).get("type") or "")
     if top_type == "NO_ACTION":
         return "Decision Engine does not see an immediate household action."
     return "Decision Engine has identified the most relevant household action."
 
 
-def _decision_overall_confidence(decisions: list) -> str:
-    if not decisions:
+def _presentation_overall_confidence(presentations: list) -> str:
+    if not presentations:
         return "Low"
     rank = {"Low": 0, "Medium": 1, "High": 2}
-    return min((_display_confidence(_decision_get(item, "confidence")) for item in decisions), key=lambda value: rank.get(value, 0))
+    return min((item.confidence for item in presentations), key=lambda value: rank.get(value, 0))
 
 
-def _decision_suggested_action(
+def _presentation_suggested_action(
     priorities: list[BriefingPriority],
     watch_items: list[BriefingPriority],
     positives: list[BriefingPriority],
@@ -574,8 +583,8 @@ def _decision_suggested_action(
     return "No action is needed until more decision evidence is available."
 
 
-def _decision_estimated_savings(decisions: list) -> Optional[FinancialImpact]:
-    impacts = [_financial_impact_from_decision(item) for item in decisions]
+def _presentation_estimated_savings(presentations: list) -> Optional[FinancialImpact]:
+    impacts = [item.financial_impact for item in presentations]
     impacts = [item for item in impacts if item]
     if not impacts:
         return None
