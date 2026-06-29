@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
+from .anomaly_engine import AnomalyEngine, HouseholdAnomaly
 from .behaviour_engine import BehaviourEngine, HouseholdBehaviour
 from .models import (
     Account,
@@ -1132,6 +1133,24 @@ class DataEngine:
             ev_sessions=self.get_ev_sessions(start, end, sources=ev_sources),
             household_id=self._active_household_id(),
         )
+
+    def get_household_anomalies(
+        self,
+        *,
+        household_state: Any,
+        context: Any,
+        state_changes: list[Any],
+        behaviour: Any,
+        current_observations: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        anomalies = AnomalyEngine().detect(
+            household_state=household_state,
+            context=context,
+            state_changes=state_changes,
+            behaviour=behaviour,
+            current_observations=current_observations,
+        )
+        return [anomaly.as_dict() for anomaly in anomalies]
 
     def get_ev_source_counts(self) -> list[dict[str, Any]]:
         household_id = self._active_household_id()

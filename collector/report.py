@@ -421,6 +421,17 @@ def dashboard_data(
         behaviour_end,
         ev_sources=actual_ev_sources(settings),
     )
+    household_anomalies = snapshot_engine.get_household_anomalies(
+        household_state=household_state,
+        context=household_current_context,
+        state_changes=recent_state_changes,
+        behaviour=household_behaviour,
+        current_observations={
+            "overnight_baseload_watts": overnight_baseload_watts,
+            "current_daily_cost": period_summary.average_daily_net_cost,
+            "normal_daily_cost": compared_summary.average_daily_net_cost,
+        },
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -515,6 +526,7 @@ def dashboard_data(
         "runtime": provider_runtime.as_dict(),
         "household_state": household_state.as_dict(),
         "household_behaviour": household_behaviour.as_dict(),
+        "household_anomalies": household_anomalies,
         "latest_household_state_snapshot": latest_state_snapshot,
         "recent_household_state_snapshots": recent_state_snapshots,
         "household_state_snapshot": state_snapshot,
@@ -3522,6 +3534,38 @@ def household_behaviour_html(behaviour: Optional[dict]) -> str:
     """
 
 
+def household_anomalies_html(anomalies: Optional[list[dict]]) -> str:
+    if not anomalies:
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Household Anomalies</h3><span>0 active</span></div>
+      <p class="notice">No behaviour-aware household anomalies are active.</p>
+    </div>
+    """
+    rows = []
+    for anomaly in anomalies[:8]:
+        severity = str(anomaly.get("severity") or "info")
+        confidence = str(anomaly.get("confidence") or "UNKNOWN")
+        tone = "bad" if severity in {"warning", "critical"} else "neutral" if severity == "watch" else "good"
+        evidence = anomaly.get("evidence") or []
+        evidence_summary = evidence[0].get("summary") if evidence and isinstance(evidence[0], dict) else anomaly.get("summary")
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(anomaly.get("title") or "Household anomaly"))}</span>
+              <strong>{html.escape(severity.title())} / {html.escape(confidence.title())}</strong>
+              <small>{html.escape(str(anomaly.get("first_detected") or ""))} - {html.escape(str(evidence_summary or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Household Anomalies</h3><span>{len(anomalies)} active</span></div>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
 def state_changes_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3634,6 +3678,7 @@ def system_page_html(
     context=None,
     household_state=None,
     household_behaviour: Optional[dict] = None,
+    household_anomalies: Optional[list[dict]] = None,
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
@@ -3671,6 +3716,7 @@ def system_page_html(
         {provider_runtime_html(provider_runtime)}
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {household_behaviour_html(household_behaviour)}
+        {household_anomalies_html(household_anomalies)}
         {state_changes_html(state_change_summary)}
         {notification_preferences_html(notification_preferences)}
         {notification_readiness_html(notification_readiness_summary)}
@@ -4059,6 +4105,23 @@ def write_html(
         behaviour_end,
         ev_sources=actual_ev_sources(settings),
     )
+    anomaly_baseline = comparison.get("summary_b") if comparison else None
+    household_anomalies = snapshot_engine.get_household_anomalies(
+        household_state=household_state,
+        context=household_current_context,
+        state_changes=recent_state_changes,
+        behaviour=household_behaviour,
+        current_observations={
+            "overnight_baseload_watts": overnight_baseload_watts,
+            "current_daily_cost": period_summary.average_daily_net_cost,
+            "normal_daily_cost": (
+                anomaly_baseline.get("average_daily_net_cost")
+                if isinstance(anomaly_baseline, dict)
+                else anomaly_baseline.average_daily_net_cost
+                if anomaly_baseline else None
+            ),
+        },
+    )
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -4210,7 +4273,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
     )

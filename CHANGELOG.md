@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-021 - Behaviour-Aware Anomaly Engine
+
+- Added `AnomalyEngine` with household-relative anomaly models for baseload,
+  EV charging, solar behaviour, billing, collector/provider health, evidence,
+  severity, and confidence.
+- Added DataEngine-backed anomaly generation from current Household State,
+  Household Context, recent State Changes, learned Household Behaviour, and
+  current observation summaries.
+- Exposed `household_anomalies` through dashboard/API output for future advisor
+  and notification consumption without changing advisor recommendations.
+- Added a System page Household Anomalies card showing active anomaly title,
+  severity, confidence, first detected timestamp, and evidence summary.
+- Added anomaly tests for normal behaviour, overnight load, EV charging, solar,
+  billing, collector/evidence degradation, confidence, and serialization.
+
 ## PB-020 - Household Behaviour Engine
 
 - Added `BehaviourEngine` with descriptive household behaviour profiles for
