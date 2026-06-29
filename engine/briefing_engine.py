@@ -6,6 +6,7 @@ from datetime import date
 import re
 from typing import Optional
 
+from .context_engine import HouseholdContext as CurrentHouseholdContext, SolarContext, TimeContext
 from .models import (
     Advisor,
     AdvisorCollection,
@@ -30,6 +31,7 @@ class BriefingEngine:
         advisors: AdvisorCollection,
         briefing_date: Optional[date] = None,
         household_context: Optional[HouseholdContext] = None,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> DailyBriefing:
         active_household = household_context or self.household_context
         if active_household and advisors.household is None:
@@ -52,13 +54,13 @@ class BriefingEngine:
         ]
         return DailyBriefing(
             greeting=_greeting(briefing_date or date.today()),
-            overall_household_status=_overall_status(ordered),
+            overall_household_status=_overall_status(ordered, context),
             overall_confidence=_overall_confidence(ordered),
             overall_freshness=_overall_freshness(ordered),
             top_priorities=priorities,
             positive_outcomes=positives,
             items_to_watch=watch_items,
-            suggested_next_action=_suggested_action(priorities, watch_items, positives),
+            suggested_next_action=_suggested_action(priorities, watch_items, positives, context),
             estimated_savings_opportunity=_estimated_savings(ordered),
             advisor_summary=summary,
             read_time_minutes=_read_time_minutes(priorities, positives, watch_items),
@@ -307,9 +309,18 @@ def _combined_freshness(advisors: list[Advisor]) -> str:
     return fresh[0] if len(set(fresh)) == 1 else "Mixed freshness"
 
 
-def _overall_status(advisors: list[Advisor]) -> str:
+def _overall_status(advisors: list[Advisor], context: Optional[CurrentHouseholdContext] = None) -> str:
     if not advisors:
         return "No active advisor signals are available today."
+    if context and context.time == TimeContext.NIGHT:
+        return "Night context is active, so the briefing focuses on overnight cost, baseload, and tomorrow's solar window."
+    if context and context.time == TimeContext.EARLY_MORNING:
+        return "Morning context is active, so the briefing focuses on today's outlook and early flexible-load choices."
+    if context and context.time in {TimeContext.MORNING, TimeContext.MIDDAY, TimeContext.AFTERNOON}:
+        if context.solar != SolarContext.SOLAR_IMPOSSIBLE:
+            return "Daylight context is active, so the briefing focuses on solar utilisation, exports, and flexible loads."
+    if context and context.time == TimeContext.EVENING:
+        return "Evening context is active, so the briefing focuses on tonight's charging and avoiding expensive usage."
     statuses = {item.status for item in advisors}
     if statuses & {"AVOID", "HIGH", "INEFFICIENT"}:
         return "There is one household item worth acting on first."
@@ -338,7 +349,20 @@ def _suggested_action(
     priorities: list[BriefingPriority],
     watch_items: list[BriefingPriority],
     positives: list[BriefingPriority],
+    context: Optional[CurrentHouseholdContext] = None,
 ) -> str:
+    if context and context.time == TimeContext.NIGHT:
+        if priorities:
+            return f"{priorities[0].recommendation} Use tomorrow's daylight window for solar-dependent actions."
+        return "Review overnight charging and baseload, then revisit solar actions after daylight returns."
+    if context and context.time == TimeContext.MIDDAY and context.solar != SolarContext.SOLAR_IMPOSSIBLE:
+        if priorities:
+            return priorities[0].recommendation
+        return "Use the current daylight window for practical solar utilisation checks."
+    if context and context.time == TimeContext.EVENING:
+        if priorities:
+            return priorities[0].recommendation
+        return "Review tonight's charging window and avoid unnecessary high-cost usage."
     if priorities:
         return priorities[0].recommendation
     if watch_items:

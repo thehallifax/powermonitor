@@ -1,8 +1,38 @@
 import unittest
 from datetime import date
+from datetime import datetime
+from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from engine.briefing_engine import BriefingEngine
+from engine.context_engine import ContextEngine
 from engine.models import Advisor, AdvisorCollection, EvidenceTrail, FinancialImpact
+
+
+LOCAL = ZoneInfo("Australia/Perth")
+
+
+@dataclass
+class ContextSummary:
+    intervals: int = 12
+    reading_days: int = 8
+    solar_generated_kwh: float = 8.0
+    solar_used_kwh: float = 5.0
+    solar_exported_kwh: float = 3.0
+    solar_export_pct: float = 35.0
+    ev_charging_source: str = "ocular_export"
+    net_cost: float = 40.0
+
+
+def household_context(now):
+    summary = ContextSummary()
+    return ContextEngine().build(
+        today_summary=summary,
+        billing_summary=summary,
+        settings={"import_rates": {"super_off_peak": 0.08, "overnight": 0.19, "off_peak": 0.23, "peak": 0.53}},
+        health={"status": "ok", "report_age_minutes": 5},
+        now=now,
+    )
 
 
 def advisor(status, advisor_id, impact=0.0, confidence="High", advisor_type="TEST", recommendation=None, headline=None):
@@ -143,6 +173,26 @@ class BriefingEngineTests(unittest.TestCase):
         self.assertEqual(len(briefing.top_priorities), 1)
         self.assertEqual(len(briefing.positive_outcomes), 1)
         self.assertEqual(len(briefing.items_to_watch), 1)
+
+    def test_night_context_briefing_focuses_on_overnight_and_tomorrow(self):
+        briefing = BriefingEngine().build(
+            AdvisorCollection([advisor("MISSED_OPPORTUNITY", "solar", advisor_type="SOLAR")]),
+            date(2026, 6, 28),
+            context=household_context(datetime(2026, 6, 28, 23, 30, tzinfo=LOCAL)),
+        )
+
+        self.assertIn("Night context", briefing.overall_household_status)
+        self.assertIn("tomorrow", briefing.suggested_next_action.lower())
+
+    def test_day_context_briefing_keeps_solar_focus(self):
+        briefing = BriefingEngine().build(
+            AdvisorCollection([advisor("MISSED_OPPORTUNITY", "solar", advisor_type="SOLAR")]),
+            date(2026, 6, 28),
+            context=household_context(datetime(2026, 6, 28, 12, 0, tzinfo=LOCAL)),
+        )
+
+        self.assertIn("Daylight context", briefing.overall_household_status)
+        self.assertIn("solar", briefing.overall_household_status.lower())
 
 
 if __name__ == "__main__":

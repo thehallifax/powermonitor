@@ -374,6 +374,7 @@ def dashboard_data(
         comparison,
         generated_at,
         household_context,
+        household_current_context,
     )
     solar = build_solar_advisor(
         period_summary,
@@ -383,6 +384,7 @@ def dashboard_data(
         timeline,
         generated_at,
         household_context,
+        household_current_context,
     )
     efficiency = build_efficiency_advisor(
         period_summary,
@@ -396,13 +398,14 @@ def dashboard_data(
         overnight_baseload_watts,
         generated_at,
         household_context,
+        household_current_context,
     )
     advisors = AdvisorCollection(
         [charging_advice.advisor, cost, solar, efficiency],
         household=household_context.household,
         capability_summary=capability_summary,
     )
-    briefing = briefing_engine(household_context).build(advisors, current_day)
+    briefing = briefing_engine(household_context).build(advisors, current_day, context=household_current_context)
     goals = goals_engine(household_context).evaluate(advisors)
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
@@ -1175,6 +1178,7 @@ def build_cost_advisor(
     comparison: Optional[dict],
     now: datetime,
     household_context: Optional[HouseholdContext] = None,
+    context=None,
 ) -> Advisor:
     return cost_advisor(household_context).advise(
         current_summary=current_summary,
@@ -1185,6 +1189,7 @@ def build_cost_advisor(
         health=health,
         comparison=comparison,
         now=now,
+        context=context,
     )
 
 
@@ -1196,6 +1201,7 @@ def build_solar_advisor(
     timeline: Optional[DecisionTimeline],
     now: datetime,
     household_context: Optional[HouseholdContext] = None,
+    context=None,
 ) -> Advisor:
     return solar_advisor(household_context).advise(
         summary=summary,
@@ -1204,6 +1210,7 @@ def build_solar_advisor(
         timeline=timeline,
         health=health,
         now=now,
+        context=context,
     )
 
 
@@ -1219,6 +1226,7 @@ def build_efficiency_advisor(
     overnight_baseload_watts: float,
     now: datetime,
     household_context: Optional[HouseholdContext] = None,
+    context=None,
 ) -> Advisor:
     return efficiency_advisor(household_context).advise(
         summary=summary,
@@ -1231,6 +1239,7 @@ def build_efficiency_advisor(
         comparison=comparison,
         trends=trends,
         now=now,
+        context=context,
     )
 
 
@@ -3540,6 +3549,7 @@ def write_html(
         comparison,
         generated_dt,
         household_context,
+        household_current_context,
     )
     solar = build_solar_advisor(
         period_summary,
@@ -3549,6 +3559,7 @@ def write_html(
         timeline,
         generated_dt,
         household_context,
+        household_current_context,
     )
     efficiency = build_efficiency_advisor(
         period_summary,
@@ -3562,13 +3573,14 @@ def write_html(
         overnight_baseload_watts,
         generated_dt,
         household_context,
+        household_current_context,
     )
     advisors = AdvisorCollection(
         [charging_advice.advisor, cost, solar, efficiency],
         household=household_context.household,
         capability_summary=capability_summary,
     )
-    briefing = briefing_engine(household_context).build(advisors, local_today())
+    briefing = briefing_engine(household_context).build(advisors, local_today(), context=household_current_context)
     goals = goals_engine(household_context).evaluate(advisors)
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(

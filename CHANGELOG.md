@@ -1,5 +1,19 @@
 # Changelog
 
+## PB-011 - Advisor Context Integration
+
+- Threaded shared `HouseholdContext` into Cost, Solar, Efficiency, and Briefing
+  engines so advisor wording uses one current household state.
+- Added night-aware Solar Advisor wording that reviews today's performance
+  without implying immediate solar action when context reports
+  `SOLAR_IMPOSSIBLE`.
+- Added Cost Advisor context evidence for billing stage and tariff state, and
+  Efficiency Advisor context evidence for time and evidence freshness.
+- Updated Daily Briefing wording to frame night, morning, daylight, and evening
+  priorities from shared household context.
+- Added advisor and briefing regression tests for night/day context behaviour
+  and serialized context references.
+
 ## PB-010 - Context Engine
 
 - Added `ContextEngine` with descriptive household context models for time,

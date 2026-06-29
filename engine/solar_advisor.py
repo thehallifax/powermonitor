@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
+from .context_engine import HouseholdContext as CurrentHouseholdContext, SolarContext
 from .financial_engine import FinancialEngine
-from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
+from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext as PlatformHouseholdContext
 
 
 class SolarAdvisor:
@@ -17,7 +18,7 @@ class SolarAdvisor:
     def __init__(
         self,
         financial_engine: Optional[FinancialEngine] = None,
-        household_context: Optional[HouseholdContext] = None,
+        household_context: Optional[PlatformHouseholdContext] = None,
     ) -> None:
         self.household_context = household_context
         self.financial_engine = financial_engine or FinancialEngine()
@@ -31,6 +32,7 @@ class SolarAdvisor:
         timeline: Optional[DecisionTimeline],
         health: dict[str, Any],
         now: Optional[datetime] = None,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> Advisor:
         observed_at = now or datetime.now().astimezone()
         freshness = self._freshness(summary, health)
@@ -55,9 +57,9 @@ class SolarAdvisor:
             return self._unknown(freshness, observed_at, evidence_summary)
 
         status = self._status(self_consumption, export_pct, exported, recommendations)
-        headline = self._headline(status, self_consumption, exported)
-        summary_text = self._summary(status, generated, used, exported, self_consumption)
-        recommendation = self._recommendation(status)
+        headline = self._headline(status, self_consumption, exported, context)
+        summary_text = self._summary(status, generated, used, exported, self_consumption, context)
+        recommendation = self._recommendation(status, context)
         impact = FinancialImpact(
             billing_period=round(net_opportunity, 2),
             basis="Estimated import cost offset if exported solar had instead displaced grid imports",
@@ -76,6 +78,7 @@ class SolarAdvisor:
             confidence=confidence,
             recommendations=recommendations,
             timeline=timeline,
+            context=context,
         )
 
         return Advisor(
@@ -95,6 +98,7 @@ class SolarAdvisor:
                 "Financial Engine",
                 "Recommendation Engine",
                 "Decision timeline",
+                "Household Context",
             ],
             next_review_time=observed_at.date().isoformat(),
             evidence_summary=evidence_summary,
@@ -146,7 +150,15 @@ class SolarAdvisor:
             return "MISSED_OPPORTUNITY"
         return "OPPORTUNITY"
 
-    def _headline(self, status: str, self_consumption: float, exported: float) -> str:
+    def _headline(
+        self,
+        status: str,
+        self_consumption: float,
+        exported: float,
+        context: Optional[CurrentHouseholdContext] = None,
+    ) -> str:
+        if context and context.solar == SolarContext.SOLAR_IMPOSSIBLE and status in {"MISSED_OPPORTUNITY", "OPPORTUNITY"}:
+            return "Today's solar performance is ready to review."
         if status == "EXCELLENT":
             return "You are making excellent use of your solar."
         if status == "GOOD":
@@ -164,18 +176,26 @@ class SolarAdvisor:
         used: float,
         exported: float,
         self_consumption: float,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> str:
         if status in {"EXCELLENT", "GOOD"}:
             return (
                 f"Your household used {self_consumption:.1f}% of {generated:.1f} kWh solar production "
                 f"and exported {exported:.1f} kWh."
             )
+        if context and context.solar == SolarContext.SOLAR_IMPOSSIBLE:
+            return (
+                f"Today's solar performance was {generated:.1f} kWh generated, {used:.1f} kWh used directly, "
+                f"and {exported:.1f} kWh exported. Solar is not available at this time of day, so this is performance context only."
+            )
         return (
             f"You generated {generated:.1f} kWh, used {used:.1f} kWh directly, and exported {exported:.1f} kWh. "
             "This is period-level export evidence, not live instantaneous surplus."
         )
 
-    def _recommendation(self, status: str) -> str:
+    def _recommendation(self, status: str, context: Optional[CurrentHouseholdContext] = None) -> str:
+        if context and context.solar == SolarContext.SOLAR_IMPOSSIBLE and status in {"MISSED_OPPORTUNITY", "OPPORTUNITY"}:
+            return "Review today's solar performance and plan flexible loads for the next daylight window."
         if status == "EXCELLENT":
             return "Keep the current solar usage pattern."
         if status == "GOOD":
@@ -305,6 +325,7 @@ class SolarAdvisor:
         confidence: str,
         recommendations: list[Decision],
         timeline: Optional[DecisionTimeline],
+        context: Optional[CurrentHouseholdContext],
     ) -> EvidenceTrail:
         items = [
             EvidenceItem(
@@ -374,6 +395,16 @@ class SolarAdvisor:
                     freshness=freshness,
                 )
             )
+        if context:
+            items.append(
+                EvidenceItem(
+                    source="Household context",
+                    observation=f"Solar context is {context.solar.value}; time context is {context.time.value}.",
+                    impact="Solar wording uses shared context to avoid immediate solar-opportunity advice when solar is impossible.",
+                    confidence=_context_confidence(context),
+                    freshness=context.freshness or freshness,
+                )
+            )
         return EvidenceTrail(items)
 
     def _number(self, source: Any, name: str, default: float = 0.0) -> float:
@@ -384,3 +415,9 @@ class SolarAdvisor:
         else:
             value = getattr(source, name, default)
         return float(value or default)
+
+
+def _context_confidence(context: CurrentHouseholdContext) -> str:
+    if context.confidence.value == "UNKNOWN":
+        return "Low"
+    return context.confidence.value.title()

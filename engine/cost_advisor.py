@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
+from .context_engine import BillingContext, HouseholdContext as CurrentHouseholdContext, TariffContext
 from .financial_engine import FinancialEngine
-from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
+from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext as PlatformHouseholdContext
 
 
 class CostAdvisor:
@@ -17,7 +18,7 @@ class CostAdvisor:
     def __init__(
         self,
         financial_engine: Optional[FinancialEngine] = None,
-        household_context: Optional[HouseholdContext] = None,
+        household_context: Optional[PlatformHouseholdContext] = None,
     ) -> None:
         self.household_context = household_context
         self.financial_engine = financial_engine or FinancialEngine()
@@ -33,6 +34,7 @@ class CostAdvisor:
         health: dict[str, Any],
         comparison: Optional[dict[str, Any]] = None,
         now: Optional[datetime] = None,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> Advisor:
         observed_at = now or datetime.now().astimezone()
         projected, projected_end, projection_basis, projection_impact = self.financial_engine.project_bill(
@@ -59,10 +61,10 @@ class CostAdvisor:
 
         difference = projected - previous_cost
         pct_difference = difference / previous_cost * 100
-        status = self._status(difference, pct_difference, recommendations)
+        status = self._status(difference, pct_difference, recommendations, context)
         headline = self._headline(status, difference, pct_difference)
-        summary = self._summary(status, projected, previous_cost, difference, pct_difference, projected_end)
-        recommendation = self._recommendation(status)
+        summary = self._summary(status, projected, previous_cost, difference, pct_difference, projected_end, context)
+        recommendation = self._recommendation(status, context)
         confidence_reason = self._confidence_reason(confidence, current_summary, freshness, projection_basis)
         impact = FinancialImpact(
             billing_period=round(difference, 2),
@@ -80,6 +82,7 @@ class CostAdvisor:
             comparison=comparison or {},
             recommendations=recommendations,
             timeline=timeline,
+            context=context,
         )
 
         return Advisor(
@@ -101,6 +104,7 @@ class CostAdvisor:
                 "Recommendation Engine",
                 "Decision timeline",
                 "Configured tariff rates",
+                "Household Context",
             ],
             next_review_time=projected_end.isoformat(),
             evidence_summary=evidence_summary,
@@ -151,7 +155,13 @@ class CostAdvisor:
             evidence_summary=evidence_summary,
         )
 
-    def _status(self, difference: float, pct_difference: float, recommendations: list[Decision]) -> str:
+    def _status(
+        self,
+        difference: float,
+        pct_difference: float,
+        recommendations: list[Decision],
+        context: Optional[CurrentHouseholdContext],
+    ) -> str:
         if any(item.id == "trend_bill_trajectory_improving" for item in recommendations):
             return "IMPROVING"
         if difference <= -5 or pct_difference <= -5:
@@ -181,20 +191,28 @@ class CostAdvisor:
         difference: float,
         pct_difference: float,
         projected_end: Any,
+        context: Optional[CurrentHouseholdContext],
     ) -> str:
+        prefix = ""
+        if context and context.billing == BillingContext.NEW_BILLING_PERIOD:
+            prefix = "This is a new billing period, so early readings can move quickly. "
+        elif context and context.billing == BillingContext.BILL_END_APPROACHING:
+            prefix = "The billing period is close to ending, so this projection is becoming more settled. "
         direction = "below" if difference < 0 else "above"
         if status == "ON_TRACK":
             direction = "within"
             return (
-                f"The Financial Engine projects ${projected:.2f} by {projected_end}, "
+                f"{prefix}The Financial Engine projects ${projected:.2f} by {projected_end}, "
                 f"which is within {abs(pct_difference):.1f}% of last period's ${previous_cost:.2f}."
             )
         return (
-            f"The Financial Engine projects ${projected:.2f} by {projected_end}, "
+            f"{prefix}The Financial Engine projects ${projected:.2f} by {projected_end}, "
             f"${abs(difference):.2f} {direction} last period's ${previous_cost:.2f}."
         )
 
-    def _recommendation(self, status: str) -> str:
+    def _recommendation(self, status: str, context: Optional[CurrentHouseholdContext] = None) -> str:
+        if context and context.tariff in {TariffContext.HIGHEST_COST, TariffContext.HIGH_COST} and status in {"SLIGHTLY_HIGH", "HIGH"}:
+            return "Prioritise active billing and tariff recommendations while the household is in a high-cost tariff state."
         if status == "IMPROVING":
             return "Keep the current cost pattern and continue watching Peak-period imports."
         if status == "ON_TRACK":
@@ -311,6 +329,7 @@ class CostAdvisor:
         comparison: dict[str, Any],
         recommendations: list[Decision],
         timeline: Optional[DecisionTimeline],
+        context: Optional[CurrentHouseholdContext],
     ) -> EvidenceTrail:
         deltas = comparison.get("deltas", {})
         items = [
@@ -391,6 +410,16 @@ class CostAdvisor:
                     freshness=freshness,
                 )
             )
+        if context:
+            items.append(
+                EvidenceItem(
+                    source="Household context",
+                    observation=f"Billing {context.billing.value}; tariff {context.tariff.value}.",
+                    impact="Cost wording uses the shared context for billing stage and tariff state.",
+                    confidence=_context_confidence(context),
+                    freshness=context.freshness or freshness,
+                )
+            )
         return EvidenceTrail(items)
 
     def _bucket(self, summary: Any, bucket: str) -> dict[str, Any]:
@@ -408,3 +437,9 @@ class CostAdvisor:
         else:
             value = getattr(source, name, default)
         return float(value or default)
+
+
+def _context_confidence(context: CurrentHouseholdContext) -> str:
+    if context.confidence.value == "UNKNOWN":
+        return "Low"
+    return context.confidence.value.title()

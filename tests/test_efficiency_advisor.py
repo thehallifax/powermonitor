@@ -1,8 +1,14 @@
 import unittest
 from dataclasses import dataclass, field
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from engine.context_engine import ContextEngine
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.models import Decision, DecisionTimeline, FinancialImpact, TimelineEntry
+
+
+LOCAL = ZoneInfo("Australia/Perth")
 
 
 @dataclass
@@ -13,6 +19,7 @@ class Summary:
     average_daily_grid_import_kwh: float = 12.0
     grid_import_kwh: float = 240.0
     import_cost: float = 72.0
+    ev_charging_source: str = "ocular_export"
     buckets: dict = field(default_factory=lambda: {"peak": {"cost": 12.0}})
 
 
@@ -20,6 +27,7 @@ class Summary:
 class Settings:
     ev_baseline_watts: float = 250.0
     recommendation_thresholds: dict = field(default_factory=lambda: {"baseload_excess_pct": 20.0})
+    import_rates: dict = field(default_factory=lambda: {"super_off_peak": 0.08, "overnight": 0.19, "off_peak": 0.23, "peak": 0.53})
 
 
 def recommendation():
@@ -57,9 +65,20 @@ def timeline():
 
 
 class EfficiencyAdvisorTests(unittest.TestCase):
+    def context(self, now, summary=None, settings=None, health=None):
+        summary = summary or Summary()
+        return ContextEngine().build(
+            today_summary=summary,
+            billing_summary=summary,
+            settings=settings or Settings(),
+            health=health or {"status": "ok", "report_age_minutes": 5},
+            now=now,
+        )
+
     def test_inefficient_when_baseload_exceeds_threshold(self):
+        summary = Summary()
         advisor = EfficiencyAdvisor().advise(
-            summary=Summary(),
+            summary=summary,
             previous_summary=Summary(average_daily_grid_import_kwh=10.0),
             settings=Settings(),
             recommendations=[recommendation()],
@@ -68,6 +87,7 @@ class EfficiencyAdvisorTests(unittest.TestCase):
             overnight_baseload_watts=420.0,
             comparison={"deltas": {"grid_import_kwh": 40.0}},
             trends=[object(), object()],
+            context=self.context(datetime(2026, 6, 27, 2, tzinfo=LOCAL), summary),
         )
 
         self.assertEqual(advisor.status, "INEFFICIENT")
@@ -77,6 +97,8 @@ class EfficiencyAdvisorTests(unittest.TestCase):
         self.assertIn("Overnight baseload", sources)
         self.assertIn("Recommendation context", sources)
         self.assertIn("Timeline evidence", sources)
+        self.assertIn("Household context", sources)
+        self.assertIn("Overnight context", advisor.summary)
         self.assertEqual(advisor.evidence_summary.evidence_quality.value, "HIGH")
 
     def test_excellent_when_daily_import_improves(self):

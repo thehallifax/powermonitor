@@ -1,8 +1,14 @@
 import unittest
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from engine.context_engine import ContextEngine
 from engine.models import DecisionTimeline, TimelineEntry
 from engine.solar_advisor import SolarAdvisor
+
+
+LOCAL = ZoneInfo("Australia/Perth")
 
 
 @dataclass
@@ -22,6 +28,7 @@ class Summary:
 @dataclass
 class Settings:
     export_credit_rate: float = 0.02
+    import_rates: dict = None
 
 
 def timeline():
@@ -41,6 +48,15 @@ def timeline():
 
 
 class SolarAdvisorTests(unittest.TestCase):
+    def context(self, now, summary):
+        return ContextEngine().build(
+            today_summary=summary,
+            billing_summary=summary,
+            settings={"import_rates": {"super_off_peak": 0.08, "overnight": 0.19, "off_peak": 0.23, "peak": 0.53}},
+            health={"status": "ok", "report_age_minutes": 4},
+            now=now,
+        )
+
     def test_excellent_when_self_consumption_is_high(self):
         advisor = SolarAdvisor().advise(
             summary=Summary(),
@@ -57,18 +73,20 @@ class SolarAdvisorTests(unittest.TestCase):
         self.assertEqual(advisor.evidence_summary.evidence_quality.value, "HIGH")
 
     def test_missed_opportunity_when_exports_are_high(self):
+        summary = Summary(
+            solar_generated_kwh=25.0,
+            solar_used_kwh=10.0,
+            solar_exported_kwh=15.0,
+            self_consumption_pct=40.0,
+            solar_export_pct=60.0,
+        )
         advisor = SolarAdvisor().advise(
-            summary=Summary(
-                solar_generated_kwh=25.0,
-                solar_used_kwh=10.0,
-                solar_exported_kwh=15.0,
-                self_consumption_pct=40.0,
-                solar_export_pct=60.0,
-            ),
+            summary=summary,
             settings=Settings(),
             recommendations=[],
             timeline=None,
             health={"status": "ok", "report_age_minutes": 4},
+            context=self.context(datetime(2026, 6, 27, 12, tzinfo=LOCAL), summary),
         )
 
         self.assertEqual(advisor.status, "MISSED_OPPORTUNITY")
@@ -78,6 +96,30 @@ class SolarAdvisorTests(unittest.TestCase):
         self.assertIn("Exported energy", sources)
         self.assertIn("Import offset", sources)
         self.assertIn("Billing contribution", sources)
+
+    def test_night_context_avoids_immediate_solar_opportunity_wording(self):
+        summary = Summary(
+            solar_generated_kwh=25.0,
+            solar_used_kwh=10.0,
+            solar_exported_kwh=15.0,
+            self_consumption_pct=40.0,
+            solar_export_pct=60.0,
+        )
+
+        advisor = SolarAdvisor().advise(
+            summary=summary,
+            settings=Settings(),
+            recommendations=[],
+            timeline=None,
+            health={"status": "ok", "report_age_minutes": 4},
+            context=self.context(datetime(2026, 6, 27, 23, 30, tzinfo=LOCAL), summary),
+        )
+
+        self.assertEqual(advisor.status, "MISSED_OPPORTUNITY")
+        self.assertNotIn("could potentially have powered flexible loads", advisor.headline)
+        self.assertIn("performance", advisor.summary)
+        self.assertIn("next daylight window", advisor.recommendation)
+        self.assertIn("Household context", [item.source for item in advisor.evidence_trail.items])
 
     def test_unknown_without_solar_data(self):
         advisor = SolarAdvisor().advise(

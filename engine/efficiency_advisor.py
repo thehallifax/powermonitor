@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .evidence_quality import AdvisorEvidenceSummary, EvidenceQuality, EvidenceRequirement, EvidenceSource, cap_confidence_for_evidence
+from .context_engine import EvidenceContext, HouseholdContext as CurrentHouseholdContext, TimeContext
 from .financial_engine import FinancialEngine
-from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext
+from .models import Advisor, Decision, DecisionTimeline, EvidenceItem, EvidenceTrail, FinancialImpact, HouseholdContext as PlatformHouseholdContext
 
 
 class EfficiencyAdvisor:
@@ -17,7 +18,7 @@ class EfficiencyAdvisor:
     def __init__(
         self,
         financial_engine: Optional[FinancialEngine] = None,
-        household_context: Optional[HouseholdContext] = None,
+        household_context: Optional[PlatformHouseholdContext] = None,
     ) -> None:
         self.household_context = household_context
         self.financial_engine = financial_engine or FinancialEngine()
@@ -35,6 +36,7 @@ class EfficiencyAdvisor:
         comparison: Optional[dict[str, Any]] = None,
         trends: Optional[list[Any]] = None,
         now: Optional[datetime] = None,
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> Advisor:
         observed_at = now or datetime.now().astimezone()
         freshness = self._freshness(summary, health)
@@ -67,9 +69,9 @@ class EfficiencyAdvisor:
             recommendations=recommendations,
         )
         headline = self._headline(status, overnight_baseload_watts, import_change_pct)
-        summary_text = self._summary(status, overnight_baseload_watts, expected_baseload, daily_import, import_change_pct)
-        recommendation = self._recommendation(status)
-        confidence_reason = self._confidence_reason(confidence, summary, freshness, overnight_baseload_watts)
+        summary_text = self._summary(status, overnight_baseload_watts, expected_baseload, daily_import, import_change_pct, context)
+        recommendation = self._recommendation(status, context)
+        confidence_reason = self._confidence_reason(confidence, summary, freshness, overnight_baseload_watts, context)
         evidence_trail = self._evidence_trail(
             overnight_baseload_watts=float(overnight_baseload_watts),
             expected_baseload=expected_baseload,
@@ -84,6 +86,7 @@ class EfficiencyAdvisor:
             recommendations=recommendations,
             timeline=timeline,
             trends=trends or [],
+            context=context,
         )
 
         return Advisor(
@@ -104,6 +107,7 @@ class EfficiencyAdvisor:
                 "Financial Engine",
                 "Recommendation Engine",
                 "Decision timeline",
+                "Household Context",
             ],
             next_review_time=observed_at.date().isoformat(),
             evidence_summary=evidence_summary,
@@ -176,17 +180,25 @@ class EfficiencyAdvisor:
         expected_baseload: float,
         daily_import: float,
         import_change_pct: Optional[float],
+        context: Optional[CurrentHouseholdContext] = None,
     ) -> str:
+        prefix = ""
+        if context and context.time in {TimeContext.NIGHT, TimeContext.EARLY_MORNING}:
+            prefix = "Overnight context is active. "
+        elif context and context.evidence in {EvidenceContext.HISTORICAL_ONLY, EvidenceContext.ESTIMATED, EvidenceContext.INSUFFICIENT}:
+            prefix = f"Evidence is {context.evidence.value.replace('_', ' ').lower()}. "
         if status == "INEFFICIENT":
             return (
-                f"Your overnight baseload is about {overnight_baseload_watts:.0f} W versus the "
+                f"{prefix}Your overnight baseload is about {overnight_baseload_watts:.0f} W versus the "
                 f"configured {expected_baseload:.0f} W baseline. No specific device is inferred."
             )
         if import_change_pct is not None and import_change_pct < 0:
-            return f"Daily grid import is {abs(import_change_pct):.1f}% lower than the comparison period."
-        return f"Average daily grid import is {daily_import:.1f} kWh with no major efficiency concern detected."
+            return f"{prefix}Daily grid import is {abs(import_change_pct):.1f}% lower than the comparison period."
+        return f"{prefix}Average daily grid import is {daily_import:.1f} kWh with no major efficiency concern detected."
 
-    def _recommendation(self, status: str) -> str:
+    def _recommendation(self, status: str, context: Optional[CurrentHouseholdContext] = None) -> str:
+        if context and context.evidence == EvidenceContext.INSUFFICIENT:
+            return "Review again after more complete interval data is available."
         if status == "INEFFICIENT":
             return "Review measured overnight load patterns and reduce avoidable always-on consumption where practical."
         if status == "WATCH":
@@ -297,7 +309,16 @@ class EfficiencyAdvisor:
             confidence_reason=f"{capped} confidence because {reason} Freshness: {freshness}.",
         )
 
-    def _confidence_reason(self, confidence: str, summary: Any, freshness: str, overnight_baseload_watts: float) -> str:
+    def _confidence_reason(
+        self,
+        confidence: str,
+        summary: Any,
+        freshness: str,
+        overnight_baseload_watts: float,
+        context: Optional[CurrentHouseholdContext] = None,
+    ) -> str:
+        if context and context.evidence in {EvidenceContext.HISTORICAL_ONLY, EvidenceContext.ESTIMATED, EvidenceContext.INSUFFICIENT}:
+            return f"{confidence} confidence because household context reports {context.evidence.value.replace('_', ' ').lower()} evidence."
         return (
             f"{confidence} confidence because overnight baseload is {overnight_baseload_watts:.0f} W, "
             f"{self._number(summary, 'reading_days'):.0f} billing days have readings, and freshness is {freshness.lower()}."
@@ -330,6 +351,7 @@ class EfficiencyAdvisor:
         recommendations: list[Decision],
         timeline: Optional[DecisionTimeline],
         trends: list[Any],
+        context: Optional[CurrentHouseholdContext],
     ) -> EvidenceTrail:
         deltas = comparison.get("deltas", {})
         items = [
@@ -403,6 +425,16 @@ class EfficiencyAdvisor:
                     freshness=freshness,
                 )
             )
+        if context:
+            items.append(
+                EvidenceItem(
+                    source="Household context",
+                    observation=f"Evidence {context.evidence.value}; time {context.time.value}.",
+                    impact="Efficiency wording uses shared context for evidence quality and time-of-day framing.",
+                    confidence=_context_confidence(context),
+                    freshness=context.freshness or freshness,
+                )
+            )
         return EvidenceTrail(items)
 
     def _threshold(self, settings: Any) -> float:
@@ -426,3 +458,9 @@ class EfficiencyAdvisor:
         else:
             value = getattr(source, name, default)
         return float(value or default)
+
+
+def _context_confidence(context: CurrentHouseholdContext) -> str:
+    if context.confidence.value == "UNKNOWN":
+        return "Low"
+    return context.confidence.value.title()

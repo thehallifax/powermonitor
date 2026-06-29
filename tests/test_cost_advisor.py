@@ -1,9 +1,14 @@
 import unittest
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
+from engine.context_engine import ContextEngine
 from engine.cost_advisor import CostAdvisor
 from engine.models import DecisionTimeline, TimelineEntry
+
+
+LOCAL = ZoneInfo("Australia/Perth")
 
 
 @dataclass
@@ -29,6 +34,7 @@ class Settings:
     current_billing_period_end: date = date(2026, 6, 30)
     previous_billing_period_start: date = date(2026, 5, 1)
     previous_billing_period_end: date = date(2026, 5, 30)
+    import_rates: dict = field(default_factory=lambda: {"super_off_peak": 0.08, "overnight": 0.19, "off_peak": 0.23, "peak": 0.53})
 
 
 def timeline():
@@ -48,6 +54,17 @@ def timeline():
 
 
 class CostAdvisorTests(unittest.TestCase):
+    def context(self, now, summary=None, settings=None):
+        summary = summary or Summary()
+        settings = settings or Settings()
+        return ContextEngine().build(
+            today_summary=summary,
+            billing_summary=summary,
+            settings=settings,
+            health={"status": "ok", "report_age_minutes": 4},
+            now=now,
+        )
+
     def test_improving_when_projected_below_previous_period(self):
         advisor = CostAdvisor().advise(
             current_summary=Summary(average_daily_net_cost=3.0),
@@ -66,20 +83,23 @@ class CostAdvisorTests(unittest.TestCase):
         self.assertIn("Timeline", [item.source for item in advisor.evidence_trail.items])
 
     def test_high_when_projected_well_above_previous_period(self):
+        current = Summary(average_daily_net_cost=5.0)
         advisor = CostAdvisor().advise(
-            current_summary=Summary(average_daily_net_cost=5.0),
+            current_summary=current,
             previous_summary=Summary(net_cost=100.0),
             settings=Settings(),
             recommendations=[],
             timeline=None,
             health={"status": "ok", "report_age_minutes": 4},
             comparison={"deltas": {"grid_import_kwh": 35.0, "solar_generated_kwh": -5.0}},
+            context=self.context(datetime(2026, 6, 27, 18, tzinfo=LOCAL), current),
         )
 
         self.assertEqual(advisor.status, "HIGH")
         self.assertIn("above last period", advisor.headline)
         self.assertGreater(advisor.estimated_financial_impact.billing_period, 0)
         self.assertIn("Tariff contribution", [item.source for item in advisor.evidence_trail.items])
+        self.assertIn("Household context", [item.source for item in advisor.evidence_trail.items])
 
     def test_incomplete_billing_period_reduces_evidence_quality(self):
         advisor = CostAdvisor().advise(
