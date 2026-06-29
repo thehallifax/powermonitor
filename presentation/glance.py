@@ -45,6 +45,7 @@ def build_glance_state(
     bill_projection_basis: str,
     now: datetime,
     context: Optional[Any] = None,
+    recommendation_presentation: Optional[Any] = None,
 ) -> GlanceState:
     advisor = charging_advice.advisor
     bucket = str(charging_advice.supporting_evidence.get("current_tariff_bucket") or current_tariff_bucket(now))
@@ -66,6 +67,13 @@ def build_glance_state(
     wait_minutes = charging_advice.recommended_wait_minutes
     simple_reason = glance_reason(status, wait_minutes, charging_advice.next_lower_cost_window, advisor.summary)
     simple_recommendation = glance_recommendation(status, wait_minutes, charging_advice.next_lower_cost_window, advisor.headline)
+    if recommendation_presentation is not None:
+        simple_reason = str(getattr(recommendation_presentation, "rationale", None) or simple_reason)
+        simple_recommendation = str(
+            getattr(recommendation_presentation, "recommended_action", None)
+            or getattr(recommendation_presentation, "title", None)
+            or simple_recommendation
+        )
 
     return GlanceState(
         status=status,

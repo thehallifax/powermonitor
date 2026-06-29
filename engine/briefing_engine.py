@@ -16,6 +16,7 @@ from .models import (
     FinancialImpact,
     HouseholdContext,
 )
+from .recommendation_adapter import adapt_recommendations
 
 
 class BriefingEngine:
@@ -83,7 +84,11 @@ def _decision_briefing(
     context: Optional[CurrentHouseholdContext],
 ) -> DailyBriefing:
     ordered_decisions = sorted(household_decisions, key=_decision_sort_key)
-    items = [_briefing_priority_from_decision(decision, advisors) for decision in ordered_decisions]
+    presentations = adapt_recommendations(
+        ordered_decisions,
+        advisor_explanations=advisors.active(),
+    )
+    items = [_briefing_priority_from_presentation(presentation, advisors) for presentation in presentations]
     priorities = [item for item in items if item.status in PRIORITY_STATUSES][:1]
     positives = [item for item in items if item.status in POSITIVE_STATUSES][:1]
     watch_items = [item for item in items if item.status in WATCH_STATUSES and item not in priorities][:1]
@@ -278,30 +283,27 @@ def _briefing_priority(advisor: Advisor) -> BriefingPriority:
     )
 
 
-def _briefing_priority_from_decision(decision, advisors: AdvisorCollection) -> BriefingPriority:
+def _briefing_priority_from_presentation(presentation, advisors: AdvisorCollection) -> BriefingPriority:
+    decision = presentation.decision or {}
     decision_type = str(_decision_get(decision, "decision_type") or _decision_get(decision, "type") or "NO_ACTION")
     supporting = [
         _advisor_label(advisor)
         for advisor in advisors.active()
-        if advisor.decision_id == _decision_get(decision, "decision_id")
+        if advisor.decision_id == presentation.decision_id
     ]
-    reasons = list(_decision_get(decision, "reasons") or [])
-    primary_reason = _decision_get(reasons[0], "summary") if reasons else None
-    outcome = _decision_get(decision, "outcome")
-    recommendation = _decision_get(outcome, "expected_effect") or primary_reason or "Continue monitoring."
     return BriefingPriority(
-        advisor_id=f"decision:{_decision_get(decision, 'decision_id')}",
+        advisor_id=presentation.recommendation_id,
         advisor_type="HOUSEHOLD_DECISION",
-        title=_decision_title(decision_type),
-        summary=primary_reason or recommendation,
-        recommendation=recommendation,
+        title=presentation.title,
+        summary=presentation.summary,
+        recommendation=presentation.recommended_action,
         status=_decision_status(decision_type),
-        confidence=_display_confidence(_decision_get(decision, "confidence")),
-        confidence_reason=f"{_display_confidence(_decision_get(decision, 'confidence'))} confidence from Decision Engine reasoning.",
+        confidence=presentation.confidence,
+        confidence_reason=f"{presentation.confidence} confidence from Decision Recommendation Adapter.",
         freshness="DecisionEngine",
-        estimated_financial_impact=_financial_impact_from_decision(decision),
+        estimated_financial_impact=presentation.financial_impact,
         supporting_advisors=supporting or ["Decision Engine"],
-        decision_id=_decision_get(decision, "decision_id"),
+        decision_id=presentation.decision_id,
         decision_type=decision_type,
     )
 

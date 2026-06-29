@@ -1,5 +1,22 @@
 # Changelog
 
+## PB-024 - Decision Recommendation Adapter
+
+- Added a Decision Recommendation Adapter that converts Household Decisions into
+  presentation-ready recommendation contracts with urgency, category, icon,
+  evidence, rationale, confidence, and priority metadata.
+- Added shared recommendation presentation models for adapter output, evidence,
+  reasons, priorities, and categories.
+- Refactored advisor presentation, Daily Briefing, Glance Mode, Recommendation
+  Centre, Solar, What-if, and API recommendation output to consume
+  `RecommendationPresentation` objects where recommendations are shown.
+- Kept legacy recommendation compatibility behind thin presentation wrappers so
+  existing advisor/report paths continue to behave while visible
+  recommendations originate from Household Decisions.
+- Added adapter and API serialization regression tests for charging, billing,
+  monitoring, anomaly investigation, no-action, priority ordering, and
+  recommendation lineage.
+
 ## PB-023 - Advisor Decision Migration
 
 - Added advisor presenter support that turns platform-owned Household Decisions

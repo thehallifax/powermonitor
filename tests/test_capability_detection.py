@@ -144,6 +144,20 @@ class CapabilityDetectionTests(unittest.TestCase):
                 self.assertIn("count", payload["notification_history"])
                 self.assertIn("advisors", payload["advisor_explanations"])
                 self.assertTrue(all("decision" in item for item in payload["recommendations"]))
+                self.assertTrue(
+                    all(
+                        {
+                            "recommendation_id",
+                            "decision_id",
+                            "recommended_action",
+                            "rationale",
+                            "display_priority",
+                            "category",
+                            "urgency",
+                        }.issubset(item)
+                        for item in payload["recommendations"]
+                    )
+                )
                 self.assertNotIn("cookie_value", str(payload["provider_management"]))
                 self.assertIn("ACCEPTED", payload["promotion_summary"]["counts"])
                 self.assertIn("confidence", payload["context"])

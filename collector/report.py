@@ -55,6 +55,7 @@ from engine.notification_engine import NotificationEngine
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
 from engine.provider_runtime import ProviderRuntime
+from engine.recommendation_adapter import RecommendationPresentation, adapt_recommendations
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from presentation.briefing import BriefingItem
@@ -542,6 +543,15 @@ def dashboard_data(
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
+    recommendation_presentations = adapt_recommendations(
+        household_decisions,
+        advisor_explanations=advisor_explanations.active(),
+        household_state=household_state,
+    )
+    glance_recommendation = next(
+        (item for item in recommendation_presentations if item.category.value == "ev"),
+        recommendation_presentations[0] if recommendation_presentations else None,
+    )
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
         "household": household_context.household.as_dict(),
@@ -608,13 +618,14 @@ def dashboard_data(
             bill_projection_basis=glance_basis,
             now=generated_at,
             context=household_current_context,
+            recommendation_presentation=glance_recommendation,
         ).as_dict(),
         "ev_source_counts": ev_source_counts(),
         "data_completeness": completeness,
         "energy_score": energy_score.as_dict(),
         "car_comparison": car_comparison(settings),
-        "recommendations": [recommendation_with_decision_dict(decision, household_decisions) for decision in recommendations],
-        "hidden_recommendations": [recommendation_with_decision_dict(decision, household_decisions) for decision in hidden],
+        "recommendations": [item.as_dict() for item in recommendation_presentations],
+        "hidden_recommendations": [],
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
     }
@@ -1881,7 +1892,7 @@ def display_timestamp(value: Optional[str]) -> str:
         return value
 
 
-def recommendations_html(recommendations: list[Decision]) -> str:
+def recommendations_html(recommendations: list) -> str:
     if not recommendations:
         return ""
     cards = []
@@ -1890,13 +1901,13 @@ def recommendations_html(recommendations: list[Decision]) -> str:
             f"""
             <article class="recommendation-card {html.escape(decision.severity)}">
               <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
-              <h3>{html.escape(decision.title)}</h3>
+              <h3>{html.escape(recommendation_title(decision))}</h3>
               <div class="decision-lines">
-                <p><strong>Finding</strong>{html.escape(decision.finding)}</p>
+                <p><strong>Finding</strong>{html.escape(decision.summary if is_recommendation_presentation(decision) else decision.finding)}</p>
                 <p><strong>Financial impact</strong>{html.escape(recommendation_impact(decision))}</p>
-                <p><strong>Recommendation</strong>{html.escape(decision.recommendation)}</p>
+                <p><strong>Recommendation</strong>{html.escape(recommendation_action(decision))}</p>
               </div>
-              {decision_explanation_html(decision.explanation)}
+              {"" if is_recommendation_presentation(decision) else decision_explanation_html(decision.explanation)}
             </article>
             """
         )
@@ -2267,11 +2278,25 @@ def collector_status_text(health: dict) -> str:
     )
 
 
-def recommendation_confidence(decision: Decision) -> str:
+def is_recommendation_presentation(item) -> bool:
+    return isinstance(item, RecommendationPresentation)
+
+
+def recommendation_confidence(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return decision.confidence
     return decision.confidence.title()
 
 
-def recommendation_impact(decision: Decision) -> str:
+def recommendation_impact(decision) -> str:
+    if is_recommendation_presentation(decision):
+        impact = decision.financial_impact
+        if not impact:
+            return "Not quantified"
+        for value in (impact.today, impact.billing_period, impact.yearly):
+            if value is not None:
+                return money(float(value))
+        return "Not quantified"
     for key in ("today", "billing_period", "yearly"):
         value = decision.financial_impact.get(key)
         if value is not None:
@@ -2301,7 +2326,12 @@ def recommendation_impact(decision: Decision) -> str:
     return "Not quantified"
 
 
-def recommendation_monthly_impact(decision: Decision) -> str:
+def recommendation_monthly_impact(decision) -> str:
+    if is_recommendation_presentation(decision):
+        impact = decision.financial_impact
+        if impact and impact.yearly is not None:
+            return money(float(impact.yearly) / 12)
+        return "Not quantified"
     value = decision.evidence.get("estimated_monthly_impact")
     if value is None:
         return "Not quantified"
@@ -2311,22 +2341,54 @@ def recommendation_monthly_impact(decision: Decision) -> str:
         return str(value)
 
 
-def recommendation_priority_score(decision: Decision) -> int:
+def recommendation_priority_score(decision) -> int:
+    if is_recommendation_presentation(decision):
+        return int(decision.display_priority)
     try:
         return int(round(float(decision.evidence.get("priority_score", 0))))
     except (TypeError, ValueError):
         return {"High": 67, "Medium": 34, "Low": 0}.get(decision.priority, 0)
 
 
-def recommendation_category(decision: Decision) -> str:
+def recommendation_category(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return decision.category.label
     return str(decision.evidence.get("recommendation_category") or decision.category).replace("_", " ")
 
 
-def recommendation_difficulty(decision: Decision) -> str:
+def recommendation_difficulty(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return f"{decision.urgency.label} urgency"
     return str(decision.evidence.get("difficulty") or "Medium").title()
 
 
-def recommendation_evidence_html(decision: Decision) -> str:
+def recommendation_title(decision) -> str:
+    return decision.title
+
+
+def recommendation_action(decision) -> str:
+    return decision.recommended_action if is_recommendation_presentation(decision) else decision.recommendation
+
+
+def recommendation_why(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return decision.rationale
+    return (
+        decision.explanation.why_this_matters
+        if decision.explanation
+        else "This recommendation is based on available Recommendation Engine evidence."
+    )
+
+
+def recommendation_evidence_html(decision) -> str:
+    if is_recommendation_presentation(decision):
+        if not decision.evidence:
+            return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
+        rows = [
+            f"<li><strong>{html.escape(item.signal.replace('_', ' ').capitalize())}</strong><span>{html.escape(str(item.value))}</span><small>{html.escape(item.source)} - {html.escape(item.quality)}</small></li>"
+            for item in decision.evidence
+        ]
+        return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
     hidden_keys = {
         "priority_score",
         "recommendation_category",
@@ -2364,7 +2426,9 @@ def decision_type_for_recommendation(decision: Decision) -> list[str]:
     return ["NO_ACTION", "MONITOR_USAGE"]
 
 
-def matching_household_decision(decision: Decision, household_decisions: Optional[list[dict]]) -> Optional[dict]:
+def matching_household_decision(decision, household_decisions: Optional[list[dict]]) -> Optional[dict]:
+    if is_recommendation_presentation(decision):
+        return decision.decision
     if not household_decisions:
         return None
     preferred = decision_type_for_recommendation(decision)
@@ -2375,7 +2439,7 @@ def matching_household_decision(decision: Decision, household_decisions: Optiona
     return household_decisions[0] if household_decisions else None
 
 
-def recommendation_decision_provenance_html(decision: Decision, household_decisions: Optional[list[dict]]) -> str:
+def recommendation_decision_provenance_html(decision, household_decisions: Optional[list[dict]]) -> str:
     household_decision = matching_household_decision(decision, household_decisions)
     if not household_decision:
         return '<p><strong>Household decision</strong>No matching HouseholdDecision emitted yet.</p>'
@@ -2387,7 +2451,11 @@ def recommendation_decision_provenance_html(decision: Decision, household_decisi
     """
 
 
-def recommendation_with_decision_dict(decision: Decision, household_decisions: Optional[list[dict]]) -> dict:
+def recommendation_with_decision_dict(decision, household_decisions: Optional[list[dict]]) -> dict:
+    if is_recommendation_presentation(decision):
+        data = decision.as_dict()
+        data["household_decision_id"] = decision.decision_id
+        return data
     data = decision.as_dict()
     household_decision = matching_household_decision(decision, household_decisions)
     data["decision"] = household_decision
@@ -2395,7 +2463,7 @@ def recommendation_with_decision_dict(decision: Decision, household_decisions: O
     return data
 
 
-def recommendation_controls_html(decision: Decision, hidden: bool = False) -> str:
+def recommendation_controls_html(decision, hidden: bool = False) -> str:
     stable_id = html.escape(decision.id)
     if hidden:
         return f"""
@@ -2443,11 +2511,7 @@ def recommendation_centre_html(
     )
     cards = []
     for decision in ranked:
-        why = (
-            decision.explanation.why_this_matters
-            if decision.explanation
-            else "This recommendation is based on available Recommendation Engine evidence."
-        )
+        why = recommendation_why(decision)
         goal_links = recommendation_goal_links_html(decision, goals)
         cards.append(
             f"""
@@ -2456,7 +2520,7 @@ def recommendation_centre_html(
                 <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
                 <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
               </div>
-              <h3>{html.escape(decision.title)}</h3>
+              <h3>{html.escape(recommendation_title(decision))}</h3>
               <div class="recommendation-centre-meta">
                 <span>{html.escape(recommendation_category(decision).title())}</span>
                 <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
@@ -2466,7 +2530,7 @@ def recommendation_centre_html(
                 <span><small>Monthly impact</small><strong>{html.escape(recommendation_monthly_impact(decision))}</strong></span>
               </div>
               <div class="decision-lines">
-                <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
+                <p><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
                 <p><strong>Why?</strong>{html.escape(why)}</p>
                 {recommendation_decision_provenance_html(decision, household_decisions)}
                 {goal_links}
@@ -2497,7 +2561,7 @@ def recommendation_centre_html(
                 <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
               </div>
               <div class="decision-lines">
-                <p><strong>Recommended action</strong>{html.escape(decision.recommendation)}</p>
+                <p><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
               </div>
               {recommendation_controls_html(decision, hidden=True)}
             </article>
@@ -2593,7 +2657,7 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
     """
 
 
-def top_actions_html(recommendations: list[Decision]) -> str:
+def top_actions_html(recommendations: list) -> str:
     items = recommendations[:3]
     if not items:
         return """
@@ -2608,11 +2672,11 @@ def top_actions_html(recommendations: list[Decision]) -> str:
             f"""
             <article class="action-card {html.escape(item.severity)}">
               <span>{html.escape(recommendation_confidence(item))} confidence</span>
-              <h3>{html.escape(item.title)}</h3>
-              <p><strong>Finding</strong>{html.escape(item.finding)}</p>
+              <h3>{html.escape(recommendation_title(item))}</h3>
+              <p><strong>Finding</strong>{html.escape(item.summary if is_recommendation_presentation(item) else item.finding)}</p>
               <p><strong>Financial impact</strong>{html.escape(recommendation_impact(item))}</p>
-              <p><strong>Recommendation</strong>{html.escape(item.recommendation)}</p>
-              {decision_explanation_html(item.explanation)}
+              <p><strong>Recommendation</strong>{html.escape(recommendation_action(item))}</p>
+              {"" if is_recommendation_presentation(item) else decision_explanation_html(item.explanation)}
             </article>
             """
         )
@@ -3216,11 +3280,11 @@ def timeline_with_state_changes(timeline: DecisionTimeline, state_changes: list[
     return DecisionTimeline(entries)
 
 
-def solar_page_html(summary: Summary, recommendations: list[Decision]) -> str:
+def solar_page_html(summary: Summary, recommendations: list) -> str:
     solar_recs = [
         item for item in recommendations
-        if item.id in {"solar_self_consumption", "positive_reinforcement"}
-        or "solar" in item.title.lower()
+        if recommendation_category(item).lower() == "solar"
+        or "solar" in recommendation_title(item).lower()
     ]
     cards = "".join(
         [
@@ -4132,7 +4196,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     """
 
 
-def whatif_page_html(analysis: dict, plan: dict, recommendations: list[Decision]) -> str:
+def whatif_page_html(analysis: dict, plan: dict, recommendations: list) -> str:
     savings = plan["savings"]
     meaning = (
         f"The EV Add On plan is ahead by {money(savings)} for this period."
@@ -4144,11 +4208,11 @@ def whatif_page_html(analysis: dict, plan: dict, recommendations: list[Decision]
     shared_recommendation = next(
         (
             item for item in recommendations
-            if item.category in {"EV", "Tariffs", "Bills"} and item.action_type != "maintain"
+            if recommendation_category(item) in {"EV Charging", "Tariffs", "Bills", "Billing"}
         ),
         recommendations[0] if recommendations else None,
     )
-    best_move = shared_recommendation.recommendation if shared_recommendation else "No active recommendation for this scenario."
+    best_move = recommendation_action(shared_recommendation) if shared_recommendation else "No active recommendation for this scenario."
     return f"""
     {scenario_analysis_html(analysis)}
     <section class="report-section compact-section">
@@ -4396,6 +4460,15 @@ def write_html(
     notification_readiness_summary = notification_readiness.as_dict()
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
+    recommendation_presentations = adapt_recommendations(
+        household_decisions,
+        advisor_explanations=advisor_explanations.active(),
+        household_state=household_state,
+    )
+    glance_recommendation = next(
+        (item for item in recommendation_presentations if item.category.value == "ev"),
+        recommendation_presentations[0] if recommendation_presentations else None,
+    )
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -4404,6 +4477,7 @@ def write_html(
         bill_projection_basis=glance_basis,
         now=generated_dt,
         context=household_current_context,
+        recommendation_presentation=glance_recommendation,
     )
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     body_class = ' class="glance-only"' if glance_only else ""
@@ -4431,7 +4505,7 @@ def write_html(
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
-    {recommendation_centre_html(recommendations, recommendation_lifecycle_counts, hidden or [], advisor_explanations.active(), goals, household_decisions)}
+    {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
   </section>
   <section id="bills" class="page">
     <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
@@ -4442,7 +4516,7 @@ def write_html(
   </section>
   <section id="solar" class="page">
     <div class="page-heading"><h2>How well is my solar performing?</h2><p>Generation, self-consumption, exports, and lost opportunity.</p></div>
-    {solar_page_html(period_summary, recommendations)}
+    {solar_page_html(period_summary, recommendation_presentations)}
   </section>
   <section id="ev" class="page">
     <div class="page-heading"><h2>What did my vehicle cost to charge?</h2><p>Actual session source, charging cost, tariff split, and session history.</p></div>
@@ -4450,7 +4524,7 @@ def write_html(
   </section>
   <section id="whatif" class="page">
     <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
-    {whatif_page_html(scenarios, plan, recommendations)}
+    {whatif_page_html(scenarios, plan, recommendation_presentations)}
   </section>
   <section id="timeline" class="page">
     <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
