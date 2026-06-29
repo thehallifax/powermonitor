@@ -1,5 +1,21 @@
 # Changelog
 
+## PB-013 - Provider Management
+
+- Added `ProviderManager` with configuration, credential, lifecycle, health,
+  sync, diagnostics, capability, and connection-test models above the existing
+  Provider Framework.
+- Exposed sanitized provider management data through dashboard JSON plus local
+  `/api/providers`, provider detail, test, configure, and diagnostics routes.
+- Replaced the System page's static provider registry card with model-driven
+  Provider Management cards and linked Setup provider tasks directly to those
+  cards.
+- Updated Imports to show provider-managed import providers and the provider
+  attached to recent observations.
+- Added provider management tests covering lifecycle, credential redaction,
+  state transitions, diagnostics, capability detection, connection testing,
+  removal/reconnect actions, and future provider configuration.
+
 ## PB-012 - Beta Readiness & UX Polish
 
 - Added a Billing Cycle setup section with local editing for billing start

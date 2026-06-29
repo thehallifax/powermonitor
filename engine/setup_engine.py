@@ -16,6 +16,7 @@ from .models import (
     SetupTaskPriority,
 )
 from .provider_framework import ProviderCapability, ProviderRegistry
+from .provider_manager import ProviderConnectionStatus, ProviderManager, ProviderSyncState
 
 
 class SetupEngine:
@@ -37,6 +38,7 @@ class SetupEngine:
         recommendations: Optional[list[Any]] = None,
         settings: Optional[Any] = None,
         provider_registry: Optional[ProviderRegistry] = None,
+        provider_management: Optional[ProviderManager] = None,
         now: Optional[datetime] = None,
     ) -> SetupChecklist:
         now = now or datetime.now().astimezone()
@@ -59,12 +61,12 @@ class SetupEngine:
             SetupSection(
                 "energy_providers",
                 "Energy Providers",
-                self._provider_tasks(capability_summary, provider_registry),
+                self._provider_tasks(capability_summary, provider_registry, provider_management),
             ),
             SetupSection(
                 "imports",
                 "Imports",
-                self._import_tasks(capability_summary, import_sources, provider_registry),
+                self._import_tasks(capability_summary, import_sources, provider_registry, provider_management),
             ),
             SetupSection(
                 "data_quality",
@@ -175,25 +177,38 @@ class SetupEngine:
         self,
         capability_summary: HouseholdCapabilitySummary,
         provider_registry: Optional[ProviderRegistry],
+        provider_management: Optional[ProviderManager] = None,
     ) -> list[SetupTask]:
         tasks = []
         if self._household_declares("solar"):
             solar = capability_summary.get("solar")
             solar_provider = _first_provider(provider_registry, ProviderCapability.DAILY_SUMMARY)
+            managed_provider = _first_managed_provider(provider_management, ProviderCapability.DAILY_SUMMARY)
             rationale = solar.reason if solar else "Solar capability is unavailable."
             source = "HouseholdCapabilitySummary.solar"
-            if solar_provider:
+            provider_ready = bool(solar and solar.usable)
+            action_href = "#system"
+            if managed_provider:
+                provider_ready = (
+                    managed_provider.configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED
+                    and managed_provider.lifecycle_state in {ProviderConnectionStatus.CONNECTED, ProviderConnectionStatus.CONFIGURED, ProviderConnectionStatus.SYNCING}
+                    and managed_provider.sync_state in {ProviderSyncState.SYNCED, ProviderSyncState.UNKNOWN}
+                )
+                rationale = f"{rationale} Provider: {managed_provider.name} ({managed_provider.lifecycle_state.value})."
+                source = "ProviderManagement.solar"
+                action_href = f"#system-provider-{managed_provider.provider_id}"
+            elif solar_provider:
                 rationale = f"{rationale} Provider: {solar_provider.name} ({solar_provider.status.value})."
                 source = "ProviderRegistry.solar"
             tasks.append(
                 task(
                     "connect_solar_provider",
                     "Connect solar provider",
-                    bool(solar and solar.usable),
+                    provider_ready,
                     "high",
                     "5 minutes",
-                    "Go to System",
-                    "#system",
+                    "Manage Provider",
+                    action_href,
                     rationale,
                     source,
                 )
@@ -205,6 +220,7 @@ class SetupEngine:
         capability_summary: HouseholdCapabilitySummary,
         import_sources: list[ImportSource],
         provider_registry: Optional[ProviderRegistry],
+        provider_management: Optional[ProviderManager] = None,
     ) -> list[SetupTask]:
         tasks = []
         if self._household_declares("ev"):
@@ -219,8 +235,15 @@ class SetupEngine:
                 provider.name
                 for provider in (provider_registry.providers_with_capability(ProviderCapability.IMPORT_ONLY) if provider_registry else [])
             ]
+            managed_imports = [
+                provider for provider in (provider_management.providers() if provider_management else [])
+                if ProviderCapability.IMPORT_ONLY in provider.capability_summary.capabilities
+            ]
+            if managed_imports:
+                import_provider_names = [provider.name for provider in managed_imports]
             if import_provider_names:
                 detail = f"{detail} Import providers: {', '.join(import_provider_names)}."
+            href = f"#system-provider-{managed_imports[0].provider_id}" if managed_imports else "#imports"
             tasks.append(
                 task(
                     "upload_ev_charging_history",
@@ -228,10 +251,10 @@ class SetupEngine:
                     bool(ev and ev.usable),
                     "high",
                     "4 minutes",
-                    "Upload EV History",
-                    "#imports",
+                    "Manage Provider",
+                    href,
                     detail,
-                    "Import Framework",
+                    "ProviderManagement.imports" if managed_imports else "Import Framework",
                 )
             )
         return tasks
@@ -344,6 +367,19 @@ def _first_provider(
     if not provider_registry:
         return None
     providers = provider_registry.providers_with_capability(capability)
+    return providers[0] if providers else None
+
+
+def _first_managed_provider(
+    provider_management: Optional[ProviderManager],
+    capability: ProviderCapability,
+):
+    if not provider_management:
+        return None
+    providers = [
+        provider for provider in provider_management.providers()
+        if capability in provider.capability_summary.capabilities
+    ]
     return providers[0] if providers else None
 
 

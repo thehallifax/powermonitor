@@ -49,6 +49,7 @@ from engine.models import (
     SetupTask,
 )
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
+from engine.provider_manager import ProviderManager, build_provider_management
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from presentation.briefing import BriefingItem
@@ -424,6 +425,13 @@ def dashboard_data(
         capability_summary=capability_summary,
         import_sources=import_sources,
     )
+    provider_management = build_provider_management(
+        provider_registry=provider_registry,
+        health=health,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        settings=settings,
+    )
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -433,6 +441,7 @@ def dashboard_data(
         recommendations=recommendations,
         settings=settings,
         provider_registry=provider_registry,
+        provider_management=provider_management,
         now=generated_at,
     )
     return {
@@ -443,6 +452,8 @@ def dashboard_data(
         "capability_summary": capability_summary.as_dict(),
         "provider_registry": provider_registry.as_dict(),
         "provider_status": provider_registry.status_by_provider(),
+        "provider_management": provider_management.as_dict(),
+        "providers": provider_management.as_dict(),
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -491,6 +502,31 @@ def dashboard_data(
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
     }
+
+
+def provider_management_data() -> ProviderManager:
+    settings = load_settings()
+    current_day = local_today()
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        engine = data_engine(conn)
+        capability_summary = engine.get_household_capability_summary(current_day, settings)
+        health = health_data(conn, current_day, settings)
+        provider_observations = engine.get_provider_observation_summary()
+        promotion_summary = engine.promote_provider_observations()
+    provider_registry = build_provider_registry(
+        settings=settings,
+        health=health,
+        capability_summary=capability_summary,
+        import_sources=setup_import_sources(),
+    )
+    return build_provider_management(
+        provider_registry=provider_registry,
+        health=health,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        settings=settings,
+    )
 
 
 def setup_logging() -> None:
@@ -3170,6 +3206,41 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
     """
 
 
+def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
+    if not provider_management:
+        return ""
+    rows = []
+    for provider in provider_management.providers():
+        data = provider.as_dict()
+        capabilities = ", ".join(
+            capability.replace("_", " ").title()
+            for capability in data["capability_summary"].get("capabilities", [])
+        ) or "No capabilities"
+        diagnostics = data.get("diagnostics", {})
+        last_sync = diagnostics.get("last_successful_sync") or "Never synced"
+        tone = "good" if data["lifecycle_state"] in {"CONNECTED", "SYNCING", "CONFIGURED"} else "bad"
+        actions = " ".join(
+            f'<span class="chip">{html.escape(action)}</span>'
+            for action in data.get("actions", [])[:4]
+        )
+        rows.append(
+            f"""
+            <div id="system-provider-{html.escape(provider.provider_id)}" class="completeness-row {tone}">
+              <span>{html.escape(provider.name)}</span>
+              <strong>{html.escape(data["lifecycle_state"].replace("_", " ").title())}</strong>
+              <small>Last sync: {html.escape(str(last_sync))}. Collector: {html.escape(str(data["health"].get("collector_status") or "unknown").title())}. Capabilities: {html.escape(capabilities)}.</small>
+              <small>{actions}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Provider Management</h3><span>{len(rows)} providers</span></div>
+      <div class="completeness-grid">{''.join(rows)}</div>
+    </div>
+    """
+
+
 def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
         return ""
@@ -3257,6 +3328,7 @@ def system_page_html(
     capability_summary=None,
     setup: Optional[SetupChecklist] = None,
     provider_registry: Optional[ProviderRegistry] = None,
+    provider_management: Optional[ProviderManager] = None,
     provider_observations: Optional[dict] = None,
     promotion_summary: Optional[dict] = None,
     context=None,
@@ -3287,7 +3359,7 @@ def system_page_html(
         {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Continuous Setup Engine readiness", "good" if setup and setup.progress.complete else "grid")}
       </div>
       <div class="system-grid">
-        {provider_registry_html(provider_registry)}
+        {provider_management_html(provider_management)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3316,6 +3388,8 @@ def imports_page_html(
     capability_summary=None,
     setup: Optional[SetupChecklist] = None,
     provider_registry: Optional[ProviderRegistry] = None,
+    provider_management: Optional[ProviderManager] = None,
+    provider_observations: Optional[dict] = None,
 ) -> str:
     try:
         history = history if history is not None else data_engine().get_import_history()
@@ -3372,22 +3446,40 @@ def imports_page_html(
         if setup_task_rows else ""
     )
     import_providers = (
+        [provider for provider in provider_management.providers() if ProviderCapability.IMPORT_ONLY in provider.capability_summary.capabilities]
+        if provider_management else
         provider_registry.providers_with_capability(ProviderCapability.IMPORT_ONLY)
         if provider_registry else []
     )
     provider_rows = "".join(
         f"""
-        <div class="completeness-row {'good' if provider.available else 'bad'}">
+        <div class="completeness-row {'good' if getattr(provider, 'lifecycle_state', None) and provider.lifecycle_state.value != 'NOT_CONFIGURED' else 'bad'}">
           <span>{html.escape(provider.name)}</span>
-          <strong>{html.escape(provider.status.value.title())}</strong>
+          <strong>{html.escape(getattr(getattr(provider, 'lifecycle_state', None), 'value', getattr(getattr(provider, 'status', None), 'value', 'unknown')).replace("_", " ").title())}</strong>
           <small>{html.escape(provider.note or 'Import provider metadata')}</small>
         </div>
         """
         for provider in import_providers
     )
+    observation_rows = ""
+    if provider_observations:
+        observation_rows = "".join(
+            f"""
+            <div class="completeness-row neutral">
+              <span>{html.escape(str(item.get("provider_id") or "Unknown provider"))}</span>
+              <strong>{html.escape(str(item.get("observation_type") or "Observation").replace("_", " ").title())}</strong>
+              <small>{html.escape(str(item.get("capability") or ""))}</small>
+            </div>
+            """
+            for item in provider_observations.get("latest", [])[:6]
+        )
     provider_html = (
-        f'<div class="system-card"><div class="chart-heading"><h3>Supported import providers</h3><span>Provider Registry</span></div><div class="completeness-grid">{provider_rows}</div></div>'
+        f'<div class="system-card"><div class="chart-heading"><h3>Supported import providers</h3><span>Provider Management</span></div><div class="completeness-grid">{provider_rows}</div></div>'
         if provider_rows else ""
+    )
+    observation_html = (
+        f'<div class="system-card"><div class="chart-heading"><h3>Observation providers</h3><span>Latest provider-created observations</span></div><div class="completeness-grid">{observation_rows}</div></div>'
+        if observation_rows else ""
     )
 
     return f"""
@@ -3395,6 +3487,7 @@ def imports_page_html(
       <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Ocular EV charging history</p></div>
       {capability_note}
       {provider_html}
+      {observation_html}
       {setup_task_html_block}
       <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
         <label><span>Supported file</span><input type="file" name="import_file" accept=".xlsx,.xlsm" required></label>
@@ -3666,6 +3759,13 @@ def write_html(
         capability_summary=capability_summary,
         import_sources=import_sources,
     )
+    provider_management = build_provider_management(
+        provider_registry=provider_registry,
+        health=health,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        settings=settings,
+    )
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -3675,6 +3775,7 @@ def write_html(
         recommendations=recommendations,
         settings=settings,
         provider_registry=provider_registry,
+        provider_management=provider_management,
         now=generated_dt,
     )
     glance = build_glance_state(
@@ -3743,11 +3844,11 @@ def write_html(
   </section>
   <section id="imports" class="page">
     <div class="page-heading"><h2>Upload household data</h2><p>Preview and import supported local household exports.</p></div>
-    {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry)}
+    {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_observations, promotion_summary, household_current_context)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_observations, promotion_summary, household_current_context)}
   </section>
 """
     )

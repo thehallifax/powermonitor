@@ -146,6 +146,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             elif path in {"/api/setup_progress", "/api/setup_tasks", "/api/setup_sections"}:
                 self.send_json(self.setup_api_payload(path, params))
+            elif path == "/api/providers":
+                self.send_json(self.providers_payload())
+            elif path.startswith("/api/providers/"):
+                self.send_json(self.provider_payload(path))
             elif path == "/api/compare":
                 self.send_json(self.compare_data(params))
             elif path == "/api/health":
@@ -167,6 +171,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.preview_import()
             elif request.path == "/imports/commit":
                 self.commit_import()
+            elif request.path.startswith("/api/providers/"):
+                self.update_provider(request.path)
             else:
                 self.send_json({"error": "not found"}, status=404)
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
@@ -208,6 +214,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         key = path.rsplit("/", 1)[-1]
         return {key: data[key]}
+
+    def providers_payload(self) -> dict:
+        return {"providers": report.provider_management_data().as_dict()["providers"]}
+
+    def provider_payload(self, path: str) -> dict:
+        parts = [part for part in path.split("/") if part]
+        if len(parts) not in {3, 4}:
+            return {"error": "not found"}
+        provider_id = parts[2]
+        manager = report.provider_management_data()
+        provider = manager.get(provider_id)
+        if provider is None:
+            return {"error": "provider not found"}
+        if len(parts) == 4 and parts[3] == "diagnostics":
+            return {"diagnostics": provider.diagnostics.as_dict()}
+        if len(parts) == 4 and parts[3] == "test":
+            return {"test": manager.test_connection(provider_id).as_dict()}
+        return {"provider": provider.as_dict()}
+
+    def update_provider(self, path: str) -> None:
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 4:
+            self.send_json({"error": "not found"}, status=404)
+            return
+        provider_id = parts[2]
+        action = parts[3]
+        manager = report.provider_management_data()
+        if action == "test":
+            self.send_json({"test": manager.test_connection(provider_id).as_dict()})
+            return
+        payload = self.read_request_payload()
+        if action == "configure":
+            self.send_json({"configuration": manager.configure(provider_id, payload).as_dict()})
+            return
+        provider = manager.transition(provider_id, action)
+        self.send_json({"provider": provider.as_dict(), "requested_action": action})
+
+    def read_request_payload(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw_body = self.rfile.read(length).decode("utf-8")
+        if not raw_body:
+            return {}
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" in content_type:
+            payload = json.loads(raw_body)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object")
+            return payload
+        return {key: values[-1] for key, values in parse_qs(raw_body).items()}
 
     def update_recommendation_lifecycle(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
