@@ -6,6 +6,10 @@ from engine.evidence_quality import EvidenceQuality
 from engine.models import Advisor, AdvisorCollection, EvidenceTrail, FinancialImpact
 from engine.notification_engine import (
     NotificationEngine,
+    NotificationPreferences,
+    NotificationPriority,
+    NotificationQuietHours,
+    NotificationRulePreference,
     NotificationSuppressionReason,
     NotificationType,
 )
@@ -179,6 +183,68 @@ class NotificationEngineTests(unittest.TestCase):
         self.assertEqual(data["candidates"][0]["household_id"], "household_b")
         self.assertIn("ready_count", data)
         self.assertIn("suppression_counts", data)
+
+    def test_preferences_suppress_disabled_notification_type(self):
+        readiness = self.build(
+            state_changes=[state_change("entered_low_cost_window")],
+            preferences=NotificationPreferences(
+                rule_preferences=[
+                    NotificationRulePreference(NotificationType.LOW_COST_WINDOW_STARTED, enabled=False)
+                ]
+            ),
+        )
+
+        candidate = [
+            item for item in readiness.candidates
+            if item.notification_type == NotificationType.LOW_COST_WINDOW_STARTED
+        ][0]
+        self.assertEqual(candidate.suppression_reason, NotificationSuppressionReason.TYPE_DISABLED)
+
+    def test_preferences_suppress_below_priority_threshold(self):
+        readiness = self.build(
+            state_changes=[state_change("entered_low_cost_window")],
+            preferences=NotificationPreferences(priority_threshold=NotificationPriority.HIGH),
+        )
+
+        candidate = [
+            item for item in readiness.candidates
+            if item.notification_type == NotificationType.LOW_COST_WINDOW_STARTED
+        ][0]
+        self.assertEqual(candidate.suppression_reason, NotificationSuppressionReason.BELOW_PRIORITY_THRESHOLD)
+
+    def test_quiet_hours_suppress_non_critical_candidates(self):
+        readiness = self.build(
+            state_changes=[state_change("entered_peak")],
+            preferences=NotificationPreferences(
+                quiet_hours=NotificationQuietHours(enabled=True, start="11:00", end="13:00")
+            ),
+        )
+
+        candidate = [
+            item for item in readiness.candidates
+            if item.notification_type == NotificationType.PEAK_PERIOD_STARTED
+        ][0]
+        self.assertEqual(candidate.suppression_reason, NotificationSuppressionReason.QUIET_HOURS)
+
+    def test_recent_sent_history_suppresses_duplicate_within_cooldown(self):
+        readiness = self.build(
+            state_changes=[state_change("entered_peak", event_key="peak-now")],
+            history=[
+                {
+                    "stable_key": "peak-now",
+                    "notification_type": "peak_period_started",
+                    "delivery_state": "sent",
+                    "sent_at": "2026-06-27T11:30:00+08:00",
+                }
+            ],
+            preferences=NotificationPreferences(cooldown_minutes=60),
+        )
+
+        candidate = [
+            item for item in readiness.candidates
+            if item.notification_type == NotificationType.PEAK_PERIOD_STARTED
+        ][0]
+        self.assertEqual(candidate.suppression_reason, NotificationSuppressionReason.RECENT_DUPLICATE)
 
 
 if __name__ == "__main__":

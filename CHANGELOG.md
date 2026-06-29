@@ -1,5 +1,22 @@
 # Changelog
 
+## PB-019 - Notification Preferences and History
+
+- Added household-scoped notification preferences for global enablement,
+  per-type rules, priority thresholds, quiet hours, channel preference
+  placeholders, and cooldown periods.
+- Added notification history persistence for candidate keys, delivery state,
+  sent/suppressed timestamps, suppression reasons, priority, expiry, and
+  evidence summaries.
+- Updated `NotificationEngine` to suppress candidates based on preferences,
+  quiet hours, disabled types, priority thresholds, expired candidates, and
+  recently sent duplicate history.
+- Exposed `notification_preferences`, `notification_history`, and
+  preference-filtered `notification_readiness_summary` through dashboard/API
+  output.
+- Added System notification preference/history cards and an optional Setup
+  notice when notifications are disabled.
+
 ## PB-018 - Notification Readiness
 
 - Added `NotificationEngine` with typed notification candidates, priorities,

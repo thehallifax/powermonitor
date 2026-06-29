@@ -407,6 +407,8 @@ def dashboard_data(
     state_change_detection = snapshot_engine.detect_and_persist_state_changes()
     state_change_summary = snapshot_engine.get_state_change_summary()
     recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
+    notification_preferences = snapshot_engine.get_notification_preferences()
+    notification_history = snapshot_engine.get_recent_notification_history(limit=50)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -479,9 +481,13 @@ def dashboard_data(
         context=household_current_context,
         advisors=advisors,
         setup=setup_checklist,
+        preferences=notification_preferences,
+        history=notification_history,
         now=generated_at,
     )
     notification_readiness_summary = notification_readiness.as_dict()
+    snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
+    notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
@@ -502,6 +508,8 @@ def dashboard_data(
         "state_change_detection": state_change_detection,
         "state_change_summary": state_change_summary,
         "recent_state_changes": recent_state_changes,
+        "notification_preferences": notification_preferences.as_dict(),
+        "notification_history": notification_history_summary,
         "notification_candidates": notification_readiness_summary["candidates"],
         "notification_readiness_summary": notification_readiness_summary,
         "provider_observations": provider_observations,
@@ -2883,6 +2891,7 @@ def setup_page_html(
     setup: Optional[SetupChecklist],
     settings: Optional[Settings] = None,
     promotion_summary: Optional[dict] = None,
+    notification_preferences: Optional[dict] = None,
 ) -> str:
     if not setup:
         return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
@@ -2896,8 +2905,17 @@ def setup_page_html(
           <a href="#system">Review System</a>
         </section>
         """
+    notification_notice = ""
+    if notification_preferences and not notification_preferences.get("enabled"):
+        notification_notice = """
+        <section class="setup-progress-card">
+          <div><span>Optional</span><h3>Notifications are disabled.</h3><p>Notification readiness will still be evaluated locally, but no notification type is enabled.</p></div>
+          <a href="#system">Review Notifications</a>
+        </section>
+        """
     return f"""
     {conflict_notice}
+    {notification_notice}
     {billing_cycle_setup_html(settings)}
     <section class="report-section compact-section">
       <div class="section-title">
@@ -3514,6 +3532,54 @@ def notification_readiness_html(summary: Optional[dict]) -> str:
     """
 
 
+def notification_preferences_html(preferences: Optional[dict]) -> str:
+    if not preferences:
+        return ""
+    quiet = preferences.get("quiet_hours") or {}
+    rows = {
+        "Notifications": "Enabled" if preferences.get("enabled") else "Disabled",
+        "Priority threshold": preferences.get("priority_threshold"),
+        "Quiet hours": f"{quiet.get('start')} to {quiet.get('end')}" if quiet.get("enabled") else "Off",
+        "Channel": preferences.get("channel_preference"),
+        "Cooldown": f"{preferences.get('cooldown_minutes')} minutes",
+        "Type rules": len(preferences.get("rule_preferences") or []),
+    }
+    row_html = "".join(
+        f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'Unknown').replace('_', ' ').title())}</strong></div>"
+        for label, value in rows.items()
+    )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Notification Preferences</h3><span>Local only</span></div>
+      <div class="config-grid">{row_html}</div>
+    </div>
+    """
+
+
+def notification_history_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return ""
+    rows = []
+    for item in summary.get("latest", [])[:6]:
+        state = str(item.get("delivery_state") or "pending")
+        tone = "bad" if state == "suppressed" else "good" if state == "sent" else "neutral"
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(item.get("notification_type") or "notification").replace('_', ' ').title())}</span>
+              <strong>{html.escape(state.title())}</strong>
+              <small>{html.escape(str(item.get("suppression_reason") or "none").replace('_', ' ').title())} - {html.escape(str(item.get("updated_at") or item.get("created_at") or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Notification History</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No notification history recorded yet.</p>'}</div>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3531,6 +3597,8 @@ def system_page_html(
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
     notification_readiness_summary: Optional[dict] = None,
+    notification_preferences: Optional[dict] = None,
+    notification_history: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3562,7 +3630,9 @@ def system_page_html(
         {provider_runtime_html(provider_runtime)}
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {state_changes_html(state_change_summary)}
+        {notification_preferences_html(notification_preferences)}
         {notification_readiness_html(notification_readiness_summary)}
+        {notification_history_html(notification_history)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3939,6 +4009,8 @@ def write_html(
     state_change_detection = snapshot_engine.detect_and_persist_state_changes()
     state_change_summary = snapshot_engine.get_state_change_summary()
     recent_state_changes = snapshot_engine.get_recent_state_changes(limit=10)
+    notification_preferences = snapshot_engine.get_notification_preferences()
+    notification_history = snapshot_engine.get_recent_notification_history(limit=50)
     charging_advice = build_charging_advice(
         today_summary,
         billing_summary,
@@ -4012,9 +4084,13 @@ def write_html(
         context=household_current_context,
         advisors=advisors,
         setup=setup_checklist,
+        preferences=notification_preferences,
+        history=notification_history,
         now=generated_dt,
     )
     notification_readiness_summary = notification_readiness.as_dict()
+    snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
+    notification_history_summary = snapshot_engine.get_notification_history_summary()
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -4046,7 +4122,7 @@ def write_html(
   </section>
   <section id="setup" class="page">
     <div class="page-heading"><h2>Finish household setup</h2><p>Continuous readiness guidance generated from household capability, import, collector, and recommendation state.</p></div>
-    {setup_page_html(setup_checklist, settings, promotion_summary)}
+    {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict())}
   </section>
   <section id="recommendations" class="page">
     <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
@@ -4086,7 +4162,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
     )

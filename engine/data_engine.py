@@ -30,6 +30,16 @@ from .models import (
     HouseholdMembership,
     TimelineEntry,
 )
+from .notification_engine import (
+    NotificationChannel,
+    NotificationDeliveryState,
+    NotificationPreferences,
+    NotificationPriority,
+    NotificationQuietHours,
+    NotificationRulePreference,
+    NotificationSuppressionReason,
+    NotificationType,
+)
 from .provider_framework import (
     ProviderCapability,
     ProviderFreshness,
@@ -386,6 +396,7 @@ class DataEngine:
         DataEngine._ensure_promotion_table(conn)
         DataEngine._ensure_household_state_snapshot_table(conn)
         DataEngine._ensure_state_change_table(conn)
+        DataEngine._ensure_notification_tables(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -548,6 +559,75 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_notification_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_preferences (
+                household_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                priority_threshold TEXT NOT NULL,
+                quiet_hours_enabled INTEGER NOT NULL,
+                quiet_hours_start TEXT NOT NULL,
+                quiet_hours_end TEXT NOT NULL,
+                quiet_hours_timezone TEXT NOT NULL,
+                channel_preference TEXT NOT NULL,
+                cooldown_minutes INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_rule_preferences (
+                rule_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                notification_type TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                cooldown_minutes INTEGER,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_rule_household_type
+            ON notification_rule_preferences(household_id, notification_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_history (
+                history_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                stable_key TEXT NOT NULL,
+                candidate_id TEXT,
+                notification_type TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                sent_at TEXT,
+                suppressed_at TEXT,
+                suppression_reason TEXT,
+                expires_at TEXT NOT NULL,
+                evidence_summary TEXT NOT NULL,
+                delivery_state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_history_household_key
+            ON notification_history(household_id, stable_key, notification_type)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notification_history_household_created
+            ON notification_history(household_id, created_at DESC)
+            """
+        )
+
+    @staticmethod
     def _ensure_household_scoping(conn: sqlite3.Connection) -> None:
         scoped_tables = (
             "readings",
@@ -559,6 +639,8 @@ class DataEngine:
             "promotion_decisions",
             "household_state_snapshots",
             "state_changes",
+            "notification_rule_preferences",
+            "notification_history",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -1746,6 +1828,248 @@ class DataEngine:
             "latest": changes[: min(limit, 10)],
         }
 
+    def get_notification_preferences(self) -> NotificationPreferences:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_notification_tables(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    household_id,
+                    enabled,
+                    priority_threshold,
+                    quiet_hours_enabled,
+                    quiet_hours_start,
+                    quiet_hours_end,
+                    quiet_hours_timezone,
+                    channel_preference,
+                    cooldown_minutes,
+                    updated_at
+                FROM notification_preferences
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            rules = conn.execute(
+                """
+                SELECT notification_type, enabled, cooldown_minutes
+                FROM notification_rule_preferences
+                WHERE household_id = ?
+                ORDER BY notification_type
+                """,
+                (household_id,),
+            ).fetchall()
+            return self._normalise_notification_preferences(row, rules, household_id)
+
+        return self._with_connection(query)
+
+    def persist_notification_preferences(self, preferences: Any) -> dict[str, Any]:
+        household_id = self._active_household_id()
+        prefs = self._coerce_notification_preferences(preferences, household_id)
+
+        def upsert(conn):
+            DataEngine._ensure_notification_tables(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO notification_preferences (
+                    household_id,
+                    enabled,
+                    priority_threshold,
+                    quiet_hours_enabled,
+                    quiet_hours_start,
+                    quiet_hours_end,
+                    quiet_hours_timezone,
+                    channel_preference,
+                    cooldown_minutes,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(household_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    priority_threshold = excluded.priority_threshold,
+                    quiet_hours_enabled = excluded.quiet_hours_enabled,
+                    quiet_hours_start = excluded.quiet_hours_start,
+                    quiet_hours_end = excluded.quiet_hours_end,
+                    quiet_hours_timezone = excluded.quiet_hours_timezone,
+                    channel_preference = excluded.channel_preference,
+                    cooldown_minutes = excluded.cooldown_minutes,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    household_id,
+                    1 if prefs.enabled else 0,
+                    prefs.priority_threshold.value,
+                    1 if prefs.quiet_hours.enabled else 0,
+                    prefs.quiet_hours.start,
+                    prefs.quiet_hours.end,
+                    prefs.quiet_hours.timezone,
+                    prefs.channel_preference.value,
+                    int(prefs.cooldown_minutes),
+                    now,
+                ),
+            )
+            for rule in prefs.rule_preferences:
+                rule_id = hashlib.sha256(f"{household_id}|{rule.notification_type.value}".encode("utf-8")).hexdigest()[:32]
+                conn.execute(
+                    """
+                    INSERT INTO notification_rule_preferences (
+                        rule_id,
+                        household_id,
+                        notification_type,
+                        enabled,
+                        cooldown_minutes,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(household_id, notification_type) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        cooldown_minutes = excluded.cooldown_minutes,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        rule_id,
+                        household_id,
+                        rule.notification_type.value,
+                        1 if rule.enabled else 0,
+                        rule.cooldown_minutes,
+                        now,
+                    ),
+                )
+            conn.commit()
+            return self.get_notification_preferences().as_dict()
+
+        return self._with_connection(upsert)
+
+    def persist_notification_history(
+        self,
+        candidates: list[Any],
+        *,
+        delivery_state: Optional[NotificationDeliveryState] = None,
+    ) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def upsert(conn):
+            DataEngine._ensure_notification_tables(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            rows = []
+            for candidate in candidates:
+                item = candidate.as_dict() if hasattr(candidate, "as_dict") else dict(candidate)
+                if item.get("household_id") != household_id:
+                    continue
+                notification_type = str(item.get("type") or item.get("notification_type"))
+                stable_key = str(item.get("source_event_key") or item.get("candidate_id") or notification_type)
+                state = delivery_state or (
+                    NotificationDeliveryState.PENDING if item.get("ready") else NotificationDeliveryState.SUPPRESSED
+                )
+                suppressed_at = now if state == NotificationDeliveryState.SUPPRESSED else None
+                sent_at = now if state == NotificationDeliveryState.SENT else None
+                suppression_reason = str(item.get("suppression_reason") or NotificationSuppressionReason.NONE.value)
+                evidence_summary = self._notification_evidence_summary(item.get("evidence") or [])
+                history_id = hashlib.sha256(f"{household_id}|{stable_key}|{notification_type}".encode("utf-8")).hexdigest()[:32]
+                row = (
+                    history_id,
+                    household_id,
+                    stable_key,
+                    item.get("candidate_id"),
+                    notification_type,
+                    str(item.get("priority") or NotificationPriority.LOW.value),
+                    str(item.get("created_at") or now),
+                    sent_at,
+                    suppressed_at,
+                    suppression_reason,
+                    str(item.get("valid_until") or item.get("expires_at") or now),
+                    evidence_summary,
+                    state.value,
+                    now,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO notification_history (
+                        history_id,
+                        household_id,
+                        stable_key,
+                        candidate_id,
+                        notification_type,
+                        priority,
+                        created_at,
+                        sent_at,
+                        suppressed_at,
+                        suppression_reason,
+                        expires_at,
+                        evidence_summary,
+                        delivery_state,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(household_id, stable_key, notification_type) DO UPDATE SET
+                        candidate_id = excluded.candidate_id,
+                        priority = excluded.priority,
+                        created_at = excluded.created_at,
+                        sent_at = COALESCE(excluded.sent_at, notification_history.sent_at),
+                        suppressed_at = excluded.suppressed_at,
+                        suppression_reason = excluded.suppression_reason,
+                        expires_at = excluded.expires_at,
+                        evidence_summary = excluded.evidence_summary,
+                        delivery_state = CASE
+                            WHEN notification_history.delivery_state = 'sent' AND excluded.delivery_state = 'suppressed'
+                            THEN notification_history.delivery_state
+                            ELSE excluded.delivery_state
+                        END,
+                        updated_at = excluded.updated_at
+                    """,
+                    row,
+                )
+                rows.append(row)
+            conn.commit()
+            return [self._normalise_notification_history(row) for row in rows]
+
+        return self._with_connection(upsert)
+
+    def get_recent_notification_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            DataEngine._ensure_notification_tables(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    history_id,
+                    household_id,
+                    stable_key,
+                    candidate_id,
+                    notification_type,
+                    priority,
+                    created_at,
+                    sent_at,
+                    suppressed_at,
+                    suppression_reason,
+                    expires_at,
+                    evidence_summary,
+                    delivery_state,
+                    updated_at
+                FROM notification_history
+                WHERE household_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            return [self._normalise_notification_history(row) for row in rows]
+
+        return self._with_connection(query)
+
+    def get_notification_history_summary(self, limit: int = 20) -> dict[str, Any]:
+        history = self.get_recent_notification_history(limit=limit)
+        counts: dict[str, int] = {}
+        for item in history:
+            state = item["delivery_state"]
+            counts[state] = counts.get(state, 0) + 1
+        return {
+            "household_id": self._active_household_id(),
+            "count": len(history),
+            "counts": counts,
+            "latest": history[: min(limit, 10)],
+        }
+
     def promote_provider_observations(
         self,
         *,
@@ -2113,6 +2437,107 @@ class DataEngine:
             "evidence": evidence,
             "created_at": row[11],
         }
+
+    @staticmethod
+    def _normalise_notification_preferences(row, rule_rows, household_id: str) -> NotificationPreferences:
+        rules = [
+            NotificationRulePreference(
+                notification_type=NotificationType(rule[0]),
+                enabled=bool(rule[1]),
+                cooldown_minutes=rule[2],
+            )
+            for rule in (rule_rows or [])
+        ]
+        if not row:
+            return NotificationPreferences(
+                household_id=household_id,
+                enabled=False,
+                rule_preferences=rules,
+            )
+        return NotificationPreferences(
+            household_id=row[0],
+            enabled=bool(row[1]),
+            priority_threshold=NotificationPriority(row[2]),
+            quiet_hours=NotificationQuietHours(
+                enabled=bool(row[3]),
+                start=row[4],
+                end=row[5],
+                timezone=row[6],
+            ),
+            channel_preference=NotificationChannel(row[7]),
+            cooldown_minutes=int(row[8]),
+            rule_preferences=rules,
+        )
+
+    @staticmethod
+    def _normalise_notification_history(row) -> dict[str, Any]:
+        return {
+            "history_id": row[0],
+            "household_id": row[1],
+            "stable_key": row[2],
+            "candidate_id": row[3],
+            "notification_type": row[4],
+            "priority": row[5],
+            "created_at": row[6],
+            "sent_at": row[7],
+            "suppressed_at": row[8],
+            "suppression_reason": row[9] or NotificationSuppressionReason.NONE.value,
+            "expires_at": row[10],
+            "evidence_summary": row[11],
+            "delivery_state": row[12],
+            "updated_at": row[13],
+        }
+
+    @staticmethod
+    def _coerce_notification_preferences(value, household_id: str) -> NotificationPreferences:
+        if isinstance(value, NotificationPreferences):
+            if value.household_id == household_id:
+                return value
+            return NotificationPreferences(
+                household_id=household_id,
+                enabled=value.enabled,
+                priority_threshold=value.priority_threshold,
+                quiet_hours=value.quiet_hours,
+                channel_preference=value.channel_preference,
+                cooldown_minutes=value.cooldown_minutes,
+                rule_preferences=value.rule_preferences,
+            )
+        data = dict(value or {})
+        quiet = data.get("quiet_hours") or {}
+        rules = [
+            NotificationRulePreference(
+                notification_type=NotificationType(rule["notification_type"]),
+                enabled=bool(rule.get("enabled", True)),
+                cooldown_minutes=rule.get("cooldown_minutes"),
+            )
+            for rule in data.get("rule_preferences", [])
+        ]
+        return NotificationPreferences(
+            household_id=household_id,
+            enabled=bool(data.get("enabled", False)),
+            priority_threshold=NotificationPriority(data.get("priority_threshold", NotificationPriority.LOW.value)),
+            quiet_hours=NotificationQuietHours(
+                enabled=bool(quiet.get("enabled", False)),
+                start=str(quiet.get("start", "22:00")),
+                end=str(quiet.get("end", "07:00")),
+                timezone=str(quiet.get("timezone", "local")),
+            ),
+            channel_preference=NotificationChannel(data.get("channel_preference", NotificationChannel.LOCAL_UI.value)),
+            cooldown_minutes=int(data.get("cooldown_minutes", 120)),
+            rule_preferences=rules,
+        )
+
+    @staticmethod
+    def _notification_evidence_summary(evidence: list[dict[str, Any]]) -> str:
+        summaries = []
+        for item in evidence[:3]:
+            if isinstance(item, dict):
+                summary = item.get("summary") or item.get("source")
+            else:
+                summary = str(item)
+            if summary:
+                summaries.append(str(summary))
+        return "; ".join(summaries) or "No notification evidence supplied."
 
     @staticmethod
     def _household_state_material_hash(state: dict[str, Any], context_summary: Optional[dict[str, Any]]) -> str:

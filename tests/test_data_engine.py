@@ -15,6 +15,14 @@ from engine.provider_framework import (
     ProviderType,
 )
 from engine.household_state_engine import HouseholdStateEngine
+from engine.notification_engine import (
+    NotificationDeliveryState,
+    NotificationPreferences,
+    NotificationPriority,
+    NotificationQuietHours,
+    NotificationRulePreference,
+    NotificationType,
+)
 
 
 @dataclass
@@ -307,6 +315,83 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertEqual(engine_b.get_recent_state_changes(), [])
         self.assertEqual(engine_b.get_state_change_summary()["count"], 0)
+
+    def test_notification_preferences_are_persisted(self):
+        saved = self.engine.persist_notification_preferences(
+            NotificationPreferences(
+                enabled=True,
+                priority_threshold=NotificationPriority.HIGH,
+                quiet_hours=NotificationQuietHours(enabled=True, start="21:00", end="06:00"),
+                cooldown_minutes=45,
+                rule_preferences=[
+                    NotificationRulePreference(NotificationType.SOLAR_OPPORTUNITY, enabled=False)
+                ],
+            )
+        )
+        loaded = self.engine.get_notification_preferences()
+
+        self.assertTrue(saved["enabled"])
+        self.assertEqual(loaded.priority_threshold, NotificationPriority.HIGH)
+        self.assertTrue(loaded.quiet_hours.enabled)
+        self.assertEqual(loaded.cooldown_minutes, 45)
+        self.assertFalse(loaded.rule_for(NotificationType.SOLAR_OPPORTUNITY).enabled)
+
+    def test_notification_history_is_persisted_and_summarised(self):
+        candidates = [
+            {
+                "candidate_id": "candidate-1",
+                "household_id": "default_household",
+                "source_event_key": "event-1",
+                "type": "peak_period_started",
+                "priority": "medium",
+                "created_at": "2026-06-27T12:00:00+08:00",
+                "valid_until": "2026-06-27T13:00:00+08:00",
+                "ready": False,
+                "suppression_reason": "quiet_hours",
+                "evidence": [{"summary": "Peak period started."}],
+            }
+        ]
+
+        saved = self.engine.persist_notification_history(candidates)
+        recent = self.engine.get_recent_notification_history()
+        summary = self.engine.get_notification_history_summary()
+
+        self.assertEqual(saved[0]["delivery_state"], NotificationDeliveryState.SUPPRESSED.value)
+        self.assertEqual(recent[0]["stable_key"], "event-1")
+        self.assertEqual(summary["counts"][NotificationDeliveryState.SUPPRESSED.value], 1)
+        self.assertEqual(summary["latest"][0]["evidence_summary"], "Peak period started.")
+
+    def test_notification_preferences_and_history_are_household_scoped(self):
+        from engine.models import Account, Household, HouseholdContext, HouseholdMembership
+
+        household_b = HouseholdContext(
+            Account("acct_b", "Account B", "local"),
+            Household("household_b", "Household B", "Australia/Perth"),
+            HouseholdMembership("acct_b", "household_b", "owner"),
+        )
+        engine_b = DataEngine(connection=self.conn, household_context=household_b)
+
+        self.engine.persist_notification_preferences(NotificationPreferences(enabled=True))
+        self.engine.persist_notification_history(
+            [
+                {
+                    "candidate_id": "candidate-1",
+                    "household_id": "default_household",
+                    "source_event_key": "event-1",
+                    "type": "collector_stale",
+                    "priority": "critical",
+                    "created_at": "2026-06-27T12:00:00+08:00",
+                    "valid_until": "2026-06-27T13:00:00+08:00",
+                    "ready": True,
+                    "evidence": [],
+                }
+            ],
+            delivery_state=NotificationDeliveryState.SENT,
+        )
+
+        self.assertTrue(self.engine.get_notification_preferences().enabled)
+        self.assertFalse(engine_b.get_notification_preferences().enabled)
+        self.assertEqual(engine_b.get_recent_notification_history(), [])
 
     def test_provider_observations_are_promoted_to_trusted_read_models(self):
         self.engine.persist_provider_observations(

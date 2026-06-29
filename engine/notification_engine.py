@@ -46,6 +46,10 @@ class NotificationChannel(str, Enum):
 
 class NotificationSuppressionReason(str, Enum):
     NONE = "none"
+    NOTIFICATIONS_DISABLED = "notifications_disabled"
+    TYPE_DISABLED = "type_disabled"
+    BELOW_PRIORITY_THRESHOLD = "below_priority_threshold"
+    QUIET_HOURS = "quiet_hours"
     LOW_EVIDENCE_QUALITY = "low_evidence_quality"
     RECENT_DUPLICATE = "recent_duplicate"
     STALE_RECOMMENDATION = "stale_recommendation"
@@ -53,6 +57,67 @@ class NotificationSuppressionReason(str, Enum):
     SETUP_INCOMPLETE = "setup_incomplete"
     NOT_ACTIONABLE = "not_actionable"
     EXPIRED = "expired"
+
+
+class NotificationDeliveryState(str, Enum):
+    PENDING = "pending"
+    SUPPRESSED = "suppressed"
+    SENT = "sent"
+    EXPIRED = "expired"
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True)
+class NotificationRulePreference:
+    notification_type: NotificationType
+    enabled: bool = True
+    cooldown_minutes: Optional[int] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "notification_type": self.notification_type.value,
+            "enabled": self.enabled,
+            "cooldown_minutes": self.cooldown_minutes,
+        }
+
+
+@dataclass(frozen=True)
+class NotificationQuietHours:
+    enabled: bool = False
+    start: str = "22:00"
+    end: str = "07:00"
+    timezone: str = "local"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class NotificationPreferences:
+    household_id: str = "default_household"
+    enabled: bool = True
+    priority_threshold: NotificationPriority = NotificationPriority.LOW
+    quiet_hours: NotificationQuietHours = field(default_factory=NotificationQuietHours)
+    channel_preference: NotificationChannel = NotificationChannel.LOCAL_UI
+    cooldown_minutes: int = 120
+    rule_preferences: list[NotificationRulePreference] = field(default_factory=list)
+
+    def rule_for(self, notification_type: NotificationType) -> Optional[NotificationRulePreference]:
+        for rule in self.rule_preferences:
+            if rule.notification_type == notification_type:
+                return rule
+        return None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "household_id": self.household_id,
+            "enabled": self.enabled,
+            "priority_threshold": self.priority_threshold.value,
+            "quiet_hours": self.quiet_hours.as_dict(),
+            "channel_preference": self.channel_preference.value,
+            "cooldown_minutes": self.cooldown_minutes,
+            "rule_preferences": [rule.as_dict() for rule in self.rule_preferences],
+        }
 
 
 @dataclass(frozen=True)
@@ -143,6 +208,40 @@ class NotificationReadiness:
         }
 
 
+@dataclass(frozen=True)
+class NotificationHistory:
+    history_id: str
+    household_id: str
+    stable_key: str
+    candidate_id: Optional[str]
+    notification_type: NotificationType
+    priority: NotificationPriority
+    created_at: str
+    expires_at: str
+    delivery_state: NotificationDeliveryState
+    evidence_summary: str
+    sent_at: Optional[str] = None
+    suppressed_at: Optional[str] = None
+    suppression_reason: NotificationSuppressionReason = NotificationSuppressionReason.NONE
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "history_id": self.history_id,
+            "household_id": self.household_id,
+            "stable_key": self.stable_key,
+            "candidate_id": self.candidate_id,
+            "notification_type": self.notification_type.value,
+            "priority": self.priority.value,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "delivery_state": self.delivery_state.value,
+            "evidence_summary": self.evidence_summary,
+            "sent_at": self.sent_at,
+            "suppressed_at": self.suppressed_at,
+            "suppression_reason": self.suppression_reason.value,
+        }
+
+
 class NotificationEngine:
     """Converts platform intelligence outputs into notification candidates."""
 
@@ -162,24 +261,28 @@ class NotificationEngine:
         advisors: Optional[Any] = None,
         setup: Optional[Any] = None,
         evidence_quality: Optional[Any] = None,
+        preferences: Optional[NotificationPreferences] = None,
+        history: Optional[list[Any]] = None,
         recently_notified_event_keys: Optional[set[str]] = None,
         now: Optional[datetime] = None,
     ) -> NotificationReadiness:
         created = now or datetime.now().astimezone()
         household_id = self._household_id(household_state_snapshot, context, advisors, setup)
+        preferences = preferences or NotificationPreferences(household_id=household_id)
         quality = self._evidence_quality(evidence_quality, context, advisors, household_state_snapshot)
-        recent_keys = recently_notified_event_keys or set()
+        recent_keys = set(recently_notified_event_keys or set())
+        recent_keys.update(self._recent_history_keys(history or [], preferences, created))
         candidates: list[NotificationCandidate] = []
         seen_keys: set[str] = set()
 
         for change in state_changes or []:
-            candidate = self._candidate_from_state_change(change, household_id, created, quality, context, advisors, setup, recent_keys)
+            candidate = self._candidate_from_state_change(change, household_id, created, quality, context, advisors, setup, preferences, recent_keys)
             self._append_candidate(candidates, seen_keys, candidate)
 
-        for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, recent_keys):
+        for candidate in self._candidates_from_advisors(advisors, household_id, created, quality, context, setup, preferences, recent_keys):
             self._append_candidate(candidates, seen_keys, candidate)
 
-        setup_candidate = self._candidate_from_setup(setup, household_id, created, quality, recent_keys)
+        setup_candidate = self._candidate_from_setup(setup, household_id, created, quality, preferences, recent_keys)
         self._append_candidate(candidates, seen_keys, setup_candidate)
 
         candidates.sort(key=self._candidate_sort_key)
@@ -198,6 +301,7 @@ class NotificationEngine:
         context: Optional[Any],
         advisors: Optional[Any],
         setup: Optional[Any],
+        preferences: NotificationPreferences,
         recent_keys: set[str],
     ) -> Optional[NotificationCandidate]:
         change_type = str(self._get(change, "change_type") or "")
@@ -235,7 +339,7 @@ class NotificationEngine:
             evidence,
             event_key,
         )
-        reason = self._suppression_reason(candidate, quality, context, setup, advisors, recent_keys)
+        reason = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
         return self._with_suppression(candidate, reason)
 
     def _candidates_from_advisors(
@@ -246,6 +350,7 @@ class NotificationEngine:
         quality: EvidenceQuality,
         context: Optional[Any],
         setup: Optional[Any],
+        preferences: NotificationPreferences,
         recent_keys: set[str],
     ) -> list[NotificationCandidate]:
         candidates = []
@@ -292,7 +397,7 @@ class NotificationEngine:
                 f"advisor:{advisor_id}:{status}",
                 expires_at=self._get(advisor, "next_review_time"),
             )
-            reason = self._suppression_reason(candidate, quality, context, setup, advisors, recent_keys)
+            reason = self._suppression_reason(candidate, quality, context, setup, advisors, preferences, recent_keys)
             candidates.append(self._with_suppression(candidate, reason))
         return candidates
 
@@ -302,6 +407,7 @@ class NotificationEngine:
         household_id: str,
         created: datetime,
         quality: EvidenceQuality,
+        preferences: NotificationPreferences,
         recent_keys: set[str],
     ) -> Optional[NotificationCandidate]:
         progress = self._get(setup, "progress")
@@ -323,7 +429,7 @@ class NotificationEngine:
             "setup:incomplete",
             ttl=timedelta(hours=12),
         )
-        reason = NotificationSuppressionReason.RECENT_DUPLICATE if candidate.source_event_key in recent_keys else NotificationSuppressionReason.NONE
+        reason = self._preference_suppression(candidate, preferences, recent_keys)
         return self._with_suppression(candidate, reason)
 
     def _suppression_reason(
@@ -333,6 +439,7 @@ class NotificationEngine:
         context: Optional[Any],
         setup: Optional[Any],
         advisors: Optional[Any],
+        preferences: NotificationPreferences,
         recent_keys: set[str],
     ) -> NotificationSuppressionReason:
         now = self._parse_datetime(candidate.created_at)
@@ -341,6 +448,9 @@ class NotificationEngine:
             valid_until = valid_until.replace(tzinfo=now.tzinfo)
         if valid_until <= now:
             return NotificationSuppressionReason.EXPIRED
+        preference_reason = self._preference_suppression(candidate, preferences, recent_keys)
+        if preference_reason != NotificationSuppressionReason.NONE:
+            return preference_reason
         if candidate.source_event_key in recent_keys:
             return NotificationSuppressionReason.RECENT_DUPLICATE
         if quality in {EvidenceQuality.LOW, EvidenceQuality.UNKNOWN} and candidate.notification_type not in self.health_notification_types:
@@ -517,6 +627,82 @@ class NotificationEngine:
     def _collector_stale_beyond_threshold(self, candidate: NotificationCandidate) -> bool:
         return bool(candidate.evidence)
 
+    def _preference_suppression(
+        self,
+        candidate: NotificationCandidate,
+        preferences: NotificationPreferences,
+        recent_keys: set[str],
+    ) -> NotificationSuppressionReason:
+        if not preferences.enabled:
+            return NotificationSuppressionReason.NOTIFICATIONS_DISABLED
+        rule = preferences.rule_for(candidate.notification_type)
+        if rule and not rule.enabled:
+            return NotificationSuppressionReason.TYPE_DISABLED
+        if self._priority_rank(candidate.priority) < self._priority_rank(preferences.priority_threshold):
+            return NotificationSuppressionReason.BELOW_PRIORITY_THRESHOLD
+        if self._quiet_hours_active(preferences.quiet_hours, candidate.created_at) and candidate.priority != NotificationPriority.CRITICAL:
+            return NotificationSuppressionReason.QUIET_HOURS
+        if candidate.source_event_key in recent_keys:
+            return NotificationSuppressionReason.RECENT_DUPLICATE
+        return NotificationSuppressionReason.NONE
+
+    def _recent_history_keys(
+        self,
+        history: list[Any],
+        preferences: NotificationPreferences,
+        now: datetime,
+    ) -> set[str]:
+        keys = set()
+        for item in history:
+            state = str(self._get(item, "delivery_state") or "").lower()
+            if state != NotificationDeliveryState.SENT.value:
+                continue
+            sent_at = self._get(item, "sent_at") or self._get(item, "created_at")
+            if not sent_at:
+                continue
+            sent = self._parse_datetime(str(sent_at))
+            if now.tzinfo and sent.tzinfo is None:
+                sent = sent.replace(tzinfo=now.tzinfo)
+            notification_type = self._notification_type(self._get(item, "notification_type"))
+            cooldown = preferences.cooldown_minutes
+            if notification_type:
+                rule = preferences.rule_for(notification_type)
+                if rule and rule.cooldown_minutes is not None:
+                    cooldown = rule.cooldown_minutes
+            if now - sent <= timedelta(minutes=max(int(cooldown or 0), 0)):
+                key = self._get(item, "stable_key") or self._get(item, "source_event_key") or self._get(item, "candidate_id")
+                if key:
+                    keys.add(str(key))
+        return keys
+
+    def _quiet_hours_active(self, quiet_hours: NotificationQuietHours, created_at: str) -> bool:
+        if not quiet_hours.enabled:
+            return False
+        current = self._parse_datetime(created_at).time()
+        start = self._parse_time(quiet_hours.start)
+        end = self._parse_time(quiet_hours.end)
+        if start <= end:
+            return start <= current < end
+        return current >= start or current < end
+
+    def _priority_rank(self, priority: NotificationPriority) -> int:
+        return {
+            NotificationPriority.LOW: 0,
+            NotificationPriority.MEDIUM: 1,
+            NotificationPriority.HIGH: 2,
+            NotificationPriority.CRITICAL: 3,
+        }[priority]
+
+    def _notification_type(self, value: Any) -> Optional[NotificationType]:
+        if isinstance(value, NotificationType):
+            return value
+        if value:
+            try:
+                return NotificationType(str(value))
+            except ValueError:
+                return None
+        return None
+
     def _candidate_sort_key(self, candidate: NotificationCandidate) -> tuple[int, str, str]:
         priority_rank = {
             NotificationPriority.CRITICAL: 0,
@@ -529,3 +715,7 @@ class NotificationEngine:
 
     def _parse_datetime(self, value: str) -> datetime:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    def _parse_time(self, value: str):
+        hour, minute = str(value or "00:00").split(":")[:2]
+        return datetime.strptime(f"{int(hour):02d}:{int(minute):02d}", "%H:%M").time()
