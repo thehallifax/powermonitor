@@ -50,6 +50,7 @@ from engine.models import (
     SetupTask,
     TimelineEntry,
 )
+from engine.notification_engine import NotificationEngine
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
 from engine.provider_runtime import ProviderRuntime
@@ -472,6 +473,15 @@ def dashboard_data(
         provider_management=provider_management,
         now=generated_at,
     )
+    notification_readiness = NotificationEngine().build(
+        state_changes=recent_state_changes,
+        household_state_snapshot=latest_state_snapshot,
+        context=household_current_context,
+        advisors=advisors,
+        setup=setup_checklist,
+        now=generated_at,
+    )
+    notification_readiness_summary = notification_readiness.as_dict()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     return {
         "generated_at": generated_at.isoformat(timespec="seconds"),
@@ -492,6 +502,8 @@ def dashboard_data(
         "state_change_detection": state_change_detection,
         "state_change_summary": state_change_summary,
         "recent_state_changes": recent_state_changes,
+        "notification_candidates": notification_readiness_summary["candidates"],
+        "notification_readiness_summary": notification_readiness_summary,
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -3476,6 +3488,32 @@ def state_changes_html(summary: Optional[dict]) -> str:
     """
 
 
+def notification_readiness_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return ""
+    rows = []
+    for candidate in summary.get("candidates", [])[:8]:
+        ready = bool(candidate.get("ready"))
+        priority = str(candidate.get("priority") or "low")
+        tone = "bad" if priority in {"high", "critical"} and ready else "good" if ready else "neutral"
+        status = "Ready" if ready else str(candidate.get("suppression_reason") or "suppressed").replace("_", " ").title()
+        rows.append(
+            f"""
+            <div class="completeness-row {tone}">
+              <span>{html.escape(str(candidate.get("title") or "Notification candidate"))}</span>
+              <strong>{html.escape(status)}</strong>
+              <small>{html.escape(str(candidate.get("message") or ""))}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Notification Readiness</h3><span>{int(summary.get("ready_count") or 0)} ready / {int(summary.get("count") or 0)} candidates</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No notification candidates are ready.</p>'}</div>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3492,6 +3530,7 @@ def system_page_html(
     latest_household_state_snapshot=None,
     recent_household_state_snapshots=None,
     state_change_summary: Optional[dict] = None,
+    notification_readiness_summary: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3523,6 +3562,7 @@ def system_page_html(
         {provider_runtime_html(provider_runtime)}
         {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {state_changes_html(state_change_summary)}
+        {notification_readiness_html(notification_readiness_summary)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3966,6 +4006,15 @@ def write_html(
         provider_management=provider_management,
         now=generated_dt,
     )
+    notification_readiness = NotificationEngine().build(
+        state_changes=recent_state_changes,
+        household_state_snapshot=latest_state_snapshot,
+        context=household_current_context,
+        advisors=advisors,
+        setup=setup_checklist,
+        now=generated_dt,
+    )
+    notification_readiness_summary = notification_readiness.as_dict()
     glance = build_glance_state(
         billing_summary=billing_summary,
         charging_advice=charging_advice,
@@ -4037,7 +4086,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary)}
   </section>
 """
     )

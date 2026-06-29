@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-018 - Notification Readiness
+
+- Added `NotificationEngine` with typed notification candidates, priorities,
+  channels, evidence, readiness summaries, expiry, and suppression reasons.
+- Converted state changes, advisors, setup readiness, household context, and
+  evidence quality into local-only notification candidates without sending any
+  external alerts.
+- Added suppression rules for weak evidence, duplicate events, expired
+  recommendations, irrelevant context, and incomplete setup.
+- Exposed `notification_candidates` and `notification_readiness_summary`
+  through dashboard/API output.
+- Added a System page Notification Readiness summary card and tests for
+  candidate generation, suppression, duplicate handling, expiry, household
+  scoping, and serialization.
+
 ## PB-017 - State Change Detection
 
 - Added `StateChangeEngine` to compare persisted Household State snapshots and
