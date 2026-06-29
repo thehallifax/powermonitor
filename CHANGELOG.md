@@ -1,5 +1,20 @@
 # Changelog
 
+## PB-015 - Household State Engine
+
+- Added `HouseholdStateEngine` with canonical household state models for power,
+  energy, tariff, EV, solar, battery, billing, collector, and evidence facts.
+- Added serialized `household_state` to dashboard/API output and a System page
+  Household State section for current tariff, import/export, solar, EV,
+  battery, billing, collector, and evidence confidence.
+- Updated Context Engine to consume Household State when available instead of
+  reconstructing current conditions directly from raw summaries.
+- Threaded provider management, provider runtime, provider observations, and
+  promotion summaries into Household State without querying providers directly.
+- Added Household State tests for creation, tariff transitions, billing
+  transitions, provider/collector health changes, evidence degradation, context
+  integration, and API serialization.
+
 ## PB-014 - Provider Adapter Runtime
 
 - Added `ProviderRuntime` with standard adapter execution, schedules, retry

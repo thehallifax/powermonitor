@@ -129,8 +129,11 @@ class ContextEngine:
         settings: Any,
         health: dict[str, Any],
         now: Optional[datetime] = None,
+        household_state: Any = None,
     ) -> HouseholdContext:
         observed_at = now or datetime.now().astimezone()
+        if household_state is not None:
+            return self._from_household_state(household_state, settings, observed_at)
         rates = import_rates(settings)
         bucket = current_tariff_bucket(observed_at)
         current_rate = rates.get(bucket)
@@ -163,6 +166,62 @@ class ContextEngine:
             data_sources_used=self._data_sources(settings, health, evidence),
             freshness=freshness,
         )
+
+    def _from_household_state(self, household_state: Any, settings: Any, observed_at: datetime) -> HouseholdContext:
+        rates = getattr(household_state.tariff, "import_rates", None) or import_rates(settings)
+        bucket = household_state.tariff.active_bucket
+        next_window = next_lower_cost_window(observed_at, bucket, rates) if rates else None
+        lowest_window = lowest_cost_window(observed_at, bucket, rates) if rates else None
+        evidence = EvidenceContext(getattr(household_state.evidence, "evidence_context", "INSUFFICIENT"))
+        freshness = household_state.evidence.freshness
+        time_context = self._time_context(observed_at)
+        solar_context = self._solar_context_from_state(household_state, time_context, evidence)
+        tariff_context = self._tariff_context(bucket, rates)
+        billing_context = self._billing_context_from_state(household_state, observed_at)
+        charging_context = self._charging_context(evidence, tariff_context, next_window or TariffWindow(bucket, TARIFF_LABELS.get(bucket, bucket), observed_at, household_state.tariff.active_rate), observed_at)
+        confidence = ContextConfidence(getattr(household_state.evidence, "confidence", "UNKNOWN"))
+        return HouseholdContext(
+            observed_at=observed_at.astimezone().isoformat(timespec="seconds"),
+            time=time_context,
+            solar=solar_context,
+            tariff=tariff_context,
+            charging=charging_context,
+            billing=billing_context,
+            evidence=evidence,
+            confidence=confidence,
+            confidence_reason=self._confidence_reason(confidence, evidence, freshness, bool(rates)),
+            current_tariff_bucket=bucket,
+            current_tariff_label=household_state.tariff.active_label,
+            current_tariff_rate=household_state.tariff.active_rate,
+            next_lower_cost_window=next_window.display(observed_at) if next_window else household_state.tariff.next_lower_cost_window,
+            lowest_cost_window=lowest_window.display(observed_at) if lowest_window else household_state.tariff.lowest_cost_window,
+            daylight=time_context in {TimeContext.MORNING, TimeContext.MIDDAY, TimeContext.AFTERNOON},
+            data_sources_used=tuple(household_state.evidence.data_sources_used),
+            freshness=freshness,
+        )
+
+    def _solar_context_from_state(self, household_state: Any, time_context: TimeContext, evidence: EvidenceContext) -> SolarContext:
+        if evidence == EvidenceContext.INSUFFICIENT:
+            return SolarContext.UNKNOWN
+        if time_context == TimeContext.NIGHT:
+            return SolarContext.SOLAR_IMPOSSIBLE
+        if household_state.solar.producing is False:
+            return SolarContext.LOW_SOLAR_DAY
+        if household_state.solar.exported_kwh_today >= 0.5 and household_state.solar.export_pct_today >= 15:
+            return SolarContext.SOLAR_SURPLUS_POSSIBLE
+        if household_state.solar.producing or household_state.solar.generated_kwh_today > 0:
+            return SolarContext.SOLAR_AVAILABLE
+        return SolarContext.UNKNOWN
+
+    def _billing_context_from_state(self, household_state: Any, observed_at: datetime) -> BillingContext:
+        if household_state.billing.reading_days <= 2:
+            return BillingContext.NEW_BILLING_PERIOD
+        period_end = household_state.billing.period_end
+        if period_end:
+            end_date = date.fromisoformat(period_end)
+            if 0 <= (end_date - observed_at.date()).days <= 3:
+                return BillingContext.BILL_END_APPROACHING
+        return BillingContext.ON_TRACK
 
     def _time_context(self, observed_at: datetime) -> TimeContext:
         current_time = observed_at.astimezone().time()

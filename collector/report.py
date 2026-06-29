@@ -30,6 +30,7 @@ from engine.decision_engine import (
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
+from engine.household_state_engine import HouseholdStateEngine
 from engine.models import (
     Account,
     Advisor,
@@ -358,12 +359,41 @@ def dashboard_data(
         settings,
     )
     generated_at = datetime.now().astimezone()
+    import_sources = setup_import_sources()
+    provider_registry = build_provider_registry(
+        settings=settings,
+        health=health,
+        capability_summary=capability_summary,
+        import_sources=import_sources,
+    )
+    provider_management = build_provider_management(
+        provider_registry=provider_registry,
+        health=health,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        settings=settings,
+    )
+    provider_runtime = provider_runtime_data()
+    household_state = HouseholdStateEngine().build(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=settings,
+        health=health,
+        capability_summary=capability_summary,
+        provider_management=provider_management,
+        provider_runtime=provider_runtime,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        household_id=household_context.household.household_id,
+        now=generated_at,
+    )
     household_current_context = ContextEngine().build(
         today_summary=today_summary,
         billing_summary=billing_summary,
         settings=settings,
         health=health,
         now=generated_at,
+        household_state=household_state,
     )
     charging_advice = build_charging_advice(
         today_summary,
@@ -419,21 +449,6 @@ def dashboard_data(
     )
     briefing = briefing_engine(household_context).build(advisors, current_day, context=household_current_context)
     goals = goals_engine(household_context).evaluate(advisors)
-    import_sources = setup_import_sources()
-    provider_registry = build_provider_registry(
-        settings=settings,
-        health=health,
-        capability_summary=capability_summary,
-        import_sources=import_sources,
-    )
-    provider_management = build_provider_management(
-        provider_registry=provider_registry,
-        health=health,
-        provider_observations=provider_observations,
-        promotion_summary=promotion_summary,
-        settings=settings,
-    )
-    provider_runtime = provider_runtime_data()
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -458,6 +473,7 @@ def dashboard_data(
         "providers": provider_management.as_dict(),
         "provider_runtime": provider_runtime.as_dict(),
         "runtime": provider_runtime.as_dict(),
+        "household_state": household_state.as_dict(),
         "provider_observations": provider_observations,
         "promotion_summary": promotion_summary,
         "conflict_summary": promotion_summary["conflict_summary"],
@@ -3359,6 +3375,34 @@ def context_summary_html(context) -> str:
     """
 
 
+def household_state_html(household_state) -> str:
+    if not household_state:
+        return ""
+    data = household_state.as_dict() if hasattr(household_state, "as_dict") else dict(household_state)
+    rows = {
+        "Current tariff": data.get("tariff", {}).get("active_label"),
+        "Import/export": data.get("power", {}).get("import_export_state"),
+        "Solar": "Producing" if data.get("solar", {}).get("producing") else "Not producing" if data.get("solar", {}).get("producing") is False else "Unknown",
+        "EV": data.get("ev", {}).get("charging_source") or "Unknown",
+        "Battery": data.get("battery", {}).get("state"),
+        "Billing day": data.get("billing", {}).get("day_of_period"),
+        "Collector": data.get("collector", {}).get("status"),
+        "Evidence": data.get("evidence", {}).get("confidence"),
+    }
+    row_html = "".join(
+        f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'Unknown').replace('_', ' ').title())}</strong></div>"
+        for label, value in rows.items()
+    )
+    sources = ", ".join(data.get("evidence", {}).get("data_sources_used", [])) or "No sources available"
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Household State</h3><span>{html.escape(str(data.get("summary", {}).get("current_status") or "Current facts").title())}</span></div>
+      <div class="config-grid">{row_html}</div>
+      <p class="small">Sources: {html.escape(sources)}</p>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -3371,6 +3415,7 @@ def system_page_html(
     provider_observations: Optional[dict] = None,
     promotion_summary: Optional[dict] = None,
     context=None,
+    household_state=None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -3400,6 +3445,7 @@ def system_page_html(
       <div class="system-grid">
         {provider_management_html(provider_management)}
         {provider_runtime_html(provider_runtime)}
+        {household_state_html(household_state)}
         {provider_observations_html(provider_observations)}
         {promotion_summary_html(promotion_summary)}
         {context_summary_html(context)}
@@ -3730,12 +3776,41 @@ def write_html(
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
     overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
+    import_sources = setup_import_sources()
+    provider_registry = build_provider_registry(
+        settings=settings,
+        health=health,
+        capability_summary=capability_summary,
+        import_sources=import_sources,
+    )
+    provider_management = build_provider_management(
+        provider_registry=provider_registry,
+        health=health,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        settings=settings,
+    )
+    provider_runtime = provider_runtime_data()
+    household_state = HouseholdStateEngine().build(
+        today_summary=today_summary,
+        billing_summary=billing_summary,
+        settings=settings,
+        health=health,
+        capability_summary=capability_summary,
+        provider_management=provider_management,
+        provider_runtime=provider_runtime,
+        provider_observations=provider_observations,
+        promotion_summary=promotion_summary,
+        household_id=household_context.household.household_id,
+        now=generated_dt,
+    )
     household_current_context = ContextEngine().build(
         today_summary=today_summary,
         billing_summary=billing_summary,
         settings=settings,
         health=health,
         now=generated_dt,
+        household_state=household_state,
     )
     charging_advice = build_charging_advice(
         today_summary,
@@ -3792,21 +3867,6 @@ def write_html(
     )
     briefing = briefing_engine(household_context).build(advisors, local_today(), context=household_current_context)
     goals = goals_engine(household_context).evaluate(advisors)
-    import_sources = setup_import_sources()
-    provider_registry = build_provider_registry(
-        settings=settings,
-        health=health,
-        capability_summary=capability_summary,
-        import_sources=import_sources,
-    )
-    provider_management = build_provider_management(
-        provider_registry=provider_registry,
-        health=health,
-        provider_observations=provider_observations,
-        promotion_summary=promotion_summary,
-        settings=settings,
-    )
-    provider_runtime = provider_runtime_data()
     setup_checklist = setup_engine(household_context).build_checklist(
         capability_summary,
         collector_health=health,
@@ -3889,7 +3949,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state)}
   </section>
 """
     )
