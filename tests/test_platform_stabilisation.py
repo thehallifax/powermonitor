@@ -88,7 +88,7 @@ class PlatformStabilisationTests(unittest.TestCase):
                 "decision": decision,
                 "energy_score": score,
                 "timeline": {"entries": [timeline_entry]},
-                "ev_session_analytics": {"recommendations": [decision]},
+                "ev_session_analytics": {"recommendations": []},
             }
         )
         payload = json.loads(encoded)
@@ -96,7 +96,7 @@ class PlatformStabilisationTests(unittest.TestCase):
         self.assertEqual(payload["decision"]["severity"], "amber")
         self.assertEqual(payload["energy_score"]["explanation"]["why_this_matters"], "Peak imports cost more.")
         self.assertEqual(payload["timeline"]["entries"][0]["event_type"], "high_peak_usage")
-        self.assertEqual(payload["ev_session_analytics"]["recommendations"][0]["action"], "Shift load.")
+        self.assertEqual(payload["ev_session_analytics"]["recommendations"], [])
 
     def test_api_summary_payload_is_valid_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:

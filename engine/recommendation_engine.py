@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Reusable recommendation engine for PowerMonitor intelligence outputs.
+"""Deprecated recommendation compatibility for older PowerMonitor outputs.
 
-The Recommendation Engine owns recommendation ranking and the shared
-presentation-agnostic recommendation model. It evaluates measured observations
-only; it does not render HTML and it does not infer appliance-specific causes.
+PB-026 retirement note:
+    User-facing action guidance must flow through DecisionEngine ->
+    HouseholdDecision -> DecisionPipeline -> RecommendationPresentation.
+    This module remains only for compatibility tests and legacy import paths.
+    Do not call it from report/API/presentation code for user actions.
 """
 
 from datetime import date, datetime, timedelta
@@ -68,7 +70,10 @@ PRIORITY_LABELS = (
 
 
 class RecommendationEngine:
-    """Deterministic recommendation generator and ranker."""
+    """Deprecated deterministic recommendation generator.
+
+    Compatibility only. New product surfaces must use DecisionPipeline.
+    """
 
     name = "recommendation_engine"
 
@@ -568,6 +573,7 @@ def generate_recommendations(
     include_inactive: bool = False,
     household_context: Optional[HouseholdContext] = None,
 ) -> list[Recommendation]:
+    """Deprecated compatibility wrapper. Use DecisionPipeline for user actions."""
     return RecommendationEngine(household_context=household_context).generate(
         context,
         thresholds,
@@ -584,6 +590,7 @@ def generate_recommendations_from_data_engine(
     include_inactive: bool = False,
     household_context: Optional[HouseholdContext] = None,
 ) -> list[Recommendation]:
+    """Deprecated compatibility wrapper. Use DataEngine.get_household_decisions."""
     context = build_recommendation_context(
         current_summary,
         settings,
@@ -665,6 +672,7 @@ def _capability(summary: dict[str, Any], capability_id: str) -> dict[str, Any]:
 
 
 def generate_ev_session_recommendations(sessions: list[dict[str, Any]], import_rates: dict[str, float]) -> list[Recommendation]:
+    """Deprecated compatibility wrapper for legacy EV-session recommendation tests."""
     if not sessions:
         return []
     engine = RecommendationEngine()

@@ -15,6 +15,11 @@ from engine.recommendation_engine import (
     generate_recommendations_from_data_engine,
 )
 
+# Deprecated compatibility exports.
+# PB-026: user-facing action guidance must use
+# DecisionEngine -> DecisionPipeline -> RecommendationPresentation. This module
+# remains for older imports and should be removed once those callers migrate.
+
 __all__ = [
     "Decision",
     "Recommendation",

@@ -1,5 +1,23 @@
 # Changelog
 
+## PB-026 - Legacy Recommendation Retirement
+
+- Retired EV session analytics recommendation generation from report/API output;
+  EV session analytics now remains evidence-only.
+- Disabled legacy advisor-derived notification generation by default and kept it
+  available only through an explicit compatibility flag.
+- Hardened advisor compatibility wrappers so attached advisor cards use
+  Decision Pipeline action text, while unmatched advisors are marked
+  evidence-only.
+- Updated Goals Engine output so goal progress no longer reuses advisor-native
+  action wording.
+- Marked the old `RecommendationEngine`, EV-session recommendation helpers, and
+  legacy decision wrappers as deprecated compatibility surfaces.
+- Added regression tests proving API recommendations are decision-native,
+  legacy advisor fallback is disabled by default, advisor wrappers cannot
+  create independent actions, goals do not emit advisor-native actions, and
+  retained legacy paths require explicit opt-in.
+
 ## PB-025 - Decision Pipeline Cleanup
 
 - Added a canonical `DecisionPipeline` facade for the platform-owned flow from

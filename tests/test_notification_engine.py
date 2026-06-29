@@ -126,6 +126,7 @@ class NotificationEngineTests(unittest.TestCase):
             state_changes=[],
             advisors=AdvisorCollection([advisor("SOLAR", "OPPORTUNITY")]),
             context=context(solar="SOLAR_IMPOSSIBLE"),
+            allow_legacy_advisor_notifications=True,
         )
 
         candidate = readiness.candidates[0]
@@ -152,6 +153,7 @@ class NotificationEngineTests(unittest.TestCase):
         readiness = self.build(
             state_changes=[],
             advisors=AdvisorCollection([advisor("EV_CHARGING", "CHARGE_NOW", next_review_time=expired)]),
+            allow_legacy_advisor_notifications=True,
         )
 
         candidate = readiness.candidates[0]

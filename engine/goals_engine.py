@@ -75,7 +75,7 @@ class GoalsEngine:
             summary=_goal_summary(goal, progress, lead),
             supporting_advisors=[_advisor_label(advisor) for _score, advisor in known],
             supporting_evidence=evidence,
-            recommended_action=lead.recommendation,
+            recommended_action="Use active Decision Pipeline recommendations for goal-related actions.",
         )
 
 
@@ -182,7 +182,7 @@ def _unknown_progress(goal: Goal, advisors: Optional[list[Advisor]] = None) -> G
         summary=f"{goal.title} needs more advisor evidence.",
         supporting_advisors=[_advisor_label(advisor) for advisor in supporting],
         supporting_evidence=_evidence_summary(supporting),
-        recommended_action="Review again after more advisor data is available.",
+        recommended_action="Use active Decision Pipeline recommendations once enough goal evidence is available.",
     )
 
 

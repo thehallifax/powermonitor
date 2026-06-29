@@ -1400,6 +1400,12 @@ def generate_decisions(
     include_inactive: bool = False,
     household_context: Optional[HouseholdContext] = None,
 ) -> list[Decision]:
+    """Deprecated legacy Decision wrapper.
+
+    User-facing action guidance must use DecisionEngine.build() and
+    DecisionPipeline. This function remains for compatibility with older tests
+    and import paths until the legacy Recommendation model is removed.
+    """
     recommendations = generate_shared_recommendations(
         context,
         thresholds,
@@ -1476,6 +1482,11 @@ def generate_decisions_from_data_engine(
     include_inactive: bool = False,
     household_context: Optional[HouseholdContext] = None,
 ) -> list[Decision]:
+    """Deprecated legacy DataEngine recommendation wrapper.
+
+    Use DataEngine.get_household_decisions() plus DecisionPipeline for
+    user-facing actions.
+    """
     recommendations = generate_shared_recommendations_from_data_engine(
         current_summary,
         settings,
@@ -1494,6 +1505,7 @@ def generate_recommendations(
     thresholds: dict,
     household_context: Optional[HouseholdContext] = None,
 ) -> list[dict]:
+    """Deprecated compatibility wrapper returning legacy Decision dictionaries."""
     return [
         decision.as_dict()
         for decision in generate_decisions(context, thresholds, household_context=household_context)
@@ -1501,6 +1513,7 @@ def generate_recommendations(
 
 
 def generate_ev_session_decisions(sessions: list[dict], import_rates: dict) -> list[Decision]:
+    """Deprecated compatibility wrapper for old EV-session recommendation tests."""
     return [
         _validate_decision(decision)
         for decision in recommendations_to_decisions(

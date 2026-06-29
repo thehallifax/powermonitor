@@ -52,7 +52,12 @@ def explain_household_decisions(
 
 
 def attach_decision_to_advisors(advisors: list[Advisor], decisions: list[Any]) -> list[Advisor]:
-    """Attach nearest HouseholdDecision references to existing advisor cards."""
+    """Attach nearest HouseholdDecision references to existing advisor cards.
+
+    Deprecated compatibility wrapper: advisor cards may explain evidence, but
+    user action text must come from DecisionPipeline/RecommendationAdapter.
+    Remove once native advisor cards are fully replaced by advisor explanations.
+    """
 
     presentations = adapt_recommendations(decisions, advisor_explanations=advisors)
     by_advisor_type: dict[str, list[RecommendationPresentation]] = {}
@@ -64,7 +69,7 @@ def attach_decision_to_advisors(advisors: list[Advisor], decisions: list[Any]) -
     for advisor in advisors:
         candidates = by_advisor_type.get(advisor.advisor_type, [])
         if not candidates:
-            migrated.append(advisor)
+            migrated.append(_copy_advisor_without_action(advisor))
             continue
         presentation = sorted(candidates, key=lambda item: -item.display_priority)[0]
         migrated.append(_copy_advisor_with_presentation(advisor, presentation))
@@ -115,7 +120,7 @@ def _copy_advisor_with_presentation(advisor: Advisor, presentation: Recommendati
         status=advisor.status,
         headline=advisor.headline,
         summary=advisor.summary,
-        recommendation=advisor.recommendation,
+        recommendation=presentation.recommended_action,
         estimated_financial_impact=advisor.estimated_financial_impact,
         confidence=presentation.confidence,
         confidence_reason=f"{presentation.confidence} confidence from Decision Engine presentation adapter.",
@@ -127,4 +132,26 @@ def _copy_advisor_with_presentation(advisor: Advisor, presentation: Recommendati
         decision_id=presentation.decision_id,
         decision_type=(presentation.decision or {}).get("decision_type"),
         decision=presentation.decision,
+    )
+
+
+def _copy_advisor_without_action(advisor: Advisor) -> Advisor:
+    return Advisor(
+        advisor_id=advisor.advisor_id,
+        advisor_type=advisor.advisor_type,
+        status=advisor.status,
+        headline=advisor.headline,
+        summary=advisor.summary,
+        recommendation="Advisor evidence only; use Decision Pipeline recommendations for actions.",
+        estimated_financial_impact=advisor.estimated_financial_impact,
+        confidence=advisor.confidence,
+        confidence_reason=advisor.confidence_reason,
+        evidence_trail=advisor.evidence_trail,
+        freshness=advisor.freshness,
+        supporting_data_sources=advisor.supporting_data_sources,
+        next_review_time=advisor.next_review_time,
+        evidence_summary=advisor.evidence_summary,
+        decision_id=advisor.decision_id,
+        decision_type=advisor.decision_type,
+        decision=advisor.decision,
     )

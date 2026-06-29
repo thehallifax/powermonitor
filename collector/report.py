@@ -26,7 +26,6 @@ from engine.data_engine import DataEngine
 from engine.decision_engine import (
     Decision,
     generate_decisions_from_data_engine,
-    generate_ev_session_decisions,
 )
 from engine.decision_pipeline import build_decision_pipeline_output
 from engine.efficiency_advisor import EfficiencyAdvisor
@@ -897,8 +896,6 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
     longest = max(duration_sessions, key=lambda session: session["duration_minutes"]) if duration_sessions else None
     highest_power = max(power_sessions, key=lambda session: session["max_power_kw"]) if power_sessions else None
 
-    recommendations = generate_ev_session_decisions(sessions, settings.import_rates)
-
     history = sorted(sessions, key=lambda session: session.get("start_time") or "", reverse=True)
     return {
         "available": True,
@@ -926,7 +923,7 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
             "duration_sample_count": len(duration_sessions),
             "highest_power_available": bool(highest_power),
         },
-        "recommendations": recommendations,
+        "recommendations": [],
         "sessions": history,
     }
 

@@ -266,7 +266,7 @@ class NotificationEngine:
         preferences: Optional[NotificationPreferences] = None,
         history: Optional[list[Any]] = None,
         recently_notified_event_keys: Optional[set[str]] = None,
-        allow_legacy_advisor_notifications: bool = True,
+        allow_legacy_advisor_notifications: bool = False,
         now: Optional[datetime] = None,
     ) -> NotificationReadiness:
         created = now or datetime.now().astimezone()
