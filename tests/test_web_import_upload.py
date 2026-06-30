@@ -83,6 +83,28 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
+    def test_dashboard_does_not_auto_refresh_during_upload_workflow(self):
+        server, thread, base_url = start_server()
+        try:
+            response = urlopen(f"{base_url}/", timeout=10)
+            body = response.read().decode("utf-8")
+
+            self.assertIsNone(response.headers.get("Refresh"))
+            self.assertIn("will not auto-refresh", body)
+        finally:
+            stop_server(server, thread)
+
+    def test_glance_route_keeps_kiosk_refresh(self):
+        server, thread, base_url = start_server()
+        try:
+            response = urlopen(f"{base_url}/glance", timeout=10)
+            body = response.read().decode("utf-8")
+
+            self.assertEqual(response.headers.get("Refresh"), "300")
+            self.assertIn("glance-display", body)
+        finally:
+            stop_server(server, thread)
+
 
 def start_server():
     server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.DashboardHandler)

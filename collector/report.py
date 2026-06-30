@@ -2186,6 +2186,7 @@ def nav_html() -> str:
         ("system", "System"),
     )
     return (
+        '<div class="mobile-shortcuts"><a href="#home">Home</a><a href="#glance">Glance</a><a href="#setup">Setup</a><a href="#system">System</a></div>'
         '<nav class="top-nav" aria-label="Dashboard pages">'
         + "".join(f'<a href="#{page_id}">{html.escape(label)}</a>' for page_id, label in pages)
         + "</nav>"
@@ -4070,19 +4071,20 @@ def imports_page_html(
 
     return f"""
     <section class="report-section import-panel">
-      <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Ocular EV charging history</p></div>
+      <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Choose an Ocular Excel export from your phone, tablet, or Mac.</p></div>
       {capability_note}
       {provider_html}
       {observation_html}
       {setup_task_html_block}
       <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
-        <label><span>Supported file</span><input type="file" name="import_file" accept=".xlsx,.xlsm" required></label>
+        <label><span>Ocular Excel file</span><input type="file" name="import_file" accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" required></label>
         <button type="submit">Preview import</button>
       </form>
+      <p class="notice">The dashboard will not auto-refresh while you are choosing or uploading a file.</p>
     </section>
     <section class="report-section import-panel compact-section">
       <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
-      <table>
+      <table class="responsive-table">
         <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th><th>Observations</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
@@ -4557,7 +4559,6 @@ def write_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="300">
   <title>PowerMonitor Dashboard</title>
   <style>
     :root {{
@@ -4568,7 +4569,9 @@ def write_html(
     }}
     * {{ box-sizing:border-box; }}
     body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.5 -apple-system,
-      BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; }}
+      BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; overflow-x:hidden; }}
+    a,button,input,select {{ touch-action:manipulation; }}
+    input,select,button {{ max-width:100%; }}
     main {{ width:min(1180px, calc(100% - 36px)); margin:24px auto 64px; }}
     .hero {{ position:relative; overflow:hidden; padding:30px; color:#fff; border-radius:26px;
       background:linear-gradient(135deg,var(--deep) 0%,var(--deep-2) 100%); box-shadow:0 24px 60px rgba(16,42,36,.24); }}
@@ -4599,6 +4602,7 @@ def write_html(
     .top-nav {{ position:sticky; top:10px; z-index:10; display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; padding:10px; background:rgba(255,255,255,.86); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
     .top-nav a {{ padding:9px 12px; color:var(--deep-2); text-decoration:none; background:#f7faf9; border:1px solid var(--line); border-radius:999px; font-size:12px; font-weight:750; }}
     .top-nav a:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
+    .mobile-shortcuts {{ display:none; }}
     .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
     body:has(.page:target) #home {{ display:none; }} body:has(#home:target) #home {{ display:block; }}
     .page-heading {{ margin-top:18px; padding:18px 22px; background:#fff; border:1px solid var(--line); border-radius:20px; box-shadow:var(--shadow); }}
@@ -4623,7 +4627,7 @@ def write_html(
     .metric {{ position:relative; min-height:128px; padding:17px; overflow:hidden; background:var(--paper); border:1px solid var(--line); border-radius:16px; }}
     .metric::before {{ content:""; position:absolute; width:7px; height:7px; right:15px; top:15px; background:#aab8b3; border-radius:50%; box-shadow:0 0 0 5px #f1f5f3; }}
     .metric span,.metric small {{ display:block; color:var(--muted); }} .metric span {{ max-width:80%; font-size:12px; font-weight:650; }}
-    .metric strong {{ display:block; margin-top:20px; font-size:24px; line-height:1.05; letter-spacing:-.045em; }}
+    .metric strong {{ display:block; margin-top:20px; overflow-wrap:anywhere; font-size:24px; line-height:1.05; letter-spacing:-.045em; }}
     .metric small {{ margin-top:7px; font-size:10px; line-height:1.35; }}
     .metric.primary {{ grid-column:span 2; color:#fff; background:linear-gradient(135deg,#166449,#248b67); border-color:transparent; }}
     .metric.primary span,.metric.primary small {{ color:rgba(255,255,255,.7); }} .metric.primary strong {{ font-size:38px; }}
@@ -4680,7 +4684,7 @@ def write_html(
     .ev-session-recommendations ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }}
     .ev-session-recommendations li + li {{ margin-top:6px; }}
     .ev-session-history {{ margin-top:14px; }}
-    .ev-session-table-wrap {{ overflow-x:auto; }}
+    .ev-session-table-wrap {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .ev-session-history table {{ width:100%; border-collapse:collapse; min-width:760px; }}
     .ev-session-history th,.ev-session-history td {{ padding:10px 9px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; font-variant-numeric:tabular-nums; }}
     .ev-session-history th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
@@ -4812,15 +4816,17 @@ def write_html(
     .source-status p {{ margin:8px 0 0; color:var(--muted); font-size:12px; }}
     .source-status.green {{ background:#f3fbf7; border-color:#cce9dc; }} .source-status.amber {{ background:#fffaf0; border-color:#eeddb0; }} .source-status.red {{ background:#fff5f3; border-color:#f0cec8; }}
     .system-grid {{ margin-top:14px; }}
-    .system-card {{ margin-top:14px; }}
+    .system-card {{ margin-top:14px; overflow-x:auto; overflow-wrap:anywhere; -webkit-overflow-scrolling:touch; }}
     .system-card table {{ width:100%; border-collapse:collapse; }} .system-card th,.system-card td {{ padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; }}
     .system-card th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .import-panel {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .import-panel table {{ width:100%; border-collapse:collapse; }}
     .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
     .import-panel th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .import-form {{ display:grid; grid-template-columns:1fr auto; gap:12px; align-items:end; }}
     .import-form label span {{ display:block; margin-bottom:4px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .import-form input,.import-form button {{ width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
+    .import-form input[type="file"] {{ min-height:48px; }}
     .import-form button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
     .config-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }} .config-grid div {{ padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
     .completeness-grid {{ display:grid; gap:9px; }}
@@ -4868,7 +4874,7 @@ def write_html(
     .hero-summary {{ margin-top:36px; }} .hero-summary strong {{ font-size:clamp(52px,7vw,82px); }}
     .hero-note,.status-strip div {{ backdrop-filter:blur(18px); }}
     .top-nav {{ top:14px; justify-content:center; gap:6px; margin:18px 0 20px; padding:8px; border-radius:999px; background:rgba(255,255,255,.78); }}
-    .top-nav a {{ padding:10px 14px; color:#5f6b67; background:transparent; border-color:transparent; transition:all .15s ease; }}
+    .top-nav a {{ padding:10px 14px; color:#5f6b67; background:transparent; border-color:transparent; transition:all .15s ease; white-space:nowrap; }}
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
@@ -4922,23 +4928,30 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task,.setup-config-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task,.setup-config-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
-      main {{ width:min(100% - 20px,1180px); margin:10px auto 36px; }} .hero,.report-section {{ padding:20px; border-radius:20px; }}
+      body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
+      .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
+      .mobile-shortcuts a {{ min-width:0; padding:9px 7px; color:#fff; background:var(--deep); border-radius:10px; text-align:center; text-decoration:none; font-size:11px; font-weight:800; }}
+      .top-nav {{ position:relative; top:auto; margin:10px 0 14px; border-radius:16px; }}
+      .top-nav a {{ flex:0 0 auto; min-height:38px; padding:9px 12px; }}
       .hero-top,.hero-summary,.section-title {{ align-items:flex-start; flex-direction:column; }} .generated {{ text-align:left; }}
-      .hero-summary {{ margin-top:38px; }} .hero-note {{ max-width:none; }} .metrics,.insights {{ grid-template-columns:1fr; }}
+      .hero-summary {{ margin-top:30px; }} .hero-summary strong {{ font-size:44px; letter-spacing:-.04em; }} .hero-note {{ max-width:none; }} .metrics,.insights {{ grid-template-columns:1fr; }}
+      .page-heading {{ padding:18px; border-radius:18px; }} .page-heading h2 {{ font-size:26px; letter-spacing:-.03em; }}
+      .section-title h2 {{ font-size:24px; letter-spacing:-.03em; }} .section-title p {{ font-size:12px; }}
+      .metric {{ min-height:auto; padding:16px; }} .metric span {{ max-width:none; }} .metric strong,.metric.primary strong {{ margin-top:16px; font-size:26px; letter-spacing:-.03em; }}
       .status-strip {{ grid-template-columns:1fr; }}
-      .period-controls form {{ grid-template-columns:1fr; }}
+      .period-controls {{ padding:14px; }} .period-controls form {{ grid-template-columns:1fr; }} .period-controls button,.setup-config-form button,.import-form button {{ min-height:46px; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
-      .timeline-entry {{ grid-template-columns:1fr; gap:8px; }}
-      .top-nav {{ position:static; }} .top-nav a {{ flex:1 1 auto; text-align:center; }}
+      .timeline-entry {{ grid-template-columns:1fr; gap:8px; padding:15px; }} .timeline-meta small {{ width:100%; }}
       .hero-alert {{ align-items:flex-start; flex-direction:column; }}
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
       .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}
       .briefing-hero {{ flex-direction:column; padding:20px; }} .briefing-readtime {{ flex:0 0 auto; width:100%; text-align:left; }}
       .briefing-grid,.briefing-grid.two-up {{ grid-template-columns:1fr; }}
       .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}
+      .bar-label {{ min-width:0; }} .bar-label span {{ overflow-wrap:anywhere; }}
       .chart-card {{ padding:16px; }} .chart-heading {{ align-items:flex-start; flex-direction:column; gap:2px; }}
       .trend-card {{ padding:16px; }} .trend-row {{ grid-template-columns:48px 1fr 68px; gap:7px; }}
       .glance-display {{ gap:18px; padding:22px; }}
@@ -4946,8 +4959,13 @@ def write_html(
       .glance-freshness {{ width:100%; text-align:left; }}
       .glance-grid {{ grid-template-columns:1fr; }}
       .glance-panel.wide {{ grid-column:auto; }}
-      .glance-status {{ font-size:clamp(58px,18vw,90px); line-height:.9; }}
-      .glance-reason {{ font-size:clamp(24px,8vw,38px); }}
+      .glance-status {{ font-size:54px; line-height:.9; overflow-wrap:anywhere; }}
+      .glance-reason {{ font-size:25px; }}
+      .glance-panel strong {{ font-size:24px; }}
+      .glance-panel.score strong {{ font-size:54px; }}
+      .setup-progress-card {{ align-items:flex-start; flex-direction:column; }} .setup-progress-card a,.setup-task-meta a {{ width:100%; text-align:center; }}
+      .completeness-row {{ grid-template-columns:1fr; }} .completeness-row strong {{ overflow-wrap:anywhere; }}
+      .system-card table,.import-panel table {{ min-width:640px; }}
     }}
     @media print {{
       @page {{ size:A4; margin:10mm; }} * {{ print-color-adjust:exact; -webkit-print-color-adjust:exact; }}

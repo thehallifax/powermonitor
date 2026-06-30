@@ -1,5 +1,21 @@
 # Changelog
 
+## BR-001 - Mobile Experience
+
+- Added a compact mobile shortcut rail for Home, Glance, Setup, and System so
+  phone users always have a clear path back to primary dashboard areas.
+- Refined responsive dashboard CSS for narrow screens, including stacked cards,
+  safer typography, mobile-friendly controls, contained tables, touch-friendly
+  upload inputs, and reduced body-level horizontal overflow.
+- Improved Imports copy and file-picker metadata for phone/tablet uploads, with
+  explicit messaging that dashboard pages will not auto-refresh while files are
+  being selected or uploaded.
+- Moved kiosk auto-refresh to the dedicated `/glance` local web route so Glance
+  remains display-friendly without risking upload state loss on the main
+  dashboard.
+- Added regression tests for mobile navigation, upload copy, dashboard refresh
+  behavior, and Glance kiosk refresh behavior.
+
 ## PB-026 - Legacy Recommendation Retirement
 
 - Retired EV session analytics recommendation generation from report/API output;

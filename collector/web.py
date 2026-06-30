@@ -411,7 +411,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.param(params, "end"),
             glance_only=True,
         ).encode("utf-8")
-        self.send_html(content)
+        self.send_html(content, refresh_seconds=300)
 
     def serve_static_report(self) -> None:
         if not REPORT_PATH.exists():
@@ -476,12 +476,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
   <section class="panel">
     <p class="eyebrow">Import preview</p>
     <h1>{html.escape(source_name)}</h1>
-    <p>{html.escape(filename)}: {preview.valid_records} of {preview.total_records} rows valid, {preview.total_energy_kwh:.2f} kWh from {html.escape(str(preview.date_start or 'n/a'))} to {html.escape(str(preview.date_end or 'n/a'))}.</p>
+    <p>{html.escape(filename)}: {preview.valid_records} of {preview.total_records} rows are ready to import, covering {preview.total_energy_kwh:.2f} kWh from {html.escape(str(preview.date_start or 'n/a'))} to {html.escape(str(preview.date_end or 'n/a'))}.</p>
     {commit_form}
-    <a href="/#imports">Back to Imports</a>
+    <a class="secondary-link" href="/#imports">Back to Dashboard</a>
   </section>
   <section class="panel"><h2>Validation</h2><ul>{issues}</ul></section>
-  <section class="panel"><h2>Sample</h2><table><thead><tr><th>Record</th><th>Start</th><th>Energy</th></tr></thead><tbody>{samples}</tbody></table></section>
+  <section class="panel"><h2>Sample</h2><div class="table-scroll"><table><thead><tr><th>Record</th><th>Start</th><th>Energy</th></tr></thead><tbody>{samples}</tbody></table></div></section>
 </main></body></html>"""
         self.send_html(content.encode("utf-8"))
 
@@ -504,7 +504,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
   <p class="eyebrow">Imports</p>
   <h1>{html.escape(title)}</h1>
   <p>{html.escape(message)}</p>
-  <a href="/#imports">Back to Imports</a>
+  <a class="secondary-link" href="/#imports">Back to Dashboard</a>
 </section></main></body></html>"""
 
     @staticmethod
@@ -517,15 +517,19 @@ main{width:min(920px,calc(100% - 36px));margin:28px auto}
 .panel.success{border-left:6px solid #1c9b6c}.panel.error{border-left:6px solid #dc604e}
 .eyebrow{margin:0;color:#1c9b6c;font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
 h1,h2{margin:4px 0 8px} p{color:#6e6e73} a,button{display:inline-block;margin-top:10px;padding:9px 12px;color:#fff;background:#24312c;border:0;border-radius:10px;text-decoration:none;font:inherit;font-weight:750;cursor:pointer}
-table{width:100%;border-collapse:collapse} th,td{padding:9px 8px;border-bottom:1px solid #e7e7ec;text-align:left;font-size:12px} th{color:#6e6e73;font-size:9px;text-transform:uppercase;letter-spacing:.08em}
+.secondary-link{background:#eef3f0;color:#24312c}.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;min-width:520px;border-collapse:collapse} th,td{padding:9px 8px;border-bottom:1px solid #e7e7ec;text-align:left;font-size:12px} th{color:#6e6e73;font-size:9px;text-transform:uppercase;letter-spacing:.08em}
 .notice{padding:10px 12px;color:#765b20;background:#fff5da;border-radius:10px}
+@media(max-width:620px){main{width:min(100% - 16px,920px);margin:8px auto 28px}.panel{padding:18px;border-radius:16px}a,button{width:100%;text-align:center}h1{font-size:26px}}
 </style>"""
 
-    def send_html(self, content: bytes) -> None:
+    def send_html(self, content: bytes, refresh_seconds: Optional[int] = None) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
+        if refresh_seconds is not None:
+            self.send_header("Refresh", str(int(refresh_seconds)))
         self.send_security_headers()
         self.end_headers()
         self.wfile.write(content)
