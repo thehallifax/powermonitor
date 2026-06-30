@@ -87,9 +87,13 @@ def main():
         (DEFAULT_HOUSEHOLD_ID,),
     )
 
+    received = 0
     imported = 0
+    duplicates_ignored = 0
+    imported_times = []
 
     for m in data.get("measurements", []):
+        received += 1
 
         ts = m.get("measurementTime")
 
@@ -121,8 +125,16 @@ def main():
 
         import_cost = grid_to_home_kwh * RATES[bucket]
 
+        cur.execute(
+            "SELECT 1 FROM readings WHERE household_id = ? AND measurement_time = ?",
+            (DEFAULT_HOUSEHOLD_ID, ts),
+        )
+        if cur.fetchone():
+            duplicates_ignored += 1
+            continue
+
         cur.execute("""
-        INSERT OR REPLACE INTO readings (
+        INSERT INTO readings (
             household_id,
             measurement_time,
             tariff_bucket,
@@ -167,9 +179,25 @@ def main():
         ))
 
         imported += 1
+        imported_times.append(dt)
 
     conn.commit()
 
+    if imported_times:
+        start_time = min(imported_times).isoformat()
+        end_time = max(imported_times).isoformat()
+    else:
+        start_time = "none"
+        end_time = "none"
+    observations_promoted = 0
+    print(
+        "SolarEdge import complete: "
+        f"data received {received}; "
+        f"time range imported {start_time} to {end_time}; "
+        f"records imported {imported}; "
+        f"duplicates ignored {duplicates_ignored}; "
+        f"observations promoted {observations_promoted}"
+    )
     print(f"Imported {imported} readings")
 
     conn.close()

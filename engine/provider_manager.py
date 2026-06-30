@@ -150,6 +150,10 @@ class ProviderTestResult:
     available_datasets: list[str]
     warnings: list[str]
     response_time_ms: int
+    status: str = "success"
+    user_message: str = "Connection test succeeded."
+    next_step: str = "No action needed right now."
+    technical_details: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +165,10 @@ class ProviderTestResult:
             "available_datasets": list(self.available_datasets),
             "warnings": list(self.warnings),
             "response_time_ms": self.response_time_ms,
+            "status": self.status,
+            "user_message": self.user_message,
+            "next_step": self.next_step,
+            "technical_details": dict(self.technical_details),
         }
 
 
@@ -175,6 +183,12 @@ class ProviderOnboardingGuide:
     last_successful_sync: Optional[str]
     next_scheduled_sync: str
     sync_frequency: str
+    runtime_state: str
+    collector_duration: str
+    consecutive_failures: int
+    retry_countdown: str
+    health_score: int
+    health_factors: dict[str, str]
     required_information: list[str]
     why_required: str
     connection_status: str
@@ -195,6 +209,12 @@ class ProviderOnboardingGuide:
             "last_successful_sync": self.last_successful_sync,
             "next_scheduled_sync": self.next_scheduled_sync,
             "sync_frequency": self.sync_frequency,
+            "runtime_state": self.runtime_state,
+            "collector_duration": self.collector_duration,
+            "consecutive_failures": self.consecutive_failures,
+            "retry_countdown": self.retry_countdown,
+            "health_score": self.health_score,
+            "health_factors": dict(self.health_factors),
             "required_information": list(self.required_information),
             "why_required": self.why_required,
             "connection_status": self.connection_status,
@@ -250,12 +270,16 @@ class ProviderManager:
         health: Optional[dict[str, Any]] = None,
         provider_observations: Optional[dict[str, Any]] = None,
         promotion_summary: Optional[dict[str, Any]] = None,
+        runtime_status: Optional[dict[str, Any]] = None,
+        connection_testers: Optional[dict[str, Any]] = None,
         settings: Any = None,
     ) -> None:
         self.registry = registry
         self.health = health or {}
         self.provider_observations = provider_observations or {}
         self.promotion_summary = promotion_summary or {}
+        self.runtime_status = runtime_status or {}
+        self.connection_testers = connection_testers or {}
         self.settings = settings
 
     def providers(self) -> list[ManagedProvider]:
@@ -285,6 +309,9 @@ class ProviderManager:
         provider = self.get(provider_id)
         if provider is None:
             raise ValueError(f"Unknown provider: {provider_id}")
+        tester = self.connection_testers.get(provider_id)
+        if tester:
+            return self._adapter_test_connection(provider, tester)
         success = provider.lifecycle_state in {
             ProviderConnectionStatus.CONNECTED,
             ProviderConnectionStatus.SYNCING,
@@ -295,6 +322,7 @@ class ProviderManager:
             warnings.append("Provider is not configured.")
         if provider.lifecycle_state in {ProviderConnectionStatus.DEGRADED, ProviderConnectionStatus.ERROR}:
             warnings.append(provider.diagnostics.last_error or "Provider health is degraded.")
+        status = "success" if success and not warnings else "warning" if success else "failure"
         return ProviderTestResult(
             provider_id=provider.provider_id,
             success=success,
@@ -304,6 +332,38 @@ class ProviderManager:
             available_datasets=[capability.value for capability in provider.capability_summary.capabilities] if success else [],
             warnings=warnings,
             response_time_ms=0,
+            status=status,
+            user_message=_test_user_message(status, warnings),
+            next_step=_test_next_step(status),
+            technical_details={"source": "ProviderManager inferred state"},
+        )
+
+    def _adapter_test_connection(self, provider: ManagedProvider, tester: Any) -> ProviderTestResult:
+        try:
+            raw = tester()
+        except Exception as exc:
+            raw = {"success": False, "warnings": [str(exc)], "authentication_status": "not_authenticated"}
+        success = bool(raw.get("success"))
+        warnings = [str(item) for item in raw.get("warnings", []) if item]
+        status = "success" if success and not warnings else "warning" if success else "failure"
+        datasets = raw.get("available_datasets") or []
+        return ProviderTestResult(
+            provider_id=provider.provider_id,
+            success=success,
+            authentication_status=str(raw.get("authentication_status") or ("authenticated" if success else "not_authenticated")),
+            capability_detection=provider.capability_summary,
+            provider_version=str(raw.get("provider_version") or "provider-adapter"),
+            available_datasets=[str(item) for item in datasets],
+            warnings=warnings,
+            response_time_ms=int(raw.get("response_time_ms") or 0),
+            status=status,
+            user_message=_test_user_message(status, warnings),
+            next_step=_test_next_step(status),
+            technical_details={
+                "http_status": raw.get("http_status"),
+                "measurements": raw.get("measurements"),
+                "adapter": "runtime",
+            },
         )
 
     def configure(self, provider_id: str, values: dict[str, Any]) -> ProviderConfiguration:
@@ -324,15 +384,25 @@ class ProviderManager:
                     value=str(value) if value is not None else None,
                 )
             )
+        missing_required = [
+            credential.label for credential in credentials
+            if credential.required and not credential.configured
+        ]
+        lifecycle = ProviderConnectionStatus.CONFIGURED if not missing_required else ProviderConnectionStatus.NOT_CONFIGURED
+        notes = (
+            "Configuration accepted by Provider Management. Sensitive values are redacted from API responses. Run Test Connection before relying on this provider."
+            if not missing_required else
+            f"Configuration still needs: {', '.join(missing_required)}."
+        )
         return ProviderConfiguration(
             provider_id=provider.provider_id,
             provider_name=provider.name,
             provider_type=provider.provider_type,
-            lifecycle_state=ProviderConnectionStatus.CONFIGURED,
+            lifecycle_state=lifecycle,
             credentials=credentials,
             editable_fields=editable,
             enabled=True,
-            notes="Configuration accepted by Provider Management. Sensitive values are redacted from API responses.",
+            notes=notes,
         )
 
     def transition(self, provider_id: str, action: str) -> ManagedProvider:
@@ -374,7 +444,8 @@ class ProviderManager:
             freshness=diagnostics.freshness,
         )
         sync_state = _sync_state(lifecycle, diagnostics)
-        onboarding = _onboarding_guide(provider, configuration, health, diagnostics, capability_summary, sync_state)
+        runtime = _runtime_for_provider(self.runtime_status, provider.provider_id)
+        onboarding = _onboarding_guide(provider, configuration, health, diagnostics, capability_summary, sync_state, runtime)
         return ManagedProvider(
             provider_id=provider.provider_id,
             name=provider.name,
@@ -422,6 +493,8 @@ def build_provider_management(
     health: Optional[dict[str, Any]] = None,
     provider_observations: Optional[dict[str, Any]] = None,
     promotion_summary: Optional[dict[str, Any]] = None,
+    runtime_status: Optional[dict[str, Any]] = None,
+    connection_testers: Optional[dict[str, Any]] = None,
     settings: Any = None,
 ) -> ProviderManager:
     return ProviderManager(
@@ -429,6 +502,8 @@ def build_provider_management(
         health=health,
         provider_observations=provider_observations,
         promotion_summary=promotion_summary,
+        runtime_status=runtime_status,
+        connection_testers=connection_testers,
         settings=settings,
     )
 
@@ -459,6 +534,27 @@ def _sync_state(lifecycle: ProviderConnectionStatus, diagnostics: ProviderDiagno
     return ProviderSyncState.UNKNOWN
 
 
+def _runtime_for_provider(runtime_status: dict[str, Any], provider_id: str) -> dict[str, Any]:
+    providers = runtime_status.get("providers") if isinstance(runtime_status, dict) else None
+    if isinstance(providers, list):
+        for provider in providers:
+            if isinstance(provider, dict) and provider.get("provider_id") == provider_id:
+                return provider.get("health") if isinstance(provider.get("health"), dict) else provider
+    provider = runtime_status.get(provider_id) if isinstance(runtime_status, dict) else None
+    return provider if isinstance(provider, dict) else {}
+
+
+def _runtime_value(runtime: dict[str, Any], key: str) -> Any:
+    if not runtime:
+        return None
+    if key in runtime:
+        return runtime.get(key)
+    health = runtime.get("health")
+    if isinstance(health, dict):
+        return health.get(key)
+    return None
+
+
 def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
     if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
         return ["Configure", "Test Connection"]
@@ -472,6 +568,73 @@ def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
     return actions
 
 
+def _test_user_message(status: str, warnings: list[str]) -> str:
+    if status == "success":
+        return "Connection test succeeded. SolarEdge data can be used for bill and solar analysis."
+    if status == "warning":
+        detail = warnings[0] if warnings else "The provider responded, but some checks need attention."
+        return f"Connection test completed with a warning: {detail}"
+    detail = warnings[0] if warnings else "PowerMonitor could not connect to the provider."
+    return f"Connection test failed: {detail}"
+
+
+def _test_next_step(status: str) -> str:
+    if status == "success":
+        return "Keep this provider connected and watch the next scheduled sync."
+    if status == "warning":
+        return "Review the warning, then run Test Connection again after fixing it."
+    return "Refresh the SolarEdge session or update the cookie, then run Test Connection again."
+
+
+def _duration_label(value: Any) -> str:
+    if value in {None, ""}:
+        return "Not recorded"
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if milliseconds >= 1000:
+        return f"{milliseconds / 1000:.1f}s"
+    return f"{milliseconds:.0f}ms"
+
+
+def _retry_countdown(runtime: dict[str, Any]) -> str:
+    state = str(_runtime_value(runtime, "state") or "")
+    next_run = _runtime_value(runtime, "next_run_at")
+    if state == "BACKING_OFF" and next_run:
+        return f"Retry scheduled for {next_run}"
+    return "No retry scheduled"
+
+
+def _health_score(
+    state: ProviderOnboardingState,
+    health: ProviderHealth,
+    diagnostics: ProviderDiagnostics,
+    capability_summary: ProviderCapabilitySummary,
+    runtime: dict[str, Any],
+) -> tuple[int, dict[str, str]]:
+    factors = {
+        "authentication": "ok" if state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING, ProviderOnboardingState.READY_TO_CONNECT} else "needs_attention",
+        "freshness": "ok" if diagnostics.last_successful_sync or (diagnostics.freshness or {}).get("state") in {"fresh", "ok"} else "unknown",
+        "runtime_success": "ok" if str(_runtime_value(runtime, "state") or "") in {"", "IDLE", "SUCCESS"} else "needs_attention",
+        "observation_quality": "ok" if capability_summary.detected or diagnostics.observation_count else "unknown",
+        "collector_health": "ok" if str(health.collector_status or "").lower() in {"ok", "available", "configured"} else "needs_attention",
+    }
+    score = 100
+    for value in factors.values():
+        if value == "needs_attention":
+            score -= 22
+        elif value == "unknown":
+            score -= 8
+    if state == ProviderOnboardingState.ERROR:
+        score = min(score, 35)
+    if state == ProviderOnboardingState.WARNING:
+        score = min(score, 70)
+    if state in {ProviderOnboardingState.NOT_CONFIGURED, ProviderOnboardingState.CONFIGURATION_REQUIRED}:
+        score = min(score, 45)
+    return max(0, min(100, score)), factors
+
+
 def _onboarding_guide(
     provider: Provider,
     configuration: ProviderConfiguration,
@@ -479,12 +642,14 @@ def _onboarding_guide(
     diagnostics: ProviderDiagnostics,
     capability_summary: ProviderCapabilitySummary,
     sync_state: ProviderSyncState,
+    runtime: dict[str, Any],
 ) -> ProviderOnboardingGuide:
     state = _onboarding_state(configuration, health, diagnostics, sync_state)
     connected = state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING}
     healthy = state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING, ProviderOnboardingState.READY_TO_CONNECT}
     data_available = capability_summary.detected or diagnostics.observation_count > 0 or bool(diagnostics.last_successful_sync)
     required = _required_information(configuration)
+    health_score, health_factors = _health_score(state, health, diagnostics, capability_summary, runtime)
     return ProviderOnboardingGuide(
         provider_id=provider.provider_id,
         state=state,
@@ -493,8 +658,14 @@ def _onboarding_guide(
         healthy=healthy,
         data_available=data_available,
         last_successful_sync=diagnostics.last_successful_sync,
-        next_scheduled_sync=_next_sync_label(provider.provider_type),
+        next_scheduled_sync=_runtime_value(runtime, "next_run_at") or _next_sync_label(provider.provider_type),
         sync_frequency=_sync_frequency(provider.provider_type),
+        runtime_state=_runtime_value(runtime, "state") or "Not running",
+        collector_duration=_duration_label(_runtime_value(runtime, "execution_duration_ms")),
+        consecutive_failures=int(_runtime_value(runtime, "consecutive_failures") or diagnostics.failure_count or 0),
+        retry_countdown=_retry_countdown(runtime),
+        health_score=health_score,
+        health_factors=health_factors,
         required_information=required,
         why_required=_why_required(provider.provider_type),
         connection_status=_connection_status(state),
@@ -508,6 +679,7 @@ def _onboarding_guide(
             "collector_status": health.collector_status,
             "failure_count": diagnostics.failure_count,
             "last_error": diagnostics.last_error,
+            "runtime": runtime,
             "source": provider.source,
         },
     )

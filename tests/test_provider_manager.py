@@ -63,6 +63,14 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("REDACTED", serialized)
         self.assertEqual(configuration["lifecycle_state"], "CONFIGURED")
 
+    def test_required_cookie_must_be_present_before_configuration_is_ready(self):
+        manager = ProviderManager(registry(status=ProviderStatus.MISSING))
+
+        configuration = manager.configure("solaredge", {"username": "user@example.com"}).as_dict()
+
+        self.assertEqual(configuration["lifecycle_state"], "NOT_CONFIGURED")
+        self.assertIn("Cookie", configuration["notes"])
+
     def test_diagnostics_serialization_and_capability_detection(self):
         manager = ProviderManager(
             registry(),
@@ -107,6 +115,60 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(connected["authentication_status"], "authenticated")
         self.assertFalse(missing["success"])
         self.assertIn("Provider is not configured.", missing["warnings"])
+        self.assertEqual(connected["status"], "success")
+        self.assertIn("Connection test succeeded", connected["user_message"])
+
+    def test_solaredge_adapter_test_result_is_normalized_with_guidance(self):
+        manager = ProviderManager(
+            registry(),
+            connection_testers={
+                "solaredge": lambda: {
+                    "success": False,
+                    "authentication_status": "not_authenticated",
+                    "provider_version": "solaredge-monitoring-local",
+                    "available_datasets": [],
+                    "warnings": ["SolarEdge returned HTTP 403"],
+                    "response_time_ms": 125,
+                    "http_status": "403",
+                    "measurements": 0,
+                }
+            },
+        )
+
+        result = manager.test_connection("solaredge").as_dict()
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "failure")
+        self.assertIn("SolarEdge returned HTTP 403", result["user_message"])
+        self.assertIn("Refresh the SolarEdge session", result["next_step"])
+        self.assertEqual(result["technical_details"]["http_status"], "403")
+
+    def test_runtime_health_is_included_in_onboarding(self):
+        manager = ProviderManager(
+            registry(),
+            health={"status": "ok", "latest_measurement_time": "2026-06-29T10:00:00+08:00"},
+            runtime_status={
+                "providers": [
+                    {
+                        "provider_id": "solaredge",
+                        "health": {
+                            "state": "BACKING_OFF",
+                            "next_run_at": "2026-06-30T10:05:00+08:00",
+                            "execution_duration_ms": 1530,
+                            "consecutive_failures": 2,
+                        },
+                    }
+                ]
+            },
+        )
+
+        onboarding = manager.get("solaredge").as_dict()["onboarding"]
+
+        self.assertEqual(onboarding["runtime_state"], "BACKING_OFF")
+        self.assertEqual(onboarding["collector_duration"], "1.5s")
+        self.assertEqual(onboarding["consecutive_failures"], 2)
+        self.assertIn("Retry scheduled", onboarding["retry_countdown"])
+        self.assertIn("runtime_success", onboarding["health_factors"])
 
     def test_provider_removal_and_reconnect_flow_actions_are_model_driven(self):
         manager = ProviderManager(registry())

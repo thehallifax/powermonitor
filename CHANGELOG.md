@@ -1,5 +1,23 @@
 # Changelog
 
+## PI-002 - SolarEdge Production Integration
+
+- Promoted SolarEdge as the reference provider workflow by wiring Provider
+  Management to SolarEdge runtime status and adapter-backed connection testing.
+- Added normalized connection-test results with success/warning/failure status,
+  plain-language messages, next steps, and technical details for SolarEdge
+  authentication failures.
+- Expanded provider onboarding with runtime state, collector duration,
+  consecutive failures, retry countdown, health score, and health factors for
+  authentication, freshness, runtime success, observation quality, and collector
+  health.
+- Tightened provider configuration readiness so required SolarEdge cookie data
+  must be present before configuration is treated as ready.
+- Improved SolarEdge import output with data received, imported time range,
+  records imported, duplicates ignored, and observations promoted.
+- Added regression tests for SolarEdge connection guidance, runtime-backed
+  onboarding health, required cookie readiness, and SolarEdge import summaries.
+
 ## PI-001 - Provider Onboarding Experience
 
 - Added a standardized provider onboarding contract covering not configured,

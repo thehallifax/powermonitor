@@ -636,6 +636,8 @@ def dashboard_data(
 
 
 def provider_management_data() -> ProviderManager:
+    from collect_today import SolarEdgeAdapter
+
     settings = load_settings()
     current_day = local_today()
     with sqlite3.connect(DB_PATH) as conn:
@@ -651,11 +653,15 @@ def provider_management_data() -> ProviderManager:
         capability_summary=capability_summary,
         import_sources=setup_import_sources(),
     )
+    solaredge_adapter = SolarEdgeAdapter()
+    runtime = ProviderRuntime([solaredge_adapter])
     return build_provider_management(
         provider_registry=provider_registry,
         health=health,
         provider_observations=provider_observations,
         promotion_summary=promotion_summary,
+        runtime_status=runtime.as_dict(),
+        connection_testers={"solaredge": solaredge_adapter.test_connection},
         settings=settings,
     )
 
@@ -3694,6 +3700,11 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
                 <div><span>Data available?</span><strong>{html.escape(data_available)}</strong></div>
                 <div><span>Sync frequency</span><strong>{html.escape(str(onboarding.get("sync_frequency") or "Unknown"))}</strong></div>
                 <div><span>Next scheduled sync</span><strong>{html.escape(str(onboarding.get("next_scheduled_sync") or "Unknown"))}</strong></div>
+                <div><span>Runtime state</span><strong>{html.escape(friendly_label(str(onboarding.get("runtime_state") or "Unknown")))}</strong></div>
+                <div><span>Collector duration</span><strong>{html.escape(str(onboarding.get("collector_duration") or "Not recorded"))}</strong></div>
+                <div><span>Consecutive failures</span><strong>{html.escape(str(onboarding.get("consecutive_failures", 0)))}</strong></div>
+                <div><span>Retry countdown</span><strong>{html.escape(str(onboarding.get("retry_countdown") or "No retry scheduled"))}</strong></div>
+                <div><span>Provider health</span><strong>{html.escape(str(onboarding.get("health_score", "Unknown")))}%</strong></div>
                 <div><span>Connection status</span><strong>{html.escape(str(onboarding.get("connection_status") or "Unknown"))}</strong></div>
                 <div><span>What should I do next?</span><strong>{html.escape(str(onboarding.get("next_step") or "Review provider setup."))}</strong></div>
               </div>
