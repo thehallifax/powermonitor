@@ -1,4 +1,6 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from engine.provider_framework import (
     Provider,
@@ -32,6 +34,26 @@ def registry(status=ProviderStatus.AVAILABLE):
                 capabilities=[ProviderCapability.EV_SESSIONS, ProviderCapability.IMPORT_ONLY],
                 status=ProviderStatus.SUPPORTED,
             ),
+        ]
+    )
+
+
+def registry_with_home_assistant(status=ProviderStatus.AVAILABLE):
+    base = registry(status).providers
+    return ProviderRegistry(
+        base + [
+            Provider(
+                provider_id="home_assistant",
+                name="Home Assistant",
+                provider_type=ProviderType.HOME_AUTOMATION,
+                capabilities=[
+                    ProviderCapability.LIVE_POWER,
+                    ProviderCapability.BATTERY_STATE,
+                    ProviderCapability.EV_SESSIONS,
+                ],
+                status=ProviderStatus.CONFIGURED,
+                note="Home Assistant provider.",
+            )
         ]
     )
 
@@ -213,6 +235,74 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("providers", payload)
         self.assertNotIn("redaction-fixture-three", str(config_payload))
         self.assertNotIn("redaction-fixture-four", str(config_payload))
+
+    def test_home_assistant_entity_mapping_is_serialized_and_persisted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "provider_mappings.json"
+            manager = ProviderManager(registry_with_home_assistant(), entity_mapping_store_path=path)
+
+            configuration = manager.configure(
+                "home_assistant",
+                {
+                    "api_key": "redaction-fixture-five",
+                    "endpoint": "http://homeassistant.local:8123",
+                    "entity_mappings": {
+                        "solar_live_power": "sensor.solar_power",
+                        "battery_soc": "sensor.battery_soc",
+                    },
+                },
+            ).as_dict()
+            reloaded = ProviderManager(
+                registry_with_home_assistant(),
+                entity_mapping_store_path=path,
+                provider_observations={
+                    "latest": [
+                        {
+                            "provider_id": "home_assistant",
+                            "raw_reference": "sensor.solar_power",
+                            "observed_at": "2026-06-30T08:00:00+08:00",
+                        }
+                    ]
+                },
+            ).get("home_assistant").as_dict()
+
+            self.assertEqual(configuration["entity_mapping"]["selected_mappings"]["solar_live_power"], "sensor.solar_power")
+            self.assertEqual(reloaded["configuration"]["entity_mapping"]["selected_mappings"]["battery_soc"], "sensor.battery_soc")
+            self.assertEqual(reloaded["diagnostics"]["entity_mapping"]["validation"]["status"], "warning")
+            diagnostics_by_entity = {
+                item["selected_entity"]: item
+                for item in reloaded["diagnostics"]["entity_mapping"]["diagnostics"]
+            }
+            self.assertEqual(
+                diagnostics_by_entity["sensor.solar_power"]["last_successful_observation"],
+                "2026-06-30T08:00:00+08:00",
+            )
+            self.assertTrue(path.exists())
+
+    def test_home_assistant_connection_test_exposes_entity_mapping_diagnostics(self):
+        manager = ProviderManager(
+            registry_with_home_assistant(),
+            connection_testers={
+                "home_assistant": lambda: {
+                    "success": True,
+                    "authentication_status": "authenticated",
+                    "provider_version": "home-assistant-2026.6.1",
+                    "available_datasets": ["live_power"],
+                    "warnings": ["Battery state of charge is mapped to a missing entity."],
+                    "response_time_ms": 44,
+                    "entity_mapping": {
+                        "validation": {"status": "warning", "warnings": ["Battery state of charge is mapped to a missing entity."]},
+                        "selected_mappings": {"battery_soc": "sensor.missing_battery"},
+                    },
+                }
+            },
+        )
+
+        result = manager.test_connection("home_assistant").as_dict()
+
+        self.assertEqual(result["status"], "warning")
+        self.assertIn("entity_mapping", result["technical_details"])
+        self.assertIn("Battery state of charge", result["user_message"])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ reports/
 
 # Secrets
 config/secrets.json
+config/provider_mappings.json
 collector/solaredge_cookie.txt
 *.env
 

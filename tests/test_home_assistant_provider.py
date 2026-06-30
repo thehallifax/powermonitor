@@ -5,6 +5,7 @@ from collector.home_assistant_provider import (
     discover_capabilities,
     observations_from_entities,
 )
+from engine.provider_entity_mapping import build_home_assistant_entity_mapping_plan
 from engine.provider_framework import ProviderCapability, ProviderObservationType
 from engine.provider_runtime import ProviderRuntime
 
@@ -62,6 +63,56 @@ class HomeAssistantProviderTests(unittest.TestCase):
         self.assertIn(ProviderObservationType.EV_CONNECTED_STATE, {item.observation_type for item in observations})
         self.assertTrue(all(item.raw_reference for item in observations))
 
+    def test_groups_entities_and_recommends_mapping_targets(self):
+        plan = build_home_assistant_entity_mapping_plan(HOME_ASSISTANT_STATES).as_dict()
+
+        self.assertTrue(plan["categories"]["solar"])
+        self.assertTrue(plan["categories"]["battery"])
+        self.assertTrue(plan["categories"]["ev_charger"])
+        self.assertEqual(plan["recommended_mappings"]["solar_live_power"], "sensor.solar_production_power")
+        self.assertEqual(plan["recommended_mappings"]["battery_soc"], "sensor.battery_state_of_charge")
+        self.assertEqual(plan["validation"]["status"], "ok")
+
+    def test_manual_entity_mapping_overrides_auto_discovery(self):
+        observations = observations_from_entities(
+            HOME_ASSISTANT_STATES,
+            {"home_live_power": "sensor.solar_production_power"},
+        )
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].observation_type, ProviderObservationType.HOME_LIVE_POWER)
+        self.assertEqual(observations[0].raw_reference, "sensor.solar_production_power")
+
+    def test_invalid_manual_mapping_warns_and_is_not_collected(self):
+        plan = build_home_assistant_entity_mapping_plan(
+            HOME_ASSISTANT_STATES,
+            {"battery_soc": "sensor.ev_charger_power"},
+        ).as_dict()
+        observations = observations_from_entities(
+            HOME_ASSISTANT_STATES,
+            {"battery_soc": "sensor.ev_charger_power"},
+        )
+
+        self.assertEqual(plan["validation"]["status"], "warning")
+        self.assertIn("invalid_unit", plan["validation"]["target_status"].values())
+        self.assertEqual(observations, [])
+
+    def test_mapping_diagnostics_mark_stale_selected_entities(self):
+        stale_states = [
+            {
+                **HOME_ASSISTANT_STATES[0],
+                "last_updated": "2020-01-01T00:00:00+00:00",
+            }
+        ]
+
+        plan = build_home_assistant_entity_mapping_plan(
+            stale_states,
+            {"solar_live_power": "sensor.solar_production_power"},
+        ).as_dict()
+
+        self.assertEqual(plan["validation"]["status"], "ok")
+        self.assertEqual(plan["diagnostics"][0]["health"], "stale")
+
     def test_connection_test_validates_authentication_and_version(self):
         def request_json(_base_url, _token, path):
             if path == "api/config":
@@ -83,6 +134,8 @@ class HomeAssistantProviderTests(unittest.TestCase):
         self.assertEqual(result["provider_version"], "home-assistant-2026.6.1")
         self.assertIn("daily_summary", result["available_datasets"])
         self.assertEqual(result["measurements"], len(HOME_ASSISTANT_STATES))
+        self.assertIn("entity_mapping", result)
+        self.assertIn("recommended_mappings", result["entity_mapping"])
 
     def test_missing_token_returns_plain_failure(self):
         adapter = HomeAssistantAdapter(base_url="http://homeassistant.local:8123", token="")

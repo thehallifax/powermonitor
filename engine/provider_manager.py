@@ -4,9 +4,18 @@
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
 from .provider_framework import Provider, ProviderCapability, ProviderRegistry, ProviderStatus, ProviderType
+from .provider_entity_mapping import (
+    DEFAULT_PROVIDER_MAPPING_PATH,
+    build_home_assistant_entity_mapping_plan,
+    clean_entity_mappings,
+    load_provider_entity_mappings,
+    load_provider_mapping_record,
+    save_provider_entity_mappings,
+)
 
 
 class ProviderConnectionStatus(str, Enum):
@@ -75,6 +84,7 @@ class ProviderConfiguration:
     lifecycle_state: ProviderConnectionStatus
     credentials: list[ProviderCredential] = field(default_factory=list)
     editable_fields: list[str] = field(default_factory=list)
+    entity_mapping: Optional[dict[str, Any]] = None
     enabled: bool = True
     notes: Optional[str] = None
 
@@ -86,6 +96,7 @@ class ProviderConfiguration:
             "lifecycle_state": self.lifecycle_state.value,
             "credentials": [credential.as_dict() for credential in self.credentials],
             "editable_fields": list(self.editable_fields),
+            "entity_mapping": self.entity_mapping,
             "enabled": self.enabled,
             "notes": self.notes,
         }
@@ -100,6 +111,7 @@ class ProviderHealth:
     failure_count: int = 0
     last_error: Optional[str] = None
     freshness: Optional[dict[str, Any]] = None
+    entity_mapping_health: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -120,6 +132,7 @@ class ProviderDiagnostics:
     promotion_count: int = 0
     collector_version: str = "PowerMonitor local collector"
     warnings: list[str] = field(default_factory=list)
+    entity_mapping: Optional[dict[str, Any]] = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -274,6 +287,8 @@ class ProviderManager:
         runtime_status: Optional[dict[str, Any]] = None,
         connection_testers: Optional[dict[str, Any]] = None,
         settings: Any = None,
+        provider_entity_mappings: Optional[dict[str, Any]] = None,
+        entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
     ) -> None:
         self.registry = registry
         self.health = health or {}
@@ -282,6 +297,8 @@ class ProviderManager:
         self.runtime_status = runtime_status or {}
         self.connection_testers = connection_testers or {}
         self.settings = settings
+        self.provider_entity_mappings = provider_entity_mappings or {}
+        self.entity_mapping_store_path = entity_mapping_store_path
 
     def providers(self) -> list[ManagedProvider]:
         existing = {provider.provider_id: provider for provider in self.registry.providers}
@@ -364,6 +381,7 @@ class ProviderManager:
                 "http_status": raw.get("http_status"),
                 "measurements": raw.get("measurements"),
                 "adapter": "runtime",
+                "entity_mapping": raw.get("entity_mapping"),
             },
         )
 
@@ -371,6 +389,18 @@ class ProviderManager:
         provider = self.get(provider_id)
         if provider is None:
             raise ValueError(f"Unknown provider: {provider_id}")
+        saved_mapping = None
+        if provider_id == "home_assistant":
+            mappings_payload = values.get("entity_mappings") or values.get("selected_mappings") or values.get("selected_entity_mappings")
+            if values.get("reset_entity_mappings"):
+                current_plan = provider.configuration.entity_mapping or {}
+                mappings_payload = current_plan.get("recommended_mappings") or {}
+            if mappings_payload is not None:
+                saved_mapping = save_provider_entity_mappings(
+                    provider_id,
+                    clean_entity_mappings(mappings_payload),
+                    path=self.entity_mapping_store_path,
+                )
         credentials = []
         editable = _editable_fields(provider.provider_type)
         for field_name in editable:
@@ -395,6 +425,8 @@ class ProviderManager:
             if not missing_required else
             f"Configuration still needs: {', '.join(missing_required)}."
         )
+        if saved_mapping is not None:
+            notes = "Home Assistant entity mappings saved. Run Test Connection to confirm the selected entities still look valid."
         return ProviderConfiguration(
             provider_id=provider.provider_id,
             provider_name=provider.name,
@@ -402,6 +434,7 @@ class ProviderManager:
             lifecycle_state=lifecycle,
             credentials=credentials,
             editable_fields=editable,
+            entity_mapping=self._entity_mapping_for_provider(provider.provider_id),
             enabled=True,
             notes=notes,
         )
@@ -432,6 +465,7 @@ class ProviderManager:
             lifecycle_state=lifecycle,
             credentials=_credential_templates(provider.provider_type, lifecycle),
             editable_fields=_editable_fields(provider.provider_type),
+            entity_mapping=self._entity_mapping_for_provider(provider.provider_id),
             enabled=lifecycle != ProviderConnectionStatus.DISABLED,
             notes=provider.note,
         )
@@ -443,6 +477,7 @@ class ProviderManager:
             failure_count=diagnostics.failure_count,
             last_error=diagnostics.last_error,
             freshness=diagnostics.freshness,
+            entity_mapping_health=list((diagnostics.entity_mapping or {}).get("diagnostics") or []),
         )
         sync_state = _sync_state(lifecycle, diagnostics)
         runtime = _runtime_for_provider(self.runtime_status, provider.provider_id)
@@ -487,7 +522,26 @@ class ProviderManager:
             promotion_count=promotion_count,
             collector_version=str(self.health.get("collector_version") or "PowerMonitor local collector"),
             warnings=warnings,
+            entity_mapping=self._entity_mapping_for_provider(provider.provider_id),
         )
+
+    def _entity_mapping_for_provider(self, provider_id: str) -> Optional[dict[str, Any]]:
+        if provider_id != "home_assistant":
+            return None
+        supplied = self.provider_entity_mappings.get(provider_id)
+        if isinstance(supplied, dict) and supplied.get("selected_mappings") is not None:
+            selected = clean_entity_mappings(supplied.get("selected_mappings"))
+            updated_at = str(supplied.get("updated_at") or "") or None
+        elif isinstance(supplied, dict):
+            selected = clean_entity_mappings(supplied)
+            updated_at = None
+        else:
+            record = load_provider_mapping_record(provider_id, path=self.entity_mapping_store_path)
+            selected = load_provider_entity_mappings(provider_id, path=self.entity_mapping_store_path)
+            updated_at = str(record.get("updated_at") or "") or None
+        mapping = build_home_assistant_entity_mapping_plan([], selected, updated_at=updated_at).as_dict()
+        _attach_last_successful_observations(mapping, self.provider_observations, provider_id)
+        return mapping
 
 
 def build_provider_management(
@@ -499,6 +553,8 @@ def build_provider_management(
     runtime_status: Optional[dict[str, Any]] = None,
     connection_testers: Optional[dict[str, Any]] = None,
     settings: Any = None,
+    provider_entity_mappings: Optional[dict[str, Any]] = None,
+    entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
 ) -> ProviderManager:
     return ProviderManager(
         provider_registry,
@@ -508,6 +564,8 @@ def build_provider_management(
         runtime_status=runtime_status,
         connection_testers=connection_testers,
         settings=settings,
+        provider_entity_mappings=provider_entity_mappings,
+        entity_mapping_store_path=entity_mapping_store_path,
     )
 
 
@@ -623,6 +681,9 @@ def _health_score(
         "observation_quality": "ok" if capability_summary.detected or diagnostics.observation_count else "unknown",
         "collector_health": "ok" if str(health.collector_status or "").lower() in {"ok", "available", "configured"} else "needs_attention",
     }
+    if diagnostics.entity_mapping:
+        mapping_status = str(((diagnostics.entity_mapping.get("validation") or {}).get("status")) or "unknown")
+        factors["entity_mapping"] = "ok" if mapping_status == "ok" else "needs_attention" if mapping_status in {"warning", "error"} else "unknown"
     score = 100
     for value in factors.values():
         if value == "needs_attention":
@@ -903,3 +964,18 @@ def _live_observation_types(summary: dict[str, Any], provider_id: str) -> list[s
         if observation.get("provider_id") == provider_id and observation.get("observation_type") in live_types:
             found.add(observation["observation_type"])
     return sorted(found)
+
+
+def _attach_last_successful_observations(mapping: dict[str, Any], summary: dict[str, Any], provider_id: str) -> None:
+    latest_by_reference = {}
+    for observation in summary.get("latest", []) if isinstance(summary, dict) else []:
+        if observation.get("provider_id") != provider_id:
+            continue
+        reference = str(observation.get("raw_reference") or observation.get("name") or "")
+        if not reference:
+            continue
+        latest_by_reference.setdefault(reference, observation.get("observed_at"))
+    for diagnostic in mapping.get("diagnostics", []) if isinstance(mapping, dict) else []:
+        reference = str(diagnostic.get("selected_entity") or "")
+        if reference in latest_by_reference:
+            diagnostic["last_successful_observation"] = latest_by_reference[reference]

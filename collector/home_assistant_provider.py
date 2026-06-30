@@ -26,6 +26,14 @@ from engine.provider_framework import (
     ProviderObservationType,
     ProviderType,
 )
+from engine.provider_entity_mapping import (
+    DEFAULT_PROVIDER_MAPPING_PATH,
+    HOME_ASSISTANT_MAPPING_TARGETS,
+    build_home_assistant_entity_mapping_plan,
+    clean_entity_mappings,
+    load_provider_entity_mappings,
+    load_provider_mapping_record,
+)
 from engine.provider_runtime import ProviderAuthentication, ProviderSchedule
 
 
@@ -44,10 +52,16 @@ class HomeAssistantAdapter:
         *,
         base_url: Optional[str] = None,
         token: Optional[str] = None,
+        entity_mappings: Optional[dict[str, str]] = None,
         request_json: Optional[Callable[[str, str, str], Any]] = None,
     ) -> None:
         self.base_url = (base_url or home_assistant_url()).rstrip("/")
         self.token = token if token is not None else home_assistant_token()
+        self.entity_mappings = (
+            clean_entity_mappings(entity_mappings)
+            if entity_mappings is not None else
+            load_provider_entity_mappings(self.provider_id, path=DEFAULT_PROVIDER_MAPPING_PATH)
+        )
         self._request_json = request_json
         self._last_entities: list[dict[str, Any]] = []
         self._last_version: Optional[str] = None
@@ -73,6 +87,13 @@ class HomeAssistantAdapter:
             states = self._states()
             version = str(config.get("version") or "unknown") if isinstance(config, dict) else "unknown"
             capabilities = discover_capabilities(states)
+            mapping_record = load_provider_mapping_record(self.provider_id, path=DEFAULT_PROVIDER_MAPPING_PATH)
+            mapping_plan = build_home_assistant_entity_mapping_plan(
+                states,
+                self.entity_mappings,
+                updated_at=str(mapping_record.get("updated_at") or "") or None,
+            )
+            warnings.extend(mapping_plan.validation.warnings)
             self._last_entities = states
             self._last_version = version
             success = True
@@ -94,6 +115,7 @@ class HomeAssistantAdapter:
             "http_status": "ok" if success else "failed",
             "measurements": len(states),
             "version": version,
+            "entity_mapping": mapping_plan.as_dict() if success else {},
         }
 
     def discover_capabilities(self) -> list[ProviderCapability]:
@@ -109,7 +131,7 @@ class HomeAssistantAdapter:
             raise PermissionError(auth.message or "Home Assistant authentication is not configured")
         states = self._states()
         self._last_entities = states
-        return observations_from_entities(states)
+        return observations_from_entities(states, self.entity_mappings)
 
     def collect_live_state(self) -> dict[str, Any]:
         return {
@@ -118,12 +140,19 @@ class HomeAssistantAdapter:
         }
 
     def collect_diagnostics(self) -> dict[str, Any]:
+        mapping_record = load_provider_mapping_record(self.provider_id, path=DEFAULT_PROVIDER_MAPPING_PATH)
+        mapping_plan = build_home_assistant_entity_mapping_plan(
+            self._last_entities,
+            self.entity_mappings,
+            updated_at=str(mapping_record.get("updated_at") or "") or None,
+        )
         return {
             "url_configured": bool(self.base_url),
             "token_configured": bool(self.token),
             "entity_count": len(self._last_entities),
             "version": self._last_version,
             "schedule": self.schedule.value,
+            "entity_mapping": mapping_plan.as_dict(),
         }
 
     def _states(self) -> list[dict[str, Any]]:
@@ -191,9 +220,33 @@ def supported_capabilities() -> list[ProviderCapability]:
     ]
 
 
-def observations_from_entities(entities: list[dict[str, Any]]) -> list[ProviderObservation]:
+def observations_from_entities(entities: list[dict[str, Any]], entity_mappings: Optional[dict[str, str]] = None) -> list[ProviderObservation]:
     observations = []
     received_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    selected = clean_entity_mappings(entity_mappings)
+    if selected:
+        by_entity = {str(entity.get("entity_id") or ""): entity for entity in entities}
+        targets = {target.target_id: target for target in HOME_ASSISTANT_MAPPING_TARGETS}
+        mapping_plan = build_home_assistant_entity_mapping_plan(entities, selected)
+        valid_targets = {
+            target_id
+            for target_id, status in mapping_plan.validation.target_status.items()
+            if status == "configured"
+        }
+        for target_id, entity_id in selected.items():
+            target = targets.get(target_id)
+            entity = by_entity.get(entity_id)
+            if not target or not entity or target_id not in valid_targets:
+                continue
+            observation = observation_from_entity(
+                entity,
+                target.capability,
+                received_at,
+                observation_type=target.observation_type,
+            )
+            if observation:
+                observations.append(observation)
+        return observations
     for entity in entities:
         capability = capability_for_entity(entity)
         if not capability:
@@ -228,8 +281,14 @@ def capability_for_entity(entity: dict[str, Any]) -> Optional[ProviderCapability
     return None
 
 
-def observation_from_entity(entity: dict[str, Any], capability: ProviderCapability, received_at: str) -> Optional[ProviderObservation]:
-    observation_type = observation_type_for_entity(entity, capability)
+def observation_from_entity(
+    entity: dict[str, Any],
+    capability: ProviderCapability,
+    received_at: str,
+    *,
+    observation_type: Optional[ProviderObservationType] = None,
+) -> Optional[ProviderObservation]:
+    observation_type = observation_type or observation_type_for_entity(entity, capability)
     value = parse_value(entity.get("state"), observation_type)
     if value is None:
         return None

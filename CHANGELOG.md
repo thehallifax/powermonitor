@@ -1,5 +1,26 @@
 # Changelog
 
+## PI-005 - Home Assistant Entity Configuration
+
+- Added a reusable provider entity mapping model with Home Assistant entity
+  categories for Grid, Solar, Home Consumption, Battery, EV Charger, EV Status,
+  Energy, and Other.
+- Added Home Assistant mapping recommendations, manual selected mappings,
+  reset-to-recommended support, duplicate assignment warnings, availability
+  checks, and compatible-unit validation.
+- Updated the Home Assistant adapter to use selected mappings when collecting
+  observations while preserving automatic discovery when no mappings are saved.
+- Persisted Home Assistant entity mappings through Provider Manager using local
+  non-secret provider mapping configuration that survives reconnects and runtime
+  restarts.
+- Expanded provider diagnostics and health payloads with selected entity,
+  entity state, last update time, unit, availability, validation status, and
+  last successful observation where available.
+- Added System provider card disclosure for entity mapping guidance while
+  keeping raw technical details behind the existing diagnostics disclosure.
+- Added regression tests for entity grouping, recommendations, manual override,
+  invalid-unit warnings, mapping persistence, and connection-test diagnostics.
+
 ## PI-004 - Live Power and Battery Observations
 
 - Added first-class provider observation types for live power, grid live power,

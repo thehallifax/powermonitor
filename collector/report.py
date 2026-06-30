@@ -54,6 +54,7 @@ from engine.models import (
 from engine.notification_engine import NotificationEngine
 from engine.provider_framework import ProviderCapability, ProviderRegistry, build_provider_registry
 from engine.provider_manager import ProviderManager, build_provider_management
+from engine.provider_entity_mapping import load_provider_mapping_record
 from engine.provider_runtime import ProviderRuntime
 from engine.recommendation_adapter import RecommendationPresentation
 from engine.solar_advisor import SolarAdvisor
@@ -655,7 +656,8 @@ def provider_management_data() -> ProviderManager:
         import_sources=setup_import_sources(),
     )
     solaredge_adapter = SolarEdgeAdapter()
-    home_assistant_adapter = HomeAssistantAdapter()
+    home_assistant_record = load_provider_mapping_record("home_assistant")
+    home_assistant_adapter = HomeAssistantAdapter(entity_mappings=home_assistant_record.get("selected_mappings") if isinstance(home_assistant_record, dict) else None)
     runtime = ProviderRuntime([solaredge_adapter, home_assistant_adapter])
     return build_provider_management(
         provider_registry=provider_registry,
@@ -667,6 +669,7 @@ def provider_management_data() -> ProviderManager:
             "solaredge": solaredge_adapter.test_connection,
             "home_assistant": home_assistant_adapter.test_connection,
         },
+        provider_entity_mappings={"home_assistant": home_assistant_record},
         settings=settings,
     )
 
@@ -675,7 +678,11 @@ def provider_runtime_data(data_engine_instance=None) -> ProviderRuntime:
     from collect_today import SolarEdgeAdapter
     from home_assistant_provider import HomeAssistantAdapter
 
-    return ProviderRuntime([SolarEdgeAdapter(), HomeAssistantAdapter()], data_engine=data_engine_instance)
+    home_assistant_record = load_provider_mapping_record("home_assistant")
+    return ProviderRuntime(
+        [SolarEdgeAdapter(), HomeAssistantAdapter(entity_mappings=home_assistant_record.get("selected_mappings") if isinstance(home_assistant_record, dict) else None)],
+        data_engine=data_engine_instance,
+    )
 
 
 def setup_logging() -> None:
@@ -3651,6 +3658,57 @@ def _technical_detail_rows(details: dict) -> str:
     )
 
 
+def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
+    if not mapping:
+        return ""
+    validation = mapping.get("validation") or {}
+    diagnostics = mapping.get("diagnostics") or []
+    targets = {
+        str(target.get("target_id")): target
+        for target in mapping.get("targets", [])
+        if isinstance(target, dict)
+    }
+    selected = mapping.get("selected_mappings") or {}
+    recommended = mapping.get("recommended_mappings") or {}
+    if not selected and not recommended:
+        return """
+          <p class="notice">Run Test Connection to discover Home Assistant entities and generate recommended mappings.</p>
+        """
+    rows = []
+    for target_id, entity_id in selected.items():
+        target = targets.get(str(target_id), {})
+        rows.append(
+            f"""
+            <div>
+              <span>{html.escape(str(target.get("label") or friendly_label(str(target_id))))}</span>
+              <strong>{html.escape(str(entity_id))}</strong>
+              <small>Status: {html.escape(str((validation.get("target_status") or {}).get(target_id, "selected")).replace("_", " ").title())}</small>
+            </div>
+            """
+        )
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        rows.append(
+            f"""
+            <div>
+              <span>{html.escape(str(diagnostic.get("target_label") or diagnostic.get("target_id") or "Entity"))}</span>
+              <strong>{html.escape(str(diagnostic.get("selected_entity") or "Not selected"))}</strong>
+              <small>{html.escape(str(diagnostic.get("availability") or "unknown").title())}; state {html.escape(str(diagnostic.get("entity_state") or "unknown"))}; unit {html.escape(str(diagnostic.get("unit") or "none"))}; last update {html.escape(str(diagnostic.get("last_update_time") or "unknown"))}.</small>
+            </div>
+            """
+        )
+    warning_rows = _list_items([str(item) for item in validation.get("warnings", [])])
+    return f"""
+      <div class="provider-guidance-grid">
+        <div><span>Validation</span><strong>{html.escape(str(validation.get("status") or "unknown").title())}</strong></div>
+        <div><span>Reset option</span><strong>Use recommended mappings</strong></div>
+      </div>
+      <div class="config-grid">{''.join(rows) or '<p class="notice">No entities selected yet.</p>'}</div>
+      {f'<ul>{warning_rows}</ul>' if warning_rows else ''}
+    """
+
+
 def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
     if not provider_management:
         return """
@@ -3683,6 +3741,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
             <div><span>Recovery steps</span><ul>{_list_items(onboarding.get("recovery_steps") or [])}</ul></div>
           </div>
         """
+        mapping_body = _provider_entity_mapping_html((data.get("configuration") or {}).get("entity_mapping") or (data.get("diagnostics") or {}).get("entity_mapping"))
         technical_body = f"""
           <div class="config-grid">{_technical_detail_rows(onboarding.get("technical_details") or {})}</div>
           <div class="config-grid">
@@ -3717,6 +3776,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
               <p>Provides: {html.escape(capabilities)}.</p>
               <small>{actions}</small>
               {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
+              {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body else ""}
               {disclosure_html("Technical diagnostics", "Lifecycle, sync, observations, and collector details", technical_body, css_class="provider-details")}
             </div>
             """
