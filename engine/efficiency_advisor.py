@@ -253,11 +253,11 @@ class EfficiencyAdvisor:
         previous_available = previous_summary is not None and self._number(previous_summary, "average_daily_grid_import_kwh") > 0
         required = [
             EvidenceRequirement(
-                "Collector health",
+                "Live data status",
                 EvidenceSource.LIVE_TELEMETRY if status_ok else EvidenceSource.MISSING,
                 status_ok,
                 quality=EvidenceQuality.HIGH if status_ok else EvidenceQuality.LOW,
-                reason=f"Collector status: {health.get('status') or 'unknown'}.",
+                reason=f"Live data status: {health.get('status') or 'unknown'}.",
             ),
             EvidenceRequirement(
                 "Overnight baseload estimate",
@@ -286,7 +286,7 @@ class EfficiencyAdvisor:
         ]
         if not status_ok:
             quality = EvidenceQuality.LOW
-            reason = "Collector gaps are present, so efficiency confidence is reduced."
+            reason = "Live data gaps are present, so efficiency confidence is reduced."
         elif not baseload_available:
             quality = EvidenceQuality.LOW
             reason = "Baseload estimation is incomplete."
@@ -298,7 +298,7 @@ class EfficiencyAdvisor:
             reason = "Efficiency evidence is useful but incomplete."
         else:
             quality = EvidenceQuality.HIGH
-            reason = "Collector health, baseload, and comparison evidence are available."
+            reason = "Live data, baseload, and comparison evidence are available."
         capped = cap_confidence_for_evidence(confidence, quality)
         return AdvisorEvidenceSummary(
             required_evidence=required,

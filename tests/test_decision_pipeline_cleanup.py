@@ -168,7 +168,7 @@ class DecisionPipelineCleanupTests(unittest.TestCase):
 
         self.assertEqual(readiness.candidates[0].notification_type, NotificationType.CHARGE_NOW)
         self.assertEqual(readiness.candidates[0].source_event_key, "decision:charge_1")
-        self.assertEqual(readiness.candidates[0].evidence[0].source, "RecommendationPresentation")
+        self.assertEqual(readiness.candidates[0].evidence[0].source, "Recommendation")
 
     def test_legacy_advisor_notifications_can_be_disabled(self):
         readiness = NotificationEngine().build(

@@ -3079,9 +3079,9 @@ class DataEngine:
                     source="collector_health",
                     confidence="High" if collector_available else "Low",
                     reason=(
-                        "Collector health, logs, or local readings are available."
+                        "Live data status, logs, or local readings are available."
                         if collector_available else
-                        "No local collector health or readings found."
+                        "No local live data status or readings found."
                     ),
                 ),
                 CapabilityStatus(
@@ -3212,7 +3212,7 @@ def _observation_count_note(counts: dict[str, int], capability: str) -> str:
     count = int(counts.get(capability, 0))
     if count <= 0:
         return ""
-    return f"{count} provider observation{'s' if count != 1 else ''} recorded."
+    return f"{count} source reading{'s' if count != 1 else ''} recorded."
 
 
 def freshness_from_latest(latest_measurement: Optional[str], today: date) -> Freshness:

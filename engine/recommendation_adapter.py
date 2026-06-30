@@ -204,7 +204,7 @@ class RecommendationAdapter:
             household_state=household_state.as_dict() if hasattr(household_state, "as_dict") else household_state,
             context=context.as_dict() if hasattr(context, "as_dict") else context,
             behaviour=behaviour.as_dict() if hasattr(behaviour, "as_dict") else behaviour,
-            data_sources_used=list(_get(decision, "data_sources_used") or ["DecisionEngine"]),
+            data_sources_used=list(_get(decision, "data_sources_used") or ["Household data"]),
             status=str(_get(decision, "status") or "active"),
             valid_until=_get(decision, "valid_until"),
         )
@@ -237,7 +237,7 @@ def _reason(value: Any) -> RecommendationReason:
 
 def _evidence(value: Any) -> RecommendationEvidence:
     return RecommendationEvidence(
-        source=str(_get(value, "source") or "DecisionEngine"),
+        source=str(_get(value, "source") or "Household data"),
         signal=str(_get(value, "signal") or "decision"),
         value=_get(value, "value"),
         quality=str(_get(value, "quality") or "UNKNOWN"),

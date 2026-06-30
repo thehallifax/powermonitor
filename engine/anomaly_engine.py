@@ -370,7 +370,7 @@ class AnomalyEngine:
                     household_id,
                     AnomalyCategory.COLLECTOR,
                     "Unexpected provider behaviour",
-                    str(get_value(change, "summary") or "Provider or collector state changed unexpectedly."),
+                    str(get_value(change, "summary") or "Data source state changed unexpectedly."),
                     AnomalySeverity.WARNING,
                     AnomalyConfidence.MEDIUM,
                     str(get_value(change, "detected_at") or detected_at),

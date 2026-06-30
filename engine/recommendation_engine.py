@@ -853,7 +853,7 @@ def _impact_text(recommendation: Recommendation) -> str:
         return f"${float(impact.period):,.2f} this period"
     if impact.monthly is not None:
         return f"${float(impact.monthly):,.2f} per month"
-    return "Not quantified by the current Recommendation Engine output."
+    return "Unable to estimate from the current household data."
 
 
 def _as_date(value) -> date:

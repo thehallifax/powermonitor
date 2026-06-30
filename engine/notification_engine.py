@@ -332,10 +332,10 @@ class NotificationEngine:
         mapping = {
             StateChangeType.ENTERED_PEAK.value: (NotificationType.PEAK_PERIOD_STARTED, NotificationPriority.MEDIUM, "Peak period started"),
             StateChangeType.ENTERED_LOW_COST_WINDOW.value: (NotificationType.LOW_COST_WINDOW_STARTED, NotificationPriority.MEDIUM, "Low-cost charging window started"),
-            StateChangeType.COLLECTOR_WENT_STALE.value: (NotificationType.COLLECTOR_STALE, NotificationPriority.CRITICAL, "Collector data may be stale"),
-            StateChangeType.COLLECTOR_RECOVERED.value: (NotificationType.COLLECTOR_RECOVERED, NotificationPriority.LOW, "Collector recovered"),
+            StateChangeType.COLLECTOR_WENT_STALE.value: (NotificationType.COLLECTOR_STALE, NotificationPriority.CRITICAL, "Live data may be stale"),
+            StateChangeType.COLLECTOR_RECOVERED.value: (NotificationType.COLLECTOR_RECOVERED, NotificationPriority.LOW, "Live data recovered"),
             StateChangeType.PROVIDER_DEGRADED.value: (NotificationType.PROVIDER_ERROR, NotificationPriority.HIGH, "Provider data degraded"),
-            StateChangeType.EVIDENCE_QUALITY_DEGRADED.value: (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.HIGH, "Evidence quality degraded"),
+            StateChangeType.EVIDENCE_QUALITY_DEGRADED.value: (NotificationType.EVIDENCE_DEGRADED, NotificationPriority.HIGH, "Confidence reduced"),
         }
         if change_type not in mapping:
             return None
@@ -377,7 +377,7 @@ class NotificationEngine:
             reason = self._decision_reason(decision)
             evidence = [
                 NotificationEvidence(
-                    source="DecisionEngine",
+                    source="Household data",
                     summary=reason,
                     quality=self._decision_quality(decision) or quality,
                     observed_at=self._get(decision, "created_at"),
@@ -455,7 +455,7 @@ class NotificationEngine:
             )
             evidence = [
                 NotificationEvidence(
-                    source="RecommendationPresentation",
+                    source="Recommendation",
                     summary=str(self._get(presentation, "rationale") or message),
                     quality=self._presentation_quality(presentation) or quality,
                     observed_at=self._get(decision, "created_at"),
@@ -754,11 +754,11 @@ class NotificationEngine:
     def _decision_reason(self, decision: Any) -> str:
         reasons = list(self._get(decision, "reasons") or [])
         if reasons:
-            return str(self._get(reasons[0], "summary") or self._get(reasons[0], "code") or "Decision Engine output.")
+            return str(self._get(reasons[0], "summary") or self._get(reasons[0], "code") or "Available household data.")
         outcome = self._get(decision, "outcome")
         if outcome:
-            return str(self._get(outcome, "expected_effect") or self._get(outcome, "status") or "Decision Engine output.")
-        return "Decision Engine output."
+            return str(self._get(outcome, "expected_effect") or self._get(outcome, "status") or "Available household data.")
+        return "Available household data."
 
     def _active_advisors(self, advisors: Optional[Any]) -> list[Any]:
         if advisors is None:

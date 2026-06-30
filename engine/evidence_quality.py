@@ -50,7 +50,7 @@ class AdvisorEvidenceSummary:
     optional_evidence: list[EvidenceRequirement] = field(default_factory=list)
     evidence_quality: EvidenceQuality = EvidenceQuality.UNKNOWN
     confidence: str = "Low"
-    reason: str = "Evidence quality has not been assessed."
+    reason: str = "Confidence has not been assessed."
     confidence_reason: Optional[str] = None
 
     @property
@@ -124,4 +124,3 @@ def evidence_quality_from_requirements(
     if EvidenceQuality.MEDIUM in qualities:
         return EvidenceQuality.MEDIUM
     return EvidenceQuality.HIGH
-

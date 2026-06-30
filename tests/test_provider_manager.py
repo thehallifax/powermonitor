@@ -125,7 +125,7 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(provider["onboarding"]["state"], "CONNECTED")
         self.assertTrue(provider["onboarding"]["connected"])
         self.assertTrue(provider["onboarding"]["healthy"])
-        self.assertEqual(provider["onboarding"]["sync_frequency"], "Collector schedule")
+        self.assertEqual(provider["onboarding"]["sync_frequency"], "Refresh schedule")
         self.assertIn("why_required", provider["onboarding"])
         self.assertIn("recovery_steps", provider["onboarding"])
 

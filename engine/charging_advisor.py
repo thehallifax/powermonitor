@@ -67,7 +67,7 @@ class ChargingAdvisor:
         bucket = context.current_tariff_bucket or current_tariff_bucket(observed_at)
         available, freshness, confidence = self._data_is_available(today_summary, billing_summary, health)
         solar_status, has_solar_surplus = solar_signal(today_summary)
-        has_live_context = "Provider observations" in set(context.data_sources_used)
+        has_live_context = "Source readings" in set(context.data_sources_used)
         if has_live_context and context.solar.value == "SOLAR_SURPLUS_POSSIBLE":
             solar_status = "Live solar surplus detected"
             has_solar_surplus = True

@@ -109,7 +109,7 @@ def _presentation_briefing(
         greeting=_greeting(briefing_date),
         overall_household_status=_presentation_overall_status(presentations, context),
         overall_confidence=_presentation_overall_confidence(presentations),
-        overall_freshness="DecisionEngine",
+        overall_freshness="Current household data",
         top_priorities=priorities,
         positive_outcomes=positives,
         items_to_watch=watch_items,
@@ -307,10 +307,10 @@ def _briefing_priority_from_presentation(presentation, advisors: AdvisorCollecti
         recommendation=presentation.recommended_action,
         status=_decision_status(decision_type),
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from Decision Recommendation Adapter.",
-        freshness="DecisionEngine",
+        confidence_reason=f"{presentation.confidence} confidence from available household data.",
+        freshness="Current household data",
         estimated_financial_impact=presentation.financial_impact,
-        supporting_advisors=supporting or ["Decision Engine"],
+        supporting_advisors=supporting or ["Household data"],
         decision_id=presentation.decision_id,
         decision_type=decision_type,
     )
@@ -345,12 +345,12 @@ def _cluster_recommendation(cluster: _AdvisorCluster, primary: Advisor) -> str:
 
 def _cluster_summary(cluster: _AdvisorCluster, primary: Advisor, support: list[str]) -> str:
     if cluster.section_type == "positive":
-        return f"{primary.summary} Supported by {', '.join(support)}."
+        return f"{primary.summary} Why this matters: {', '.join(support)}."
     if cluster.theme == "ev_charging":
-        return f"{primary.summary} This action is supported by {', '.join(support)}."
+        return f"{primary.summary} Why this matters: {', '.join(support)}."
     if cluster.theme == "solar_flexibility":
         return f"{primary.summary} Solar and efficiency signals point to the same household action."
-    return f"{primary.summary} Supported by {', '.join(support)}."
+    return f"{primary.summary} Why this matters: {', '.join(support)}."
 
 
 def _advisor_label(advisor: Advisor) -> str:
@@ -391,7 +391,7 @@ def _combined_freshness(advisors: list[Advisor]) -> str:
 
 def _overall_status(advisors: list[Advisor], context: Optional[CurrentHouseholdContext] = None) -> str:
     if not advisors:
-        return "No active advisor signals are available today."
+        return "No active recommendations are available today."
     if context and context.time == TimeContext.NIGHT:
         return "Night context is active, so the briefing focuses on overnight cost, baseload, and tomorrow's solar window."
     if context and context.time == TimeContext.EARLY_MORNING:
@@ -558,8 +558,8 @@ def _presentation_overall_status(presentations: list, context: Optional[CurrentH
     top = presentations[0]
     top_type = str((top.decision or {}).get("decision_type") or (top.decision or {}).get("type") or "")
     if top_type == "NO_ACTION":
-        return "Decision Engine does not see an immediate household action."
-    return "Decision Engine has identified the most relevant household action."
+        return "PowerMonitor does not see an immediate household action."
+    return "PowerMonitor has identified the most relevant household action."
 
 
 def _presentation_overall_confidence(presentations: list) -> str:

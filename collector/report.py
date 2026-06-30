@@ -2050,8 +2050,8 @@ def hero_html(
       <div class="status-strip">
         <div><span>Last generated</span><strong>{html.escape(generated_at)}</strong></div>
         <div><span>Latest SolarEdge reading</span><strong>{html.escape(display_timestamp(health["latest_measurement_time"]))}</strong></div>
-        <div><span>Collector status</span><strong class="status-value {status_class}">{html.escape(status_text)}</strong></div>
-        <div><span>Since successful collection</span><strong>{html.escape(days_since_text)}</strong></div>
+        <div><span>Live data status</span><strong class="status-value {status_class}">{html.escape(status_text)}</strong></div>
+        <div><span>Since successful refresh</span><strong>{html.escape(days_since_text)}</strong></div>
         <div><span>Report age</span><strong>{html.escape(report_age_text)}</strong></div>
       </div>
     </header>
@@ -2289,7 +2289,7 @@ def glance_page_html(glance: GlanceState) -> str:
           <strong>{html.escape(glance.current_recommendation)}</strong>
         </div>
         <div class="glance-panel">
-          <span>Evidence quality</span>
+          <span>Confidence</span>
           <strong>{html.escape(glance.evidence_quality.title())}</strong>
           <small>{html.escape(glance.evidence_reason)}</small>
         </div>
@@ -2350,6 +2350,50 @@ def collector_status_text(health: dict) -> str:
     )
 
 
+def customer_label(value: Any) -> str:
+    text = str(value or "").strip()
+    replacements = {
+        "AdvisorCollection": "recommendations",
+        "DecisionEngine": "today's recommendation",
+        "DataEngine": "household data",
+        "FinancialEngine": "bill estimate",
+        "RecommendationPresentation": "recommendation",
+        "HouseholdDecision": "recommendation",
+        "Household State Engine": "household status",
+        "Collector health": "live data",
+        "Provider observations": "source readings",
+        "Provider Observation": "source reading",
+        "Provider Observation pipeline": "source reading history",
+        "Provider Runtime": "data connection status",
+        "Runtime": "data connection",
+        "Collector": "live data",
+        "collector": "live data",
+        "Evidence quality": "Confidence",
+        "evidence quality": "confidence",
+        "Not quantified": "Unable to estimate",
+        "not quantified": "unable to estimate",
+    }
+    for internal, friendly in replacements.items():
+        text = text.replace(internal, friendly)
+    return text
+
+
+def customer_source(value: Any) -> str:
+    text = customer_label(value)
+    raw = text.strip()
+    text = raw.replace("_", " ").strip()
+    if not text:
+        return "Household data"
+    if "_" in raw or text.isupper():
+        text = text.lower().title()
+    text = text.replace("Ev ", "EV ").replace(" Ev", " EV")
+    return text[:1].upper() + text[1:]
+
+
+def unable_to_estimate() -> str:
+    return "Unable to estimate"
+
+
 def is_recommendation_presentation(item) -> bool:
     return isinstance(item, RecommendationPresentation)
 
@@ -2364,11 +2408,11 @@ def recommendation_impact(decision) -> str:
     if is_recommendation_presentation(decision):
         impact = decision.financial_impact
         if not impact:
-            return "Not quantified"
+            return unable_to_estimate()
         for value in (impact.today, impact.billing_period, impact.yearly):
             if value is not None:
                 return money(float(value))
-        return "Not quantified"
+        return unable_to_estimate()
     for key in ("today", "billing_period", "yearly"):
         value = decision.financial_impact.get(key)
         if value is not None:
@@ -2395,7 +2439,7 @@ def recommendation_impact(decision) -> str:
                 return money(float(decision.evidence[key]))
             except (TypeError, ValueError):
                 return str(decision.evidence[key])
-    return "Not quantified"
+    return unable_to_estimate()
 
 
 def recommendation_monthly_impact(decision) -> str:
@@ -2403,10 +2447,10 @@ def recommendation_monthly_impact(decision) -> str:
         impact = decision.financial_impact
         if impact and impact.yearly is not None:
             return money(float(impact.yearly) / 12)
-        return "Not quantified"
+        return unable_to_estimate()
     value = decision.evidence.get("estimated_monthly_impact")
     if value is None:
-        return "Not quantified"
+        return unable_to_estimate()
     try:
         return money(float(value))
     except (TypeError, ValueError):
@@ -2457,7 +2501,7 @@ def recommendation_evidence_html(decision) -> str:
         if not decision.evidence:
             return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
         rows = [
-            f"<li><strong>{html.escape(item.signal.replace('_', ' ').capitalize())}</strong><span>{html.escape(str(item.value))}</span><small>{html.escape(item.source)} - {html.escape(item.quality)}</small></li>"
+            f"<li><strong>{html.escape(customer_source(item.signal))}</strong><span>{html.escape(customer_label(item.value))}</span><small>{html.escape(customer_source(item.source))} - {html.escape(customer_label(item.quality).title())}</small></li>"
             for item in decision.evidence
         ]
         return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
@@ -2514,12 +2558,12 @@ def matching_household_decision(decision, household_decisions: Optional[list[dic
 def recommendation_decision_provenance_html(decision, household_decisions: Optional[list[dict]]) -> str:
     household_decision = matching_household_decision(decision, household_decisions)
     if not household_decision:
-        return '<p><strong>Household decision</strong>No matching HouseholdDecision emitted yet.</p>'
+        return '<p><strong>Recommendation</strong>No matching recommendation is ready yet.</p>'
     reasons = household_decision.get("reasons") or []
-    reason = reasons[0].get("summary") if reasons and isinstance(reasons[0], dict) else "Decision Engine reasoning"
+    reason = reasons[0].get("summary") if reasons and isinstance(reasons[0], dict) else "Recommendation reason"
     return f"""
-      <p><strong>Household decision</strong>{html.escape(str(household_decision.get("type") or household_decision.get("decision_type") or "Decision").replace("_", " ").title())}</p>
-      <p><strong>Decision evidence</strong>{html.escape(str(reason))}</p>
+      <p><strong>Recommendation</strong>{html.escape(customer_source(household_decision.get("type") or household_decision.get("decision_type") or "Recommendation"))}</p>
+      <p><strong>Why this matters</strong>{html.escape(customer_label(reason))}</p>
     """
 
 
@@ -2713,7 +2757,7 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
               <div class="decision-lines">
                 <p class="primary-action"><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
                 <p><strong>Why?</strong>{html.escape(advisor.confidence_reason)}</p>
-                <p><strong>Evidence quality</strong>{html.escape(evidence_quality)}</p>
+                <p><strong>Confidence</strong>{html.escape(evidence_quality)}</p>
                 <p><strong>Still missing</strong>{html.escape(missing_text)}</p>
                 <p><strong>Confidence note</strong>{html.escape(confidence_reduced)}</p>
               </div>
@@ -2924,7 +2968,7 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
         return """
         <section class="briefing-block">
           <div class="section-title"><div><span class="eyebrow">Opportunities</span><h2>Nothing else needs attention</h2></div></div>
-          <p class="notice">No additional Decision Engine opportunities are active for this briefing.</p>
+          <p class="notice">No additional opportunities are active for this briefing.</p>
         </section>
         """
     cards = "".join(
@@ -2940,12 +2984,12 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
 
 
 def daily_briefing_html(briefing: DailyBriefing, goals: Optional[list[GoalProgress]] = None) -> str:
-    priorities = briefing_priority_grid_html(briefing.top_priorities, "Today's Best Action", "No immediate action", "Advisor Engine has not found an urgent household priority today.")
-    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're Doing Well", "No positive signal yet", "Advisor Engine does not have enough positive advisor output to call out a win today.")
+    priorities = briefing_priority_grid_html(briefing.top_priorities, "Today's Best Action", "No immediate action", "PowerMonitor has not found an urgent household priority today.")
+    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're Doing Well", "No positive signal yet", "PowerMonitor does not have enough positive household data to call out a win today.")
     watch = briefing_priority_grid_html(briefing.items_to_watch, "Watch This", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
     goal_progress = goals_progress_html(goals or [])
     savings = briefing.estimated_savings_opportunity
-    savings_text = "Not quantified"
+    savings_text = unable_to_estimate()
     if savings:
         value = savings.billing_period if savings.billing_period is not None else savings.today
         if value is not None:
@@ -2965,10 +3009,10 @@ def daily_briefing_html(briefing: DailyBriefing, goals: Optional[list[GoalProgre
       </div>
       <p class="briefing-headline">{html.escape(briefing.suggested_next_action)}</p>
       <div class="metrics">
-        {metric("Overall freshness", briefing.overall_freshness, "AdvisorCollection", "primary")}
-        {metric("Savings opportunity", savings_text, savings.basis if savings and savings.basis else "Measured advisor impacts", "cost")}
-        {metric("Advisor count", str(len(briefing.advisor_summary)), "Active advisor summary", "ev")}
-        {metric("Read time", f"{briefing.read_time_minutes} min", "Briefing Engine estimate", "solar")}
+        {metric("Data freshness", customer_label(briefing.overall_freshness), "Current household data", "primary")}
+        {metric("Savings opportunity", savings_text, customer_label(savings.basis) if savings and savings.basis else "Measured household impacts", "cost")}
+        {metric("Recommendation count", str(len(briefing.advisor_summary)), "Active recommendations", "ev")}
+        {metric("Read time", f"{briefing.read_time_minutes} min", "Briefing estimate", "solar")}
       </div>
       {goal_progress}
       {priorities}
@@ -3032,7 +3076,7 @@ def briefing_priority_grid_html(
     cards = "".join(briefing_priority_card_html(item, title) for item in items)
     return f"""
     <section class="briefing-block">
-      <div class="section-title"><div><span class="eyebrow">{html.escape(title)}</span><h2>{len(items)} advisor signal{'s' if len(items) != 1 else ''}</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">{html.escape(title)}</span><h2>{len(items)} recommendation{'s' if len(items) != 1 else ''}</h2></div></div>
       <div class="briefing-grid">{cards}</div>
     </section>
     """
@@ -3041,7 +3085,7 @@ def briefing_priority_grid_html(
 def briefing_priority_card_html(item: BriefingPriority, eyebrow: str) -> str:
     support = ""
     if item.supporting_advisors:
-        support = f"<small>Supported by {html.escape(', '.join(item.supporting_advisors))}</small>"
+        support = f"<small>Why this matters: {html.escape(', '.join(customer_label(source) for source in item.supporting_advisors))}</small>"
     return f"""
     <article class="briefing-card {html.escape(briefing_priority_severity(item.status))}">
       <div class="briefing-card-heading">
@@ -3070,14 +3114,14 @@ def briefing_priority_severity(status: str) -> str:
 def briefing_priority_impact(item: BriefingPriority) -> str:
     impact = item.estimated_financial_impact
     if not impact:
-        return "Not quantified"
+        return unable_to_estimate()
     if impact.billing_period is not None:
         return money(impact.billing_period)
     if impact.today is not None:
         return f"{money(impact.today)} today"
     if impact.yearly is not None:
         return f"{money(impact.yearly)} yearly"
-    return "Not quantified"
+    return unable_to_estimate()
 
 
 def energy_score_html(score: Optional[EnergyScore]) -> str:
@@ -3182,7 +3226,7 @@ def setup_page_html(
     if conflict.get("repeated_conflicts"):
         conflict_notice = """
         <section class="setup-progress-card">
-          <div><span>Provider configuration</span><h3>Provider observations are conflicting.</h3><p>Review provider configuration before relying on promoted data.</p></div>
+        <div><span>Data connection</span><h3>Two sources disagree.</h3><p>Review provider configuration before relying on this data.</p></div>
           <a href="#system">Review System</a>
         </section>
         """
@@ -3202,7 +3246,7 @@ def setup_page_html(
       <div class="onboarding-steps">
         <div><span>1</span><strong>Set billing and tariff</strong><p>Use the Billing Cycle panel below for the start day, retailer, and plan.</p></div>
         <div><span>2</span><strong>Add household data</strong><p>Use Imports for Ocular EV history, or Providers for live/local data when available.</p></div>
-        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a data-quality or collector issue.</p></div>
+        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a data quality or live data issue.</p></div>
       </div>
     </section>
     {billing_cycle_setup_html(settings)}
@@ -3264,7 +3308,7 @@ def advisor_home_html(advisor: Advisor) -> str:
         "UNKNOWN": "amber",
     }.get(advisor.status, "amber")
     impact = advisor.estimated_financial_impact
-    impact_text = "Not quantified"
+    impact_text = unable_to_estimate()
     if impact and impact.billing_period is not None:
         impact_text = money(impact.billing_period)
     evidence_summary = getattr(advisor, "evidence_summary", None)
@@ -3272,11 +3316,11 @@ def advisor_home_html(advisor: Advisor) -> str:
     evidence_reason = evidence_summary.reason if evidence_summary else "Evidence summary unavailable."
     return f"""
     <section class="source-status {tone}">
-      <div><span>{html.escape(advisor.advisor_type.replace("_", " ").title())} Advisor</span><h2>{html.escape(advisor.headline)}</h2></div>
+      <div><span>{html.escape(customer_label(advisor.advisor_type.replace("_", " ").title()))} Recommendation</span><h2>{html.escape(advisor.headline)}</h2></div>
       <p>{html.escape(advisor.summary)}</p>
       <div class="metrics">
-        {metric("Status", advisor.status.replace("_", " "), "Shared Advisor", "cost")}
-        {metric("Projection impact", impact_text, impact.basis if impact and impact.basis else "Financial Engine", "cost")}
+        {metric("Status", advisor.status.replace("_", " "), "Current recommendation", "cost")}
+        {metric("Projection impact", impact_text, customer_label(impact.basis) if impact and impact.basis else "Bill estimate", "cost")}
         {metric("Confidence", advisor.confidence, advisor.confidence_reason, "primary")}
         {metric("Evidence", evidence_quality, evidence_reason, "primary")}
         {metric("Next review", advisor.next_review_time or "Unavailable", advisor.freshness, "solar")}
@@ -3295,7 +3339,7 @@ def charging_advice_home_html(charging_advice: ChargingAdvice) -> str:
         "UNKNOWN": "amber",
     }[advisor.status]
     benefit = advisor.estimated_financial_impact
-    benefit_text = "Not quantified"
+    benefit_text = unable_to_estimate()
     if benefit and benefit.today is not None:
         benefit_text = f"{money(benefit.today)} per kWh"
     rate_text = (
@@ -3630,8 +3674,8 @@ def _provider_onboarding_fallback(data: dict) -> dict:
         "healthy": healthy,
         "data_available": bool(capabilities.get("detected") or diagnostics.get("observation_count") or diagnostics.get("last_successful_sync")),
         "last_successful_sync": diagnostics.get("last_successful_sync"),
-        "next_scheduled_sync": "Next collector run",
-        "sync_frequency": "Collector schedule",
+        "next_scheduled_sync": "Next data refresh",
+        "sync_frequency": "Refresh schedule",
         "required_information": ["Provider configuration details"],
         "why_required": "Provider details let PowerMonitor test access and explain which data is safe to use.",
         "connection_status": "Connected and available for analysis." if healthy else "Waiting for setup.",
@@ -3642,7 +3686,7 @@ def _provider_onboarding_fallback(data: dict) -> dict:
         "technical_details": {
             "lifecycle_state": lifecycle,
             "sync_state": data.get("sync_state"),
-            "collector_status": (data.get("health") or {}).get("collector_status"),
+            "live_data_status": (data.get("health") or {}).get("collector_status"),
         },
     }
 
@@ -3841,8 +3885,8 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
                 <div><span>Data available?</span><strong>{html.escape(data_available)}</strong></div>
                 <div><span>Sync frequency</span><strong>{html.escape(str(onboarding.get("sync_frequency") or "Unknown"))}</strong></div>
                 <div><span>Next scheduled sync</span><strong>{html.escape(str(onboarding.get("next_scheduled_sync") or "Unknown"))}</strong></div>
-                <div><span>Runtime state</span><strong>{html.escape(friendly_label(str(onboarding.get("runtime_state") or "Unknown")))}</strong></div>
-                <div><span>Collector duration</span><strong>{html.escape(str(onboarding.get("collector_duration") or "Not recorded"))}</strong></div>
+                <div><span>Connection state</span><strong>{html.escape(friendly_label(str(onboarding.get("runtime_state") or "Unknown")))}</strong></div>
+                <div><span>Last refresh time</span><strong>{html.escape(str(onboarding.get("collector_duration") or "Not recorded"))}</strong></div>
                 <div><span>Consecutive failures</span><strong>{html.escape(str(onboarding.get("consecutive_failures", 0)))}</strong></div>
                 <div><span>Retry countdown</span><strong>{html.escape(str(onboarding.get("retry_countdown") or "No retry scheduled"))}</strong></div>
                 <div><span>Provider health</span><strong>{html.escape(str(onboarding.get("health_score", "Unknown")))}%</strong></div>
@@ -3854,7 +3898,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
               {disclosure_html("Configure provider", "Save settings, test, reconnect, reset, enable, disable, or remove", configuration_body, css_class="provider-details")}
               {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
               {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body else ""}
-              {disclosure_html("Technical diagnostics", "Lifecycle, sync, observations, and collector details", technical_body, css_class="provider-details")}
+              {disclosure_html("Technical diagnostics", "Connection lifecycle, sync, source readings, and local data details", technical_body, css_class="provider-details")}
             </div>
             """
         )
@@ -3879,18 +3923,18 @@ def provider_runtime_html(provider_runtime: Optional[ProviderRuntime]) -> str:
             <div class="completeness-row {'good' if health.get('state') in {'IDLE', 'SUCCESS'} else 'bad'}">
               <span>{html.escape(str(provider.get("provider_id") or "provider"))}</span>
               <strong>{html.escape(str(health.get("state") or "UNKNOWN").replace("_", " ").title())}</strong>
-              <small>Schedule: {html.escape(str(provider.get("schedule") or "manual"))}. Last execution: {html.escape(str(health.get("last_run") or "Never"))}. Next: {html.escape(str(health.get("next_run_at") or "Manual"))}.</small>
+              <small>Schedule: {html.escape(str(provider.get("schedule") or "manual"))}. Last refresh: {html.escape(str(health.get("last_run") or "Never"))}. Next: {html.escape(str(health.get("next_run_at") or "Manual"))}.</small>
             </div>
             """
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider Runtime</h3><span>{html.escape(str(data.get("scheduler_status") or "idle").title())}</span></div>
+      <div class="chart-heading"><h3>Data connection status</h3><span>{html.escape(str(data.get("scheduler_status") or "idle").title())}</span></div>
       <div class="config-grid">
-        <div><span>Runtime health</span><strong>{html.escape(str(data.get("runtime_health") or "unknown").title())}</strong></div>
+        <div><span>Connection health</span><strong>{html.escape(str(data.get("runtime_health") or "unknown").title())}</strong></div>
         <div><span>Active providers</span><strong>{len(data.get("active_providers", []))}</strong></div>
       </div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No runtime adapters are registered.</p>'}</div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No data connections are registered.</p>'}</div>
     </div>
     """
 
@@ -3899,8 +3943,8 @@ def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
         return """
     <div id="system-data-quality" class="system-card">
-      <div class="chart-heading"><h3>Provider observations</h3><span>Not available yet</span></div>
-      <p class="notice">Older readings may exist before provider observations were introduced. New imports and collectors will fill this in as they run.</p>
+      <div class="chart-heading"><h3>Source readings</h3><span>Not available yet</span></div>
+      <p class="notice">Older readings may exist before source reading history was introduced. New imports and live data refreshes will fill this in as they run.</p>
     </div>
     """
     rows = []
@@ -3916,8 +3960,8 @@ def provider_observations_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div id="system-data-quality" class="system-card">
-      <div class="chart-heading"><h3>Provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before the Provider Observation pipeline. New imports and collectors will populate observations as they run.</p>'}</div>
+      <div class="chart-heading"><h3>Source readings</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before source reading history. New imports and live data refreshes will populate readings as they run.</p>'}</div>
     </div>
     """
 
@@ -3941,8 +3985,8 @@ def promotion_summary_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Latest promotions</h3><span>{int(counts.get("ACCEPTED") or 0)} accepted / {int(counts.get("REJECTED") or 0)} rejected / {int(counts.get("CONFLICT") or 0)} conflicts</span></div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations have been promoted yet.</p>'}</div>
+      <div class="chart-heading"><h3>Latest trusted readings</h3><span>{int(counts.get("ACCEPTED") or 0)} accepted / {int(counts.get("REJECTED") or 0)} rejected / {int(counts.get("CONFLICT") or 0)} conflicts</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No source readings have been trusted yet.</p>'}</div>
     </div>
     """
 
@@ -3997,7 +4041,7 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
         "Battery SOC": _percentage_label(data.get("battery", {}).get("charge_pct")),
         "Battery power": _live_power_label(data.get("battery", {}).get("power_w")),
         "Billing day": data.get("billing", {}).get("day_of_period"),
-        "Collector": data.get("collector", {}).get("status"),
+        "Live data": data.get("collector", {}).get("status"),
         "Evidence": data.get("evidence", {}).get("confidence"),
     }
     row_html = "".join(
@@ -4015,7 +4059,7 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
     changes_html = f"<ul>{''.join(changes)}</ul>" if changes else '<p class="small">No recent material state changes recorded.</p>'
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Household State</h3><span>{html.escape(str(data.get("summary", {}).get("current_status") or "Current facts").title())}</span></div>
+      <div class="chart-heading"><h3>Household status</h3><span>{html.escape(str(data.get("summary", {}).get("current_status") or "Current facts").title())}</span></div>
       <div class="config-grid">{row_html}</div>
       <p class="small">Latest snapshot: {html.escape(str(latest_text or "Not captured"))}</p>
       {changes_html}
@@ -4073,8 +4117,8 @@ def household_anomalies_html(anomalies: Optional[list[dict]]) -> str:
     if not anomalies:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Household Anomalies</h3><span>0 active</span></div>
-      <p class="notice">No behaviour-aware household anomalies are active.</p>
+      <div class="chart-heading"><h3>Unusual changes</h3><span>0 active</span></div>
+      <p class="notice">No unusual household changes are active.</p>
     </div>
     """
     rows = []
@@ -4095,7 +4139,7 @@ def household_anomalies_html(anomalies: Optional[list[dict]]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Household Anomalies</h3><span>{len(anomalies)} active</span></div>
+      <div class="chart-heading"><h3>Unusual changes</h3><span>{len(anomalies)} active</span></div>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
@@ -4108,8 +4152,8 @@ def household_decisions_html(
     if not decisions:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Decision Summary</h3><span>0 active</span></div>
-      <p class="notice">No active household decisions are currently emitted.</p>
+      <div class="chart-heading"><h3>Recommendation summary</h3><span>0 active</span></div>
+      <p class="notice">No active recommendations are ready right now.</p>
     </div>
     """
     rows = []
@@ -4124,16 +4168,16 @@ def household_decisions_html(
         rows.append(
             f"""
             <div class="completeness-row {tone}">
-              <span>{html.escape(str(decision.get("type") or "Decision").replace("_", " ").title())}</span>
+              <span>{html.escape(customer_source(decision.get("type") or "Recommendation"))}</span>
               <strong>{html.escape(priority.title())} / {html.escape(confidence.title())}</strong>
-              <small>{html.escape(str(reason or ""))} Evidence: {html.escape(str(evidence_summary))}</small>
+              <small>{html.escape(customer_label(reason or ""))} Why this matters: {html.escape(customer_source(evidence_summary))}</small>
             </div>
             """
         )
     active_count = int((summary or {}).get("active_count") or len(decisions))
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Decision Summary</h3><span>{active_count} active</span></div>
+      <div class="chart-heading"><h3>Recommendation summary</h3><span>{active_count} active</span></div>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
@@ -4156,20 +4200,20 @@ def decision_provenance_html(
         decision_id = decision.get("decision_id")
         advisor = advisor_by_decision.get(decision_id)
         evidence = decision.get("evidence") or []
-        evidence_text = evidence[0].get("source") if evidence and isinstance(evidence[0], dict) else "DecisionEngine"
-        advisor_text = advisor.headline if advisor else "No advisor explanation linked"
+        evidence_text = evidence[0].get("source") if evidence and isinstance(evidence[0], dict) else "Household data"
+        advisor_text = advisor.headline if advisor else "No explanation linked"
         rows.append(
             f"""
             <div class="completeness-row neutral">
-              <span>{html.escape(str(decision.get("type") or "Decision").replace("_", " ").title())}</span>
+              <span>{html.escape(customer_source(decision.get("type") or "Recommendation"))}</span>
               <strong>{html.escape(advisor_text)}</strong>
-              <small>Evidence: {html.escape(str(evidence_text))}</small>
+              <small>Source: {html.escape(customer_source(evidence_text))}</small>
             </div>
             """
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Decision Provenance</h3><span>Decision to advisor to evidence</span></div>
+      <div class="chart-heading"><h3>Recommendation trail</h3><span>Recommendation to explanation to source</span></div>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
@@ -4314,12 +4358,12 @@ def system_page_html(
     config_html = "".join(f"<div><span>{html.escape(key)}</span><strong>{html.escape(str(value))}</strong></div>" for key, value in config_rows.items())
     collector_body = f"""
       <div class="metrics">
-        {metric("Collector status", collector_status_text(health), "Current collector state", "good" if health.get("status") == "ok" else "bad")}
-        {metric("Last successful collection", display_timestamp(health.get("last_successful_collection")), "Most recent successful collector run", "grid")}
+        {metric("Live data status", collector_status_text(health), "Current live data state", "good" if health.get("status") == "ok" else "bad")}
+        {metric("Last successful refresh", display_timestamp(health.get("last_successful_collection")), "Most recent successful data refresh", "grid")}
         {metric("Last failure", display_timestamp(health.get("last_collection_failure")), str(health.get("collector_message") or health.get("failure_type") or "No recent failure recorded"), "bad" if health.get("status") != "ok" and health.get("last_collection_failure") else "grid")}
         {metric("Report age", f"{float(health.get('report_age_minutes') or 0):.1f} minutes", "Freshness of generated dashboard", "grid")}
         {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
-        {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Continuous Setup Engine readiness", "good" if setup and setup.progress.complete else "grid")}
+        {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Setup readiness", "good" if setup and setup.progress.complete else "grid")}
       </div>
     """
     advanced_body = f"""
@@ -4359,15 +4403,15 @@ def system_page_html(
         {provider_management_html(provider_management)}
         {provider_registry_html(provider_registry)}
       ''', open_by_default=True, css_class="system-group")}
-      {disclosure_html("Collector Health", "Collection recency, failures, and report freshness", collector_body, open_by_default=True, css_class="system-group")}
-      {disclosure_html("Decisions", "Active household decisions and confidence", f'''
+      {disclosure_html("Live Data", "Data recency, failures, and report freshness", collector_body, open_by_default=True, css_class="system-group")}
+      {disclosure_html("Recommendations", "Active household recommendations and confidence", f'''
         {household_decisions_html(household_decisions, decision_summary)}
       ''', css_class="system-group")}
-      {disclosure_html("Evidence", "Provider observations and data confidence", f'''
+      {disclosure_html("Confidence", "Source readings and data confidence", f'''
         {provider_observations_html(provider_observations)}
         {data_completeness_html(summary, settings)}
       ''', css_class="system-group")}
-      {disclosure_html("Advanced Diagnostics", "Runtime, behaviour, provenance, notifications, and raw configuration", advanced_body, css_class="system-group advanced-diagnostics")}
+      {disclosure_html("Advanced Diagnostics", "Data connections, behaviour, recommendation trail, notifications, and local configuration", advanced_body, css_class="system-group advanced-diagnostics")}
     </section>
     """
 
@@ -4431,7 +4475,7 @@ def imports_page_html(
         if task.status != "future"
     )
     setup_task_html_block = (
-        f'<div class="system-card"><div class="chart-heading"><h3>Upload setup tasks</h3><span>Setup Engine</span></div><div class="completeness-grid">{setup_task_rows}</div></div>'
+        f'<div class="system-card"><div class="chart-heading"><h3>Upload setup tasks</h3><span>Setup guidance</span></div><div class="completeness-grid">{setup_task_rows}</div></div>'
         if setup_task_rows else ""
     )
     import_providers = (

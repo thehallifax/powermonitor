@@ -411,11 +411,11 @@ class HouseholdStateEngine:
             evidence_context = "LIVE"
             confidence = "HIGH" if tariff.configured else "MEDIUM"
             freshness = f"Report age {float(age):.0f} minutes" if age is not None else "Fresh"
-        sources = ["Household State Engine", "Collector health"]
+        sources = ["Household status", "Live data status"]
         if tariff.configured:
             sources.append("Configured tariff schedule")
         if provider_observations.get("count"):
-            sources.append("Provider observations")
+            sources.append("Source readings")
         if promotion_summary.get("latest_promotions"):
             sources.append("Promotion Engine")
         trusted = []

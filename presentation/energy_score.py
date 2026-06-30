@@ -150,7 +150,7 @@ def _score_confidence(completeness_confidence: str, decisions: list[Decision]) -
 def _confidence_reason(confidence: str, completeness_confidence: str, decisions: list[Decision]) -> str:
     return (
         f"{confidence} confidence because data completeness is {completeness_confidence.lower()} "
-        f"and {len(decisions)} Decision Engine outputs were considered."
+        f"and {len(decisions)} household recommendation signals were considered."
     )
 
 

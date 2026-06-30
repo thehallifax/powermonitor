@@ -1087,7 +1087,7 @@ def _sync_frequency(provider_type: ProviderType) -> str:
         return "Manual import"
     if provider_type == ProviderType.RETAILER:
         return "When billing or tariff settings change"
-    return "Collector schedule"
+    return "Refresh schedule"
 
 
 def _next_sync_label(provider_type: ProviderType) -> str:
@@ -1095,7 +1095,7 @@ def _next_sync_label(provider_type: ProviderType) -> str:
         return "Next manual import"
     if provider_type == ProviderType.RETAILER:
         return "Next settings update"
-    return "Next collector run"
+    return "Next data refresh"
 
 
 def _editable_fields(provider_type: ProviderType, provider_id: Optional[str] = None) -> list[str]:

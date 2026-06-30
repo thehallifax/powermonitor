@@ -129,5 +129,5 @@ def glance_recommendation(
     if status == "CHARGE NOW":
         return "Charge now if the load is flexible."
     if status == "DATA UNAVAILABLE":
-        return "Check collector health before acting."
+        return "Check live data before acting."
     return fallback

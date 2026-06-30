@@ -376,7 +376,7 @@ class ContextEngine:
         return "Context uses configured tariff data and fresh household interval evidence."
 
     def _data_sources(self, settings: Any, health: dict[str, Any], evidence: EvidenceContext) -> tuple[str, ...]:
-        sources = ["Collector health"]
+        sources = ["Live data status"]
         if import_rates(settings):
             sources.append("Configured tariff schedule")
         if evidence != EvidenceContext.INSUFFICIENT:

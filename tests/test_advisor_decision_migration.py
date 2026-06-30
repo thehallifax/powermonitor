@@ -74,7 +74,7 @@ class AdvisorDecisionMigrationTests(unittest.TestCase):
         self.assertEqual(payload["decision_reference"]["decision_id"], "hd1")
         self.assertEqual(payload["decision"]["type"], "WAIT_FOR_CHEAPER_WINDOW")
         self.assertEqual(payload["advisor_type"], "EV_CHARGING")
-        self.assertIn("Decision Engine", payload["confidence_reason"])
+        self.assertIn("available household data", payload["confidence_reason"])
 
     def test_briefing_summarizes_household_decisions(self):
         decision = household_decision("CHARGE_NOW")
@@ -89,7 +89,7 @@ class AdvisorDecisionMigrationTests(unittest.TestCase):
         payload = briefing.as_dict()
         self.assertEqual(payload["top_priorities"][0]["decision_reference"]["decision_id"], "hd1")
         self.assertEqual(payload["top_priorities"][0]["recommendation"], "Wait for the next lower-cost tariff window.")
-        self.assertIn("DecisionEngine", payload["overall_freshness"])
+        self.assertIn("Current household data", payload["overall_freshness"])
 
     def test_recommendation_mapping_exposes_household_decision(self):
         data = report.recommendation_with_decision_dict(recommendation(), [household_decision()])
@@ -97,7 +97,7 @@ class AdvisorDecisionMigrationTests(unittest.TestCase):
 
         self.assertEqual(data["household_decision_id"], "hd1")
         self.assertEqual(data["decision"]["type"], "WAIT_FOR_CHEAPER_WINDOW")
-        self.assertIn("Household decision", markup)
+        self.assertIn("Recommendation", markup)
         self.assertIn("Wait For Cheaper Window", markup)
 
     def test_notification_candidates_reference_household_decisions(self):
@@ -111,7 +111,7 @@ class AdvisorDecisionMigrationTests(unittest.TestCase):
         candidate = readiness.candidates[0]
         self.assertEqual(candidate.notification_type, NotificationType.CHARGE_NOW)
         self.assertTrue(candidate.source_event_key.startswith("decision:"))
-        self.assertEqual(candidate.evidence[0].source, "DecisionEngine")
+        self.assertEqual(candidate.evidence[0].source, "Household data")
 
     def test_timeline_entries_reference_household_decisions(self):
         timeline = build_decision_timeline(

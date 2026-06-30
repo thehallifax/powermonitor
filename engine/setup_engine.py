@@ -249,14 +249,14 @@ class SetupEngine:
         ready = status == "ok"
         return task(
             "collector_offline",
-            "Collector offline",
+            "Live data unavailable",
             ready,
             "high",
             "3 minutes",
-            "Review Collector Health",
+            "Review data connection",
             "#system-collector",
             str(collector_health.get("collector_message") or collector_health.get("message") or status),
-            "Collector Health",
+            "Data connection",
         )
 
     def _freshness_task(

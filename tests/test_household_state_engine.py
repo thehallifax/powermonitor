@@ -123,7 +123,7 @@ class HouseholdStateEngineTests(unittest.TestCase):
 
         self.assertEqual(context.current_tariff_bucket, "peak")
         self.assertEqual(context.tariff, TariffContext.HIGHEST_COST)
-        self.assertIn("Household State Engine", context.data_sources_used)
+        self.assertIn("Household status", context.data_sources_used)
 
     def test_live_observations_map_into_household_state(self):
         state = self.build(

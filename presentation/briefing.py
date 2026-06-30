@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daily Briefing presentation model for Decision Engine output."""
+"""Daily Briefing presentation model for recommendation output."""
 
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -86,7 +86,7 @@ def build_daily_briefing(
     briefing_date: Optional[date] = None,
     energy_score: Optional[EnergyScore] = None,
 ) -> DailyBriefing:
-    """Build a calm Home briefing from Decision Engine output."""
+    """Build a calm Home briefing from recommendation output."""
 
     decision_list = list(decisions)
     sorted_decisions = sorted(
@@ -226,7 +226,7 @@ def _financial_impact_text(decision: Decision) -> str:
         value = impact.get(key)
         if value is not None:
             return f"${float(value):,.2f} {label}"
-    return "Not quantified"
+    return "Unable to estimate"
 
 
 def _briefing_explanation(decision: Decision) -> BriefingExplanation:
@@ -249,7 +249,7 @@ def _fallback_decision_explanation(decision: Decision) -> DecisionExplanation:
             for key, value in decision.evidence.items()
         ] or [decision.finding],
         financial_impact=_financial_impact_text(decision),
-        confidence_reason=f"{decision.confidence} confidence from Decision Engine output.",
+        confidence_reason=f"{decision.confidence} confidence from available household data.",
         data_sources_used=list(decision.data_sources_used),
         freshness_completeness_note=(
             f"Decision expires at {decision.expires_at}." if decision.expires_at else None

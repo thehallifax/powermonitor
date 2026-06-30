@@ -1,5 +1,19 @@
 # Changelog
 
+## UX-001 - Human Language Pass
+
+- Reworded customer-facing Home, Daily Briefing, Glance, Recommendations,
+  Setup, Imports, Timeline, and System presentation copy to avoid exposing
+  internal engine, model, runtime, collector, and observation terminology.
+- Added report display helpers that translate internal source and evidence
+  labels into homeowner-friendly language while preserving existing APIs,
+  models, and architecture.
+- Updated recommendation, notification, setup, timeline, and confidence wording
+  so unavailable savings read as "Unable to estimate" and data health reads as
+  live data/source confidence.
+- Updated wording regression expectations and verified the generated report no
+  longer contains the targeted customer-facing engineering terms.
+
 ## PI-006 - Interactive Provider Configuration
 
 - Added local interactive provider configuration controls to System provider

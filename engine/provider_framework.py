@@ -323,7 +323,7 @@ def build_provider_registry(
                         ProviderCapability.LIVE_POWER,
                         "home_assistant_entities",
                         quality=ProviderObservationQuality.MEDIUM,
-                        note="Home Assistant entities are discovered through the provider runtime and normalized into provider observations.",
+                        note="Home Assistant entities are discovered through the data connection and turned into source readings.",
                     )
                 ],
                 source="home_assistant",

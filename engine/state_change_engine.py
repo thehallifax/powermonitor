@@ -205,9 +205,9 @@ class StateChangeEngine:
         current_healthy = current.get("collector_state", {}).get("healthy")
         evidence = [StateChangeEvidence("collector.healthy", previous_healthy, current_healthy)]
         if previous_healthy is True and current_healthy is False:
-            changes.append(self._change(previous, current, StateChangeType.COLLECTOR_WENT_STALE, StateChangeSeverity.CRITICAL, "Collector went stale", "Collector health degraded.", evidence))
+            changes.append(self._change(previous, current, StateChangeType.COLLECTOR_WENT_STALE, StateChangeSeverity.CRITICAL, "Live data went stale", "Live data is not updating normally.", evidence))
         if previous_healthy is False and current_healthy is True:
-            changes.append(self._change(previous, current, StateChangeType.COLLECTOR_RECOVERED, StateChangeSeverity.INFO, "Collector recovered", "Collector health recovered.", evidence))
+            changes.append(self._change(previous, current, StateChangeType.COLLECTOR_RECOVERED, StateChangeSeverity.INFO, "Live data recovered", "Live data is updating again.", evidence))
 
     def _billing_changes(self, previous: dict[str, Any], current: dict[str, Any], changes: list[StateChange]) -> None:
         previous_start = previous.get("billing_state", {}).get("period_start")
@@ -228,9 +228,9 @@ class StateChangeEngine:
             return
         evidence = [StateChangeEvidence("evidence.confidence", previous_quality, current_quality)]
         if rank.get(str(current_quality), 0) < rank.get(str(previous_quality), 0):
-            changes.append(self._change(previous, current, StateChangeType.EVIDENCE_QUALITY_DEGRADED, StateChangeSeverity.WARNING, "Evidence quality degraded", "Household evidence confidence decreased.", evidence))
+            changes.append(self._change(previous, current, StateChangeType.EVIDENCE_QUALITY_DEGRADED, StateChangeSeverity.WARNING, "Confidence reduced", "Household data confidence decreased.", evidence))
         else:
-            changes.append(self._change(previous, current, StateChangeType.EVIDENCE_QUALITY_RECOVERED, StateChangeSeverity.INFO, "Evidence quality recovered", "Household evidence confidence improved.", evidence))
+            changes.append(self._change(previous, current, StateChangeType.EVIDENCE_QUALITY_RECOVERED, StateChangeSeverity.INFO, "Confidence improved", "Household data confidence improved.", evidence))
 
     def _provider_changes(self, previous: dict[str, Any], current: dict[str, Any], changes: list[StateChange]) -> None:
         previous_providers = set(previous.get("provider_provenance", {}).get("trusted_provider_data", []))

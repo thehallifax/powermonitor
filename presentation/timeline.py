@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decision Timeline presentation model for existing engine/report output."""
+"""Timeline presentation model for existing report output."""
 
 from datetime import date
 from typing import Any, Iterable, Optional
@@ -66,7 +66,7 @@ def _bill_tracking_entry(comparison: Optional[dict[str, Any]]) -> Optional[Timel
         ),
         financial_impact=f"{float(delta):+,.2f} AUD vs comparison period",
         confidence="Medium",
-        evidence_sources=["Period comparison", "FinancialEngine report output"],
+        evidence_sources=["Period comparison", "Bill estimate"],
         event_type="bill_tracking",
     )
 
@@ -109,7 +109,7 @@ def _timeline_event_type(decision: Decision) -> str:
 
 def _decision_financial_impact(decision: Decision) -> Optional[str]:
     explanation = decision.explanation
-    if explanation and not explanation.financial_impact.lower().startswith("not quantified"):
+    if explanation and not explanation.financial_impact.lower().startswith(("not quantified", "unable to estimate")):
         return explanation.financial_impact
     for key, label in (
         ("today", "today"),
@@ -128,11 +128,11 @@ def _household_decision_entry(period_summary: Any, decision: Any) -> TimelineEnt
     summary = _get(reasons[0], "summary") if reasons else decision_type.replace("_", " ").title()
     return TimelineEntry(
         timestamp=str(_get(decision, "created_at") or _iso_date(_value(period_summary, "end"))),
-        title=f"Household decision: {decision_type.replace('_', ' ').title()}",
+        title=f"Recommendation: {decision_type.replace('_', ' ').title()}",
         summary=str(summary),
         financial_impact=_household_decision_financial_impact(decision),
         confidence=_display_confidence(_get(decision, "confidence")),
-        evidence_sources=list(_get(decision, "data_sources_used") or ["DecisionEngine"]),
+        evidence_sources=list(_get(decision, "data_sources_used") or ["Household data"]),
         event_type=f"household_decision_{decision_type.lower()}",
         decision_id=_get(decision, "decision_id"),
         decision_type=decision_type,

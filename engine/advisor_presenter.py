@@ -93,7 +93,7 @@ def _advisor_from_presentation(presentation: RecommendationPresentation) -> Advi
         recommendation=presentation.recommended_action,
         estimated_financial_impact=presentation.financial_impact,
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from Decision Engine presentation adapter.",
+        confidence_reason=f"{presentation.confidence} confidence from available household data.",
         evidence_trail=EvidenceTrail([
             EvidenceItem(
                 source=item.source,
@@ -103,8 +103,8 @@ def _advisor_from_presentation(presentation: RecommendationPresentation) -> Advi
                 freshness=item.observed_at,
             )
             for item in presentation.evidence[:5]
-        ] or [EvidenceItem("DecisionEngine", presentation.title, presentation.rationale, presentation.confidence)]),
-        freshness="DecisionEngine",
+        ] or [EvidenceItem("Household data", presentation.title, presentation.rationale, presentation.confidence)]),
+        freshness="Current household data",
         supporting_data_sources=list(presentation.data_sources_used),
         next_review_time=presentation.valid_until,
         decision_id=presentation.decision_id,
@@ -123,7 +123,7 @@ def _copy_advisor_with_presentation(advisor: Advisor, presentation: Recommendati
         recommendation=presentation.recommended_action,
         estimated_financial_impact=advisor.estimated_financial_impact,
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from Decision Engine presentation adapter.",
+        confidence_reason=f"{presentation.confidence} confidence from available household data.",
         evidence_trail=advisor.evidence_trail,
         freshness=advisor.freshness,
         supporting_data_sources=advisor.supporting_data_sources,

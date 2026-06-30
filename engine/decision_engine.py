@@ -282,7 +282,7 @@ class DecisionEngine:
             reasons.append(DecisionReason("provider_degraded", "One or more providers report degraded health."))
             evidence.append(DecisionEvidence("ProviderHealth", "provider_health", "degraded", evidence_confidence, created_at))
         if collector_healthy is False:
-            reasons.append(DecisionReason("collector_unhealthy", "Collector health is not currently good."))
+            reasons.append(DecisionReason("collector_unhealthy", "Live data is not currently updating normally."))
             evidence.append(DecisionEvidence("HouseholdState", "collector_status", _get(collector, "status"), evidence_confidence, created_at))
         decisions.append(self._decision(
             household_id,
@@ -292,7 +292,7 @@ class DecisionEngine:
             created_at,
             reasons,
             evidence,
-            outcome=DecisionOutcome("provider_review", "Provider or collector health should be reviewed before acting on dependent advice."),
+            outcome=DecisionOutcome("provider_review", "Data connections should be reviewed before acting on dependent advice."),
             data_sources=["Provider Health", "Household State"],
         ))
 
@@ -761,7 +761,7 @@ def _financial_impact_text(decision: Decision) -> str:
         value = decision.financial_impact.get(key)
         if value is not None:
             return f"{_money(float(value))} {labels[key]}"
-    return "Not quantified by the current Decision Engine output."
+    return "Unable to estimate from the current household data."
 
 
 def _confidence_reason(decision: Decision) -> str:
@@ -1184,7 +1184,7 @@ def repeated_peak_usage_trend(context: dict, thresholds: dict) -> Optional[Decis
         explanation=_trend_explanation(
             "This matters now because a recent high-peak event confirms the pattern is still active.",
             confidence_reason,
-            "Not quantified by the current Decision Engine output.",
+            "Unable to estimate from the current household data.",
             evidence,
             sources,
         ),
@@ -1246,7 +1246,7 @@ def bill_trajectory_trend(context: dict, thresholds: dict) -> Optional[Decision]
         explanation=_trend_explanation(
             f"This matters now because the bill trajectory has recent {direction} evidence in the current billing period.",
             confidence_reason,
-            "Not quantified by the current Decision Engine output.",
+            "Unable to estimate from the current household data.",
             evidence,
             sources,
         ),
@@ -1288,7 +1288,7 @@ def recurring_ev_charging_win(context: dict, thresholds: dict) -> Optional[Decis
         explanation=_trend_explanation(
             "This matters now because the low-cost EV charging pattern is still appearing recently, not only in old history.",
             confidence_reason,
-            "Not quantified by the current Decision Engine output.",
+            "Unable to estimate from the current household data.",
             evidence,
             sources,
         ),
@@ -1330,7 +1330,7 @@ def recurring_solar_utilisation_win(context: dict, thresholds: dict) -> Optional
         explanation=_trend_explanation(
             "This matters now because a positive solar/utilisation pattern is recurring in recent history.",
             confidence_reason,
-            "Not quantified by the current Decision Engine output.",
+            "Unable to estimate from the current household data.",
             evidence,
             sources,
         ),
@@ -1372,7 +1372,7 @@ def repeated_estimated_data_warning(context: dict, thresholds: dict) -> Optional
         explanation=_trend_explanation(
             "This matters now because fallback EV data is still being used in the last 7 days.",
             confidence_reason,
-            "Not quantified by the current Decision Engine output.",
+            "Unable to estimate from the current household data.",
             evidence,
             sources,
         ),
