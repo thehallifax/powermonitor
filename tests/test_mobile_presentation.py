@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import report
 from engine.models import DecisionTimeline, TimelineEntry
+from engine.provider_framework import ProviderCapability
 
 
 class MobilePresentationTests(unittest.TestCase):
@@ -52,7 +53,26 @@ class MobilePresentationTests(unittest.TestCase):
                 "capability_summary": {"capabilities": ["ev_sessions"]},
                 "diagnostics": {"last_successful_sync": None},
                 "health": {"collector_status": "not_configured"},
+                "sync_state": "NEVER_SYNCED",
                 "actions": ["configure"],
+                "onboarding": {
+                    "state": "NOT_CONFIGURED",
+                    "state_label": "Not Configured",
+                    "connected": False,
+                    "healthy": False,
+                    "data_available": False,
+                    "last_successful_sync": None,
+                    "next_scheduled_sync": "Next manual import",
+                    "sync_frequency": "Manual import",
+                    "required_information": ["A supported export file when you import history"],
+                    "why_required": "Import files add history without requiring a live provider session.",
+                    "connection_status": "Not configured yet.",
+                    "health_status": "Waiting for setup.",
+                    "next_step": "Select Ocular export, review the required details, then configure it.",
+                    "common_failures": ["Wrong export file type"],
+                    "recovery_steps": ["Export the file again from the provider"],
+                    "technical_details": {"lifecycle_state": "NOT_CONFIGURED"},
+                },
             },
         )
         manager = SimpleNamespace(providers=lambda: [provider])
@@ -62,8 +82,27 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Connected?", html)
         self.assertIn("Healthy?", html)
         self.assertIn("Last updated", html)
-        self.assertIn("Next step", html)
+        self.assertIn("Data available?", html)
+        self.assertIn("Sync frequency", html)
+        self.assertIn("Next scheduled sync", html)
+        self.assertIn("What should I do next?", html)
+        self.assertIn("Setup and recovery", html)
+        self.assertIn("Technical diagnostics", html)
         self.assertIn("Not yet", html)
+
+    def test_import_provider_cards_deep_link_to_provider_setup(self):
+        provider = SimpleNamespace(
+            provider_id="ocular_export",
+            name="Ocular export",
+            lifecycle_state=SimpleNamespace(value="NOT_CONFIGURED"),
+            capability_summary=SimpleNamespace(capabilities=[ProviderCapability.IMPORT_ONLY]),
+            note="Ocular EV charging history upload is supported.",
+        )
+        manager = SimpleNamespace(providers=lambda: [provider])
+
+        html = report.imports_page_html(provider_management=manager)
+
+        self.assertIn('href="#system-provider-ocular_export"', html)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust the data?", "Connected sources and confidence.")

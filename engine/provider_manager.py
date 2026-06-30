@@ -19,6 +19,18 @@ class ProviderConnectionStatus(str, Enum):
     DISABLED = "DISABLED"
 
 
+class ProviderOnboardingState(str, Enum):
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+    CONFIGURATION_REQUIRED = "CONFIGURATION_REQUIRED"
+    READY_TO_CONNECT = "READY_TO_CONNECT"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    SYNCING = "SYNCING"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    DISABLED = "DISABLED"
+
+
 class ProviderSyncState(str, Enum):
     NEVER_SYNCED = "NEVER_SYNCED"
     SYNCED = "SYNCED"
@@ -153,6 +165,48 @@ class ProviderTestResult:
 
 
 @dataclass(frozen=True)
+class ProviderOnboardingGuide:
+    provider_id: str
+    state: ProviderOnboardingState
+    state_label: str
+    connected: bool
+    healthy: bool
+    data_available: bool
+    last_successful_sync: Optional[str]
+    next_scheduled_sync: str
+    sync_frequency: str
+    required_information: list[str]
+    why_required: str
+    connection_status: str
+    health_status: str
+    next_step: str
+    common_failures: list[str]
+    recovery_steps: list[str]
+    technical_details: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider_id": self.provider_id,
+            "state": self.state.value,
+            "state_label": self.state_label,
+            "connected": self.connected,
+            "healthy": self.healthy,
+            "data_available": self.data_available,
+            "last_successful_sync": self.last_successful_sync,
+            "next_scheduled_sync": self.next_scheduled_sync,
+            "sync_frequency": self.sync_frequency,
+            "required_information": list(self.required_information),
+            "why_required": self.why_required,
+            "connection_status": self.connection_status,
+            "health_status": self.health_status,
+            "next_step": self.next_step,
+            "common_failures": list(self.common_failures),
+            "recovery_steps": list(self.recovery_steps),
+            "technical_details": dict(self.technical_details),
+        }
+
+
+@dataclass(frozen=True)
 class ManagedProvider:
     provider_id: str
     name: str
@@ -163,6 +217,7 @@ class ManagedProvider:
     sync_state: ProviderSyncState
     diagnostics: ProviderDiagnostics
     capability_summary: ProviderCapabilitySummary
+    onboarding: ProviderOnboardingGuide
     actions: list[str]
     source: Optional[str] = None
     note: Optional[str] = None
@@ -178,6 +233,7 @@ class ManagedProvider:
             "sync_state": self.sync_state.value,
             "diagnostics": self.diagnostics.as_dict(),
             "capability_summary": self.capability_summary.as_dict(),
+            "onboarding": self.onboarding.as_dict(),
             "actions": list(self.actions),
             "source": self.source,
             "note": self.note,
@@ -221,6 +277,7 @@ class ProviderManager:
         return {
             "providers": [provider.as_dict() for provider in providers],
             "status": {provider.provider_id: provider.lifecycle_state.value for provider in providers},
+            "onboarding_states": [state.value for state in ProviderOnboardingState],
             "actions": ["Configure", "Edit", "Reconnect", "Disconnect", "Test Connection", "Disable", "Enable", "Remove"],
         }
 
@@ -316,6 +373,8 @@ class ProviderManager:
             last_error=diagnostics.last_error,
             freshness=diagnostics.freshness,
         )
+        sync_state = _sync_state(lifecycle, diagnostics)
+        onboarding = _onboarding_guide(provider, configuration, health, diagnostics, capability_summary, sync_state)
         return ManagedProvider(
             provider_id=provider.provider_id,
             name=provider.name,
@@ -323,9 +382,10 @@ class ProviderManager:
             lifecycle_state=lifecycle,
             configuration=configuration,
             health=health,
-            sync_state=_sync_state(lifecycle, diagnostics),
+            sync_state=sync_state,
             diagnostics=diagnostics,
             capability_summary=capability_summary,
+            onboarding=onboarding,
             actions=_actions_for(lifecycle),
             source=provider.source,
             note=provider.note,
@@ -410,6 +470,176 @@ def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
     else:
         actions.append("Diagnostics")
     return actions
+
+
+def _onboarding_guide(
+    provider: Provider,
+    configuration: ProviderConfiguration,
+    health: ProviderHealth,
+    diagnostics: ProviderDiagnostics,
+    capability_summary: ProviderCapabilitySummary,
+    sync_state: ProviderSyncState,
+) -> ProviderOnboardingGuide:
+    state = _onboarding_state(configuration, health, diagnostics, sync_state)
+    connected = state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING}
+    healthy = state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING, ProviderOnboardingState.READY_TO_CONNECT}
+    data_available = capability_summary.detected or diagnostics.observation_count > 0 or bool(diagnostics.last_successful_sync)
+    required = _required_information(configuration)
+    return ProviderOnboardingGuide(
+        provider_id=provider.provider_id,
+        state=state,
+        state_label=state.value.replace("_", " ").title(),
+        connected=connected,
+        healthy=healthy,
+        data_available=data_available,
+        last_successful_sync=diagnostics.last_successful_sync,
+        next_scheduled_sync=_next_sync_label(provider.provider_type),
+        sync_frequency=_sync_frequency(provider.provider_type),
+        required_information=required,
+        why_required=_why_required(provider.provider_type),
+        connection_status=_connection_status(state),
+        health_status=_health_status(state, health, diagnostics),
+        next_step=_next_step(state, provider.name),
+        common_failures=_common_failures(provider.provider_type),
+        recovery_steps=_recovery_steps(provider.provider_type),
+        technical_details={
+            "lifecycle_state": configuration.lifecycle_state.value,
+            "sync_state": sync_state.value,
+            "collector_status": health.collector_status,
+            "failure_count": diagnostics.failure_count,
+            "last_error": diagnostics.last_error,
+            "source": provider.source,
+        },
+    )
+
+
+def _onboarding_state(
+    configuration: ProviderConfiguration,
+    health: ProviderHealth,
+    diagnostics: ProviderDiagnostics,
+    sync_state: ProviderSyncState,
+) -> ProviderOnboardingState:
+    if not configuration.enabled or configuration.lifecycle_state == ProviderConnectionStatus.DISABLED:
+        return ProviderOnboardingState.DISABLED
+    if configuration.lifecycle_state == ProviderConnectionStatus.SYNCING or sync_state == ProviderSyncState.SYNCING:
+        return ProviderOnboardingState.SYNCING
+    if configuration.lifecycle_state == ProviderConnectionStatus.ERROR:
+        return ProviderOnboardingState.ERROR
+    if configuration.lifecycle_state == ProviderConnectionStatus.DEGRADED or sync_state in {ProviderSyncState.FAILED, ProviderSyncState.STALE}:
+        return ProviderOnboardingState.WARNING
+    if configuration.lifecycle_state == ProviderConnectionStatus.NOT_CONFIGURED:
+        return ProviderOnboardingState.NOT_CONFIGURED
+    if configuration.lifecycle_state == ProviderConnectionStatus.CONNECTED:
+        return ProviderOnboardingState.CONNECTED
+    missing_required = [
+        credential for credential in configuration.credentials
+        if credential.required and not credential.configured
+    ]
+    if missing_required:
+        return ProviderOnboardingState.CONFIGURATION_REQUIRED
+    if configuration.lifecycle_state == ProviderConnectionStatus.CONFIGURED and not diagnostics.last_successful_sync:
+        return ProviderOnboardingState.READY_TO_CONNECT
+    return ProviderOnboardingState.READY_TO_CONNECT
+
+
+def _required_information(configuration: ProviderConfiguration) -> list[str]:
+    required = [credential.label for credential in configuration.credentials if credential.required]
+    if required:
+        return required
+    if configuration.provider_type == ProviderType.GENERIC_IMPORT:
+        return ["A supported export file when you import history"]
+    if configuration.provider_type == ProviderType.RETAILER:
+        return ["Tariff or billing plan details"]
+    return ["Provider account details", "Provider endpoint if you use a local adapter"]
+
+
+def _why_required(provider_type: ProviderType) -> str:
+    reasons = {
+        ProviderType.SOLAR: "Solar access lets PowerMonitor explain generation, export credit, and self-consumption against your bill.",
+        ProviderType.EV_CHARGER: "EV session data separates real charging cost from estimates so advice can use actual household charging.",
+        ProviderType.RETAILER: "Retailer and tariff details turn usage into bill impact and plan comparisons.",
+        ProviderType.SMART_METER: "Meter readings provide the interval history needed for cost, freshness, and confidence checks.",
+        ProviderType.HOME_AUTOMATION: "Home automation data can provide local EV or live-power observations without controlling devices.",
+        ProviderType.GENERIC_IMPORT: "Import files add history without requiring a live provider session.",
+    }
+    return reasons.get(provider_type, "Provider details let PowerMonitor test access and explain which data is safe to use.")
+
+
+def _connection_status(state: ProviderOnboardingState) -> str:
+    return {
+        ProviderOnboardingState.NOT_CONFIGURED: "Not configured yet.",
+        ProviderOnboardingState.CONFIGURATION_REQUIRED: "Configuration is missing required information.",
+        ProviderOnboardingState.READY_TO_CONNECT: "Ready to test before the first sync.",
+        ProviderOnboardingState.CONNECTING: "Connection test is running.",
+        ProviderOnboardingState.CONNECTED: "Connected and available for analysis.",
+        ProviderOnboardingState.SYNCING: "Connected and syncing now.",
+        ProviderOnboardingState.WARNING: "Connected, but recent sync health needs review.",
+        ProviderOnboardingState.ERROR: "Connection is failing.",
+        ProviderOnboardingState.DISABLED: "Provider is disabled.",
+    }[state]
+
+
+def _health_status(state: ProviderOnboardingState, health: ProviderHealth, diagnostics: ProviderDiagnostics) -> str:
+    if state in {ProviderOnboardingState.CONNECTED, ProviderOnboardingState.SYNCING}:
+        return "Healthy."
+    if state == ProviderOnboardingState.READY_TO_CONNECT:
+        return "Ready for a connection test."
+    if state in {ProviderOnboardingState.WARNING, ProviderOnboardingState.ERROR}:
+        return diagnostics.last_error or health.collector_status or "Needs attention."
+    if state == ProviderOnboardingState.DISABLED:
+        return "Disabled by setup."
+    return "Waiting for setup."
+
+
+def _next_step(state: ProviderOnboardingState, provider_name: str) -> str:
+    return {
+        ProviderOnboardingState.NOT_CONFIGURED: f"Select {provider_name}, review the required details, then configure it.",
+        ProviderOnboardingState.CONFIGURATION_REQUIRED: "Add the missing required details, then test the connection.",
+        ProviderOnboardingState.READY_TO_CONNECT: "Run Test Connection and fix any warnings before relying on this data.",
+        ProviderOnboardingState.CONNECTING: "Wait for the connection test to finish.",
+        ProviderOnboardingState.CONNECTED: "No action needed right now.",
+        ProviderOnboardingState.SYNCING: "No action needed while sync is running.",
+        ProviderOnboardingState.WARNING: "Open recovery steps and check the last sync details.",
+        ProviderOnboardingState.ERROR: "Follow the recovery steps, then reconnect and test again.",
+        ProviderOnboardingState.DISABLED: "Enable this provider if you want PowerMonitor to use it.",
+    }[state]
+
+
+def _common_failures(provider_type: ProviderType) -> list[str]:
+    common = ["Expired session or credential", "Provider service unavailable", "No recent data returned"]
+    if provider_type == ProviderType.GENERIC_IMPORT:
+        return ["Wrong export file type", "Export missing required columns", "Duplicate or incomplete history"]
+    if provider_type == ProviderType.RETAILER:
+        return ["Missing tariff values", "Billing dates not configured", "Plan details changed"]
+    if provider_type == ProviderType.SOLAR:
+        return common + ["Solar portal session expired"]
+    if provider_type == ProviderType.EV_CHARGER:
+        return common + ["Charging session export is incomplete"]
+    return common
+
+
+def _recovery_steps(provider_type: ProviderType) -> list[str]:
+    if provider_type == ProviderType.GENERIC_IMPORT:
+        return ["Export the file again from the provider", "Preview the upload before saving", "Check validation messages for missing columns or dates"]
+    if provider_type == ProviderType.RETAILER:
+        return ["Confirm tariff rates and billing dates", "Update changed plan details", "Run the report again after saving"]
+    return ["Check the required information", "Reconnect or refresh the provider session", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
+
+
+def _sync_frequency(provider_type: ProviderType) -> str:
+    if provider_type == ProviderType.GENERIC_IMPORT:
+        return "Manual import"
+    if provider_type == ProviderType.RETAILER:
+        return "When billing or tariff settings change"
+    return "Collector schedule"
+
+
+def _next_sync_label(provider_type: ProviderType) -> str:
+    if provider_type == ProviderType.GENERIC_IMPORT:
+        return "Next manual import"
+    if provider_type == ProviderType.RETAILER:
+        return "Next settings update"
+    return "Next collector run"
 
 
 def _editable_fields(provider_type: ProviderType) -> list[str]:

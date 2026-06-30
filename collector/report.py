@@ -3599,6 +3599,46 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
     """
 
 
+def _provider_onboarding_fallback(data: dict) -> dict:
+    lifecycle = str(data.get("lifecycle_state") or "NOT_CONFIGURED")
+    diagnostics = data.get("diagnostics", {}) or {}
+    capabilities = data.get("capability_summary", {}) or {}
+    healthy = lifecycle in {"CONNECTED", "SYNCING", "CONFIGURED"}
+    return {
+        "state": lifecycle,
+        "state_label": friendly_label(lifecycle),
+        "connected": healthy,
+        "healthy": healthy,
+        "data_available": bool(capabilities.get("detected") or diagnostics.get("observation_count") or diagnostics.get("last_successful_sync")),
+        "last_successful_sync": diagnostics.get("last_successful_sync"),
+        "next_scheduled_sync": "Next collector run",
+        "sync_frequency": "Collector schedule",
+        "required_information": ["Provider configuration details"],
+        "why_required": "Provider details let PowerMonitor test access and explain which data is safe to use.",
+        "connection_status": "Connected and available for analysis." if healthy else "Waiting for setup.",
+        "health_status": friendly_label((data.get("health") or {}).get("collector_status") or "unknown"),
+        "next_step": "No action needed right now." if healthy else "Open this provider's setup details and complete the connection.",
+        "common_failures": ["Expired session or credential", "Provider service unavailable", "No recent data returned"],
+        "recovery_steps": ["Check the required information", "Reconnect or refresh the provider session", "Run Test Connection"],
+        "technical_details": {
+            "lifecycle_state": lifecycle,
+            "sync_state": data.get("sync_state"),
+            "collector_status": (data.get("health") or {}).get("collector_status"),
+        },
+    }
+
+
+def _list_items(items: list[str]) -> str:
+    return "".join(f"<li>{html.escape(str(item))}</li>" for item in items)
+
+
+def _technical_detail_rows(details: dict) -> str:
+    return "".join(
+        f"<div><span>{html.escape(friendly_label(str(key)))}</span><strong>{html.escape(str(value if value is not None else 'None'))}</strong></div>"
+        for key, value in details.items()
+    )
+
+
 def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
     if not provider_management:
         return """
@@ -3610,41 +3650,64 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
     rows = []
     for provider in provider_management.providers():
         data = provider.as_dict()
+        onboarding = data.get("onboarding") or _provider_onboarding_fallback(data)
         capabilities = ", ".join(
             capability.replace("_", " ").title()
             for capability in data["capability_summary"].get("capabilities", [])
         ) or "No capabilities"
-        diagnostics = data.get("diagnostics", {})
-        last_sync = diagnostics.get("last_successful_sync") or "Never synced"
-        tone = "good" if data["lifecycle_state"] in {"CONNECTED", "SYNCING", "CONFIGURED"} else "bad"
-        connection_label = friendly_label(data["lifecycle_state"])
-        health_label = friendly_label(data["health"].get("collector_status") or "unknown")
-        next_step = "No action needed right now." if tone == "good" else "Open this provider's setup details and complete the connection."
+        state = str(onboarding.get("state") or data["lifecycle_state"])
+        tone = "good" if onboarding.get("connected") and onboarding.get("healthy") else "bad" if state in {"ERROR", "WARNING", "NOT_CONFIGURED", "CONFIGURATION_REQUIRED"} else "neutral"
+        last_sync = onboarding.get("last_successful_sync") or "Never synced"
+        data_available = "Yes" if onboarding.get("data_available") else "Not yet"
         actions = " ".join(
             f'<span class="chip">{html.escape(friendly_label(action))}</span>'
             for action in data.get("actions", [])[:4]
         )
+        setup_body = f"""
+          <div class="provider-guidance-grid">
+            <div><span>Required information</span><strong>{html.escape(', '.join(onboarding.get("required_information") or ["Provider details"]))}</strong></div>
+            <div><span>Why it is required</span><strong>{html.escape(str(onboarding.get("why_required") or ""))}</strong></div>
+            <div><span>Common failures</span><ul>{_list_items(onboarding.get("common_failures") or [])}</ul></div>
+            <div><span>Recovery steps</span><ul>{_list_items(onboarding.get("recovery_steps") or [])}</ul></div>
+          </div>
+        """
+        technical_body = f"""
+          <div class="config-grid">{_technical_detail_rows(onboarding.get("technical_details") or {})}</div>
+          <div class="config-grid">
+            <div><span>Lifecycle</span><strong>{html.escape(str(data.get("lifecycle_state") or "unknown"))}</strong></div>
+            <div><span>Sync state</span><strong>{html.escape(str(data.get("sync_state") or "unknown"))}</strong></div>
+            <div><span>Observation count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("observation_count", 0)))}</strong></div>
+            <div><span>Promotion count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("promotion_count", 0)))}</strong></div>
+          </div>
+        """
         rows.append(
             f"""
             <div id="system-provider-{html.escape(provider.provider_id)}" class="provider-status-card {tone}">
               <div class="provider-status-head">
                 <span>{html.escape(provider.name)}</span>
-                <strong>{html.escape(connection_label)}</strong>
+                <strong>{html.escape(str(onboarding.get("state_label") or friendly_label(state)))}</strong>
               </div>
               <div class="provider-status-grid">
-                <div><span>Connected?</span><strong>{html.escape('Yes' if tone == 'good' else 'Not yet')}</strong></div>
-                <div><span>Healthy?</span><strong>{html.escape(health_label)}</strong></div>
+                <div><span>Connected?</span><strong>{html.escape('Yes' if onboarding.get('connected') else 'Not yet')}</strong></div>
+                <div><span>Healthy?</span><strong>{html.escape(str(onboarding.get("health_status") or "Unknown"))}</strong></div>
                 <div><span>Last updated</span><strong>{html.escape(str(last_sync))}</strong></div>
-                <div><span>Next step</span><strong>{html.escape(next_step)}</strong></div>
+                <div><span>Data available?</span><strong>{html.escape(data_available)}</strong></div>
+                <div><span>Sync frequency</span><strong>{html.escape(str(onboarding.get("sync_frequency") or "Unknown"))}</strong></div>
+                <div><span>Next scheduled sync</span><strong>{html.escape(str(onboarding.get("next_scheduled_sync") or "Unknown"))}</strong></div>
+                <div><span>Connection status</span><strong>{html.escape(str(onboarding.get("connection_status") or "Unknown"))}</strong></div>
+                <div><span>What should I do next?</span><strong>{html.escape(str(onboarding.get("next_step") or "Review provider setup."))}</strong></div>
               </div>
               <p>Provides: {html.escape(capabilities)}.</p>
               <small>{actions}</small>
+              {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
+              {disclosure_html("Technical diagnostics", "Lifecycle, sync, observations, and collector details", technical_body, css_class="provider-details")}
             </div>
             """
         )
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Provider connections</h3><span>{len(rows)} providers</span></div>
+      <p class="scenario-note">Select a provider, check what information is required, test the connection, then use the status and sync details to decide what to do next.</p>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
@@ -4204,7 +4267,7 @@ def imports_page_html(
         <div class="completeness-row {'good' if getattr(provider, 'lifecycle_state', None) and provider.lifecycle_state.value != 'NOT_CONFIGURED' else 'bad'}">
           <span>{html.escape(provider.name)}</span>
           <strong>{html.escape(getattr(getattr(provider, 'lifecycle_state', None), 'value', getattr(getattr(provider, 'status', None), 'value', 'unknown')).replace("_", " ").title())}</strong>
-          <small>{html.escape(provider.note or 'Import provider metadata')}</small>
+          <small>{html.escape(provider.note or 'Import provider metadata')} <a href="#system-provider-{html.escape(provider.provider_id)}">Open provider setup</a></small>
         </div>
         """
         for provider in import_providers
@@ -5020,16 +5083,22 @@ def write_html(
     .system-overview-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
     .system-group .disclosure-body {{ padding-top:1px; }}
     .provider-status-card {{ margin-top:10px; padding:14px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
-    .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }}
+    .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }} .provider-status-card.neutral {{ background:#fffaf0; border-color:#eeddb0; }}
     .provider-status-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
     .provider-status-head span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-status-head strong {{ font-size:15px; }}
-    .provider-status-grid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:10px; }}
+    .provider-status-grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }}
     .provider-status-grid div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:10px; }}
     .provider-status-grid span,.provider-status-grid strong {{ display:block; }}
     .provider-status-grid span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-status-grid strong {{ margin-top:3px; font-size:12px; line-height:1.3; }}
     .provider-status-card p {{ margin:9px 0 0; color:var(--muted); font-size:12px; }}
+    .provider-details {{ margin-top:10px; background:rgba(255,255,255,.68); }}
+    .provider-guidance-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    .provider-guidance-grid div {{ padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
+    .provider-guidance-grid span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-guidance-grid strong {{ display:block; margin-top:4px; font-size:12px; line-height:1.35; }}
+    .provider-guidance-grid ul {{ margin:6px 0 0; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.4; }}
     .import-panel {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .import-panel table {{ width:100%; border-collapse:collapse; }}
     .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
@@ -5140,7 +5209,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

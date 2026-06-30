@@ -10,6 +10,7 @@ from engine.provider_framework import (
 from engine.provider_manager import (
     ProviderConnectionStatus,
     ProviderManager,
+    ProviderOnboardingState,
 )
 
 
@@ -75,6 +76,28 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(provider["diagnostics"]["promotion_count"], 1)
         self.assertTrue(provider["capability_summary"]["detected"])
         self.assertIn("daily_summary", provider["capability_summary"]["capabilities"])
+        self.assertEqual(provider["onboarding"]["state"], "CONNECTED")
+        self.assertTrue(provider["onboarding"]["connected"])
+        self.assertTrue(provider["onboarding"]["healthy"])
+        self.assertEqual(provider["onboarding"]["sync_frequency"], "Collector schedule")
+        self.assertIn("why_required", provider["onboarding"])
+        self.assertIn("recovery_steps", provider["onboarding"])
+
+    def test_provider_management_exposes_standard_onboarding_states(self):
+        payload = ProviderManager(registry()).as_dict()
+
+        self.assertEqual(
+            payload["onboarding_states"],
+            [state.value for state in ProviderOnboardingState],
+        )
+
+    def test_missing_provider_has_plain_language_recovery_guidance(self):
+        provider = ProviderManager(registry(status=ProviderStatus.MISSING)).get("solaredge").as_dict()
+
+        self.assertEqual(provider["onboarding"]["state"], "NOT_CONFIGURED")
+        self.assertFalse(provider["onboarding"]["connected"])
+        self.assertIn("Cookie", provider["onboarding"]["required_information"])
+        self.assertIn("Run Test Connection", provider["onboarding"]["recovery_steps"])
 
     def test_connection_testing_reports_success_and_warnings(self):
         connected = ProviderManager(registry()).test_connection("solaredge").as_dict()

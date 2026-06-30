@@ -1,5 +1,22 @@
 # Changelog
 
+## PI-001 - Provider Onboarding Experience
+
+- Added a standardized provider onboarding contract covering not configured,
+  configuration required, ready to connect, connecting, connected, syncing,
+  warning, error, and disabled states.
+- Expanded managed provider payloads with plain-language setup guidance:
+  required information, why it is required, connection status, health status,
+  data availability, sync frequency, last successful sync, next scheduled sync,
+  common failures, recovery steps, and technical details.
+- Reworked System provider cards so first-time users see simple connection,
+  health, sync, data, and next-action answers before expandable setup/recovery
+  and technical diagnostics.
+- Linked import provider rows directly to the matching System provider setup
+  card so Setup and Imports workflows land on relevant configuration details.
+- Added regression coverage for provider onboarding serialization, standardized
+  states, mobile provider cards, and provider setup deep links.
+
 ## BR-003 - Guided Onboarding
 
 - Added reusable disclosure panels so dense dashboard, financial, import, and
