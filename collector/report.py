@@ -637,6 +637,7 @@ def dashboard_data(
 
 def provider_management_data() -> ProviderManager:
     from collect_today import SolarEdgeAdapter
+    from home_assistant_provider import HomeAssistantAdapter
 
     settings = load_settings()
     current_day = local_today()
@@ -654,22 +655,27 @@ def provider_management_data() -> ProviderManager:
         import_sources=setup_import_sources(),
     )
     solaredge_adapter = SolarEdgeAdapter()
-    runtime = ProviderRuntime([solaredge_adapter])
+    home_assistant_adapter = HomeAssistantAdapter()
+    runtime = ProviderRuntime([solaredge_adapter, home_assistant_adapter])
     return build_provider_management(
         provider_registry=provider_registry,
         health=health,
         provider_observations=provider_observations,
         promotion_summary=promotion_summary,
         runtime_status=runtime.as_dict(),
-        connection_testers={"solaredge": solaredge_adapter.test_connection},
+        connection_testers={
+            "solaredge": solaredge_adapter.test_connection,
+            "home_assistant": home_assistant_adapter.test_connection,
+        },
         settings=settings,
     )
 
 
 def provider_runtime_data(data_engine_instance=None) -> ProviderRuntime:
     from collect_today import SolarEdgeAdapter
+    from home_assistant_provider import HomeAssistantAdapter
 
-    return ProviderRuntime([SolarEdgeAdapter()], data_engine=data_engine_instance)
+    return ProviderRuntime([SolarEdgeAdapter(), HomeAssistantAdapter()], data_engine=data_engine_instance)
 
 
 def setup_logging() -> None:

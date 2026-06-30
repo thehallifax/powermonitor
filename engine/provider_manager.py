@@ -570,7 +570,7 @@ def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
 
 def _test_user_message(status: str, warnings: list[str]) -> str:
     if status == "success":
-        return "Connection test succeeded. SolarEdge data can be used for bill and solar analysis."
+        return "Connection test succeeded. Provider data can be used for PowerMonitor analysis."
     if status == "warning":
         detail = warnings[0] if warnings else "The provider responded, but some checks need attention."
         return f"Connection test completed with a warning: {detail}"
@@ -583,7 +583,7 @@ def _test_next_step(status: str) -> str:
         return "Keep this provider connected and watch the next scheduled sync."
     if status == "warning":
         return "Review the warning, then run Test Connection again after fixing it."
-    return "Refresh the SolarEdge session or update the cookie, then run Test Connection again."
+    return "Refresh the provider session or update the required credential, then run Test Connection again."
 
 
 def _duration_label(value: Any) -> str:
@@ -835,6 +835,8 @@ def _required_fields(provider_type: ProviderType) -> set[str]:
         return {"cookie"}
     if provider_type == ProviderType.RETAILER:
         return set()
+    if provider_type == ProviderType.HOME_AUTOMATION:
+        return {"api_key", "endpoint"}
     return {"endpoint"}
 
 

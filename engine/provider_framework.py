@@ -205,6 +205,7 @@ def build_provider_registry(
     ev_present = bool(ev and getattr(ev, "usable", False))
     grid_present = bool(grid and getattr(grid, "usable", False))
     ev_source = str(getattr(settings, "ev_data_source", "") or "")
+    home_assistant_configured = bool(str(getattr(settings, "home_assistant_url", "") or "").strip())
     has_ocular_import = any(str(getattr(source, "source_id", "")) == "ocular_ev_export" or "ocular" in str(getattr(source, "source_id", "")) for source in import_sources)
 
     providers = [
@@ -293,6 +294,32 @@ def build_provider_registry(
             note=tariff.reason if tariff else "Retailer tariff configuration is missing.",
         ),
     ]
+    if home_assistant_configured:
+        providers.append(
+            Provider(
+                provider_id="home_assistant",
+                name="Home Assistant",
+                provider_type=ProviderType.HOME_AUTOMATION,
+                capabilities=[
+                    ProviderCapability.LIVE_POWER,
+                    ProviderCapability.INTERVAL_HISTORY,
+                    ProviderCapability.DAILY_SUMMARY,
+                    ProviderCapability.BATTERY_STATE,
+                    ProviderCapability.EV_SESSIONS,
+                ],
+                status=ProviderStatus.CONFIGURED,
+                observations=[
+                    ProviderObservation(
+                        ProviderCapability.LIVE_POWER,
+                        "home_assistant_entities",
+                        quality=ProviderObservationQuality.MEDIUM,
+                        note="Home Assistant entities are discovered through the provider runtime and normalized into provider observations.",
+                    )
+                ],
+                source="home_assistant",
+                note="Home Assistant URL is configured. Add a long-lived access token, then run Test Connection.",
+            )
+        )
     if ev_source == "home_assistant_ocpp":
         providers.append(
             Provider(

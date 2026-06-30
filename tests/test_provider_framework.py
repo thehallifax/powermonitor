@@ -16,6 +16,7 @@ from engine.provider_framework import (
 @dataclass
 class Settings:
     ev_data_source: str = "estimated"
+    home_assistant_url: str = ""
 
 
 class ProviderFrameworkTests(unittest.TestCase):
@@ -46,6 +47,22 @@ class ProviderFrameworkTests(unittest.TestCase):
         self.assertIsNotNone(provider)
         self.assertEqual(provider.status, ProviderStatus.AVAILABLE)
         self.assertTrue(provider.supports(ProviderCapability.LIVE_POWER))
+
+    def test_home_assistant_provider_registers_when_url_is_configured(self):
+        registry = build_provider_registry(
+            settings=Settings(home_assistant_url="http://homeassistant.local:8123"),
+            health={"status": "ok"},
+            capability_summary=capability_summary(solar=False, ev=False, tariff=True),
+            import_sources=[],
+        )
+
+        provider = registry.get("home_assistant")
+
+        self.assertIsNotNone(provider)
+        self.assertEqual(provider.provider_type, ProviderType.HOME_AUTOMATION)
+        self.assertEqual(provider.status, ProviderStatus.CONFIGURED)
+        self.assertTrue(provider.supports(ProviderCapability.BATTERY_STATE))
+        self.assertTrue(provider.supports(ProviderCapability.EV_SESSIONS))
 
     def test_registry_serializes_for_api(self):
         data = build_provider_registry(

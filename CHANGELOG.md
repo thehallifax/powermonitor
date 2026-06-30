@@ -1,5 +1,23 @@
 # Changelog
 
+## PI-003 - Home Assistant Integration
+
+- Added a Home Assistant Provider Runtime adapter using the existing provider
+  contract with URL plus long-lived access token authentication.
+- Added Home Assistant connection testing with authentication validation,
+  version detection, entity count, discovered datasets, plain-language failures,
+  and technical diagnostics through the standard Provider Test Result model.
+- Added Home Assistant entity discovery for power sensors, energy sensors,
+  solar production, battery sensors, and EV charging entities.
+- Mapped supported Home Assistant entities into normalized Provider
+  Observations so runtime collection flows through the Observation Pipeline and
+  Promotion Engine path.
+- Registered Home Assistant in the Provider Framework and wired it into the
+  existing Provider Manager and Provider Runtime views alongside SolarEdge with
+  no provider-specific UI.
+- Added regression tests for Home Assistant capability discovery, observation
+  mapping, connection testing, runtime persistence, and registry exposure.
+
 ## PI-002 - SolarEdge Production Integration
 
 - Promoted SolarEdge as the reference provider workflow by wiring Provider

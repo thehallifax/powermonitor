@@ -140,7 +140,7 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["status"], "failure")
         self.assertIn("SolarEdge returned HTTP 403", result["user_message"])
-        self.assertIn("Refresh the SolarEdge session", result["next_step"])
+        self.assertIn("Refresh the provider session", result["next_step"])
         self.assertEqual(result["technical_details"]["http_status"], "403")
 
     def test_runtime_health_is_included_in_onboarding(self):
