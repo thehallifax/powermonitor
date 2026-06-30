@@ -67,6 +67,12 @@ class ChargingAdvisor:
         bucket = context.current_tariff_bucket or current_tariff_bucket(observed_at)
         available, freshness, confidence = self._data_is_available(today_summary, billing_summary, health)
         solar_status, has_solar_surplus = solar_signal(today_summary)
+        has_live_context = "Provider observations" in set(context.data_sources_used)
+        if has_live_context and context.solar.value == "SOLAR_SURPLUS_POSSIBLE":
+            solar_status = "Live solar surplus detected"
+            has_solar_surplus = True
+        elif has_live_context and context.solar.value == "SOLAR_AVAILABLE":
+            solar_status = "Live solar production detected"
         if not context.daylight:
             has_solar_surplus = False
             if solar_status != "Solar unavailable":
@@ -119,6 +125,8 @@ class ChargingAdvisor:
             "solar_exported_kwh_today": self._number(today_summary, "solar_exported_kwh"),
             "solar_export_pct_today": self._number(today_summary, "solar_export_pct"),
             "solar_status": solar_status,
+            "live_solar_context": context.solar.value,
+            "live_charging_context": context.charging.value,
             "ev_charging_kwh_billing_period": self._number(billing_summary, "ev_charging_kwh"),
             "ev_charging_source": getattr(billing_summary, "ev_charging_source", None),
             "projected_bill": projected_bill,

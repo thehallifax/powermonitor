@@ -74,6 +74,44 @@ class PromotionEngineTests(unittest.TestCase):
         self.assertEqual(result.decision.state.value, "PENDING")
         self.assertEqual(result.decision.reasons[0].code, "stale_observation")
 
+    def test_live_observation_rejects_invalid_units(self):
+        result = PromotionEngine().evaluate(
+            [observation("live", observation_type="solar_live_power", capability="live_power", value=1200, unit="kWh")],
+            household_id="household",
+        )[0]
+
+        self.assertEqual(result.decision.state.value, "REJECTED")
+        self.assertEqual(result.decision.reasons[0].code, "invalid_unit")
+
+    def test_battery_soc_must_be_possible(self):
+        result = PromotionEngine().evaluate(
+            [observation("soc", observation_type="battery_soc", capability="battery_state", value=130, unit="%")],
+            household_id="household",
+        )[0]
+
+        self.assertEqual(result.decision.state.value, "REJECTED")
+        self.assertEqual(result.decision.reasons[0].code, "invalid_battery_soc")
+
+    def test_signed_grid_and_battery_power_are_allowed(self):
+        results = PromotionEngine().evaluate(
+            [
+                observation("grid", observation_type="grid_live_power", capability="live_power", value=-500, unit="W"),
+                observation("battery", observation_type="battery_power", capability="battery_state", value=-1200, unit="W", raw_reference="battery"),
+            ],
+            household_id="household",
+        )
+
+        self.assertEqual([item.decision.state.value for item in results], ["ACCEPTED", "ACCEPTED"])
+
+    def test_stale_live_observation_is_rejected(self):
+        result = PromotionEngine().evaluate(
+            [observation("stale-live", observation_type="home_live_power", capability="live_power", value=700, unit="W", freshness={"state": "stale"})],
+            household_id="household",
+        )[0]
+
+        self.assertEqual(result.decision.state.value, "REJECTED")
+        self.assertEqual(result.decision.reasons[0].code, "stale_live_observation")
+
 
 def observation(
     observation_id,
@@ -87,6 +125,7 @@ def observation(
     quality="high",
     freshness=None,
     raw_reference=None,
+    unit=None,
 ):
     return {
         "observation_id": observation_id,
@@ -97,6 +136,7 @@ def observation(
         "observation_type": observation_type,
         "observed_at": observed_at,
         "value": {"energy_kwh": 7.5} if value is None else value,
+        "unit": unit,
         "quality": quality,
         "freshness": freshness,
         "raw_reference": raw_reference,

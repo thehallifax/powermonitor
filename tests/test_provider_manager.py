@@ -91,6 +91,24 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("why_required", provider["onboarding"])
         self.assertIn("recovery_steps", provider["onboarding"])
 
+    def test_provider_diagnostics_include_live_observation_types(self):
+        manager = ProviderManager(
+            registry(),
+            provider_observations={
+                "providers": [
+                    {
+                        "provider_id": "solaredge",
+                        "observation_types": ["solar_live_power", "grid_import"],
+                    }
+                ],
+                "latest": [],
+            },
+        )
+
+        provider = manager.get("solaredge").as_dict()
+
+        self.assertEqual(provider["diagnostics"]["live_observation_types"], ["solar_live_power"])
+
     def test_provider_management_exposes_standard_onboarding_states(self):
         payload = ProviderManager(registry()).as_dict()
 

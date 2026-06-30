@@ -8,7 +8,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from collector_health import public_health
 from periods import LOCAL_TIMEZONE, Period, previous_equivalent, resolve_period
@@ -3850,9 +3850,15 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
     rows = {
         "Current tariff": data.get("tariff", {}).get("active_label"),
         "Import/export": data.get("power", {}).get("import_export_state"),
+        "Grid live power": _live_power_label(data.get("power", {}).get("current_grid_power_w")),
+        "Home live power": _live_power_label(data.get("power", {}).get("current_home_power_w")),
         "Solar": "Producing" if data.get("solar", {}).get("producing") else "Not producing" if data.get("solar", {}).get("producing") is False else "Unknown",
+        "Solar live power": _live_power_label(data.get("solar", {}).get("current_production_w")),
         "EV": data.get("ev", {}).get("charging_source") or "Unknown",
+        "EV charging power": _live_power_label(data.get("ev", {}).get("charging_power_w")),
         "Battery": data.get("battery", {}).get("state"),
+        "Battery SOC": _percentage_label(data.get("battery", {}).get("charge_pct")),
+        "Battery power": _live_power_label(data.get("battery", {}).get("power_w")),
         "Billing day": data.get("billing", {}).get("day_of_period"),
         "Collector": data.get("collector", {}).get("status"),
         "Evidence": data.get("evidence", {}).get("confidence"),
@@ -3879,6 +3885,24 @@ def household_state_html(household_state, latest_snapshot=None, recent_snapshots
       <p class="small">Sources: {html.escape(sources)}</p>
     </div>
     """
+
+
+def _live_power_label(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.0f} W"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _percentage_label(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.0f}%"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def household_behaviour_html(behaviour: Optional[dict]) -> str:

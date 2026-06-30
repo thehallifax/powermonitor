@@ -20,6 +20,8 @@ class HouseholdPowerState:
     import_export_state: str
     grid_import_kwh_today: float = 0.0
     solar_exported_kwh_today: float = 0.0
+    current_grid_power_w: Optional[float] = None
+    current_home_power_w: Optional[float] = None
     source: str = "daily_summary"
 
     def as_dict(self) -> dict[str, Any]:
@@ -59,6 +61,7 @@ class HouseholdEVState:
     connected: Optional[bool] = None
     charging_active: Optional[bool] = None
     charging_source: Optional[str] = None
+    charging_power_w: Optional[float] = None
     charging_kwh_billing_period: float = 0.0
     evidence_note: str = "No live EV connection state is available."
 
@@ -73,6 +76,7 @@ class HouseholdSolarState:
     generated_kwh_today: float = 0.0
     exported_kwh_today: float = 0.0
     export_pct_today: float = 0.0
+    current_production_w: Optional[float] = None
     source: str = "provider:solaredge"
     evidence_note: str = ""
 
@@ -85,6 +89,7 @@ class HouseholdBatteryState:
     present: bool = False
     state: str = "not_detected"
     charge_pct: Optional[float] = None
+    power_w: Optional[float] = None
     source: str = "capability_metadata"
 
     def as_dict(self) -> dict[str, Any]:
@@ -196,11 +201,12 @@ class HouseholdStateEngine:
         observed_at = now or datetime.now().astimezone()
         generated_at = observed_at.isoformat(timespec="seconds")
         tariff = self._tariff_state(settings, observed_at)
-        power = self._power_state(today_summary)
+        live = _live_observations(provider_observations or {}, promotion_summary or {})
+        power = self._power_state(today_summary, live)
         energy = self._energy_state(today_summary)
-        solar = self._solar_state(today_summary, capability_summary, observed_at)
-        ev = self._ev_state(billing_summary, capability_summary)
-        battery = self._battery_state(capability_summary)
+        solar = self._solar_state(today_summary, capability_summary, observed_at, live)
+        ev = self._ev_state(billing_summary, capability_summary, live)
+        battery = self._battery_state(capability_summary, live)
         billing = self._billing_state(billing_summary, settings, observed_at)
         collector = self._collector_state(health)
         evidence = self._evidence_state(
@@ -252,10 +258,14 @@ class HouseholdStateEngine:
             configured=bool(rates),
         )
 
-    def _power_state(self, today_summary: Any) -> HouseholdPowerState:
+    def _power_state(self, today_summary: Any, live: dict[str, dict[str, Any]]) -> HouseholdPowerState:
         imported = number(today_summary, "grid_import_kwh")
         exported = number(today_summary, "solar_exported_kwh")
-        if exported > imported and exported > 0:
+        grid_power = live_number(live, "grid_live_power")
+        home_power = live_number(live, "home_live_power")
+        if grid_power is not None:
+            state = "exporting" if grid_power < 0 else "importing" if grid_power > 0 else "balanced"
+        elif exported > imported and exported > 0:
             state = "exporting"
         elif imported > 0:
             state = "importing"
@@ -267,6 +277,9 @@ class HouseholdStateEngine:
             import_export_state=state,
             grid_import_kwh_today=imported,
             solar_exported_kwh_today=exported,
+            current_grid_power_w=grid_power,
+            current_home_power_w=home_power,
+            source="live_provider_observation" if grid_power is not None or home_power is not None else "daily_summary",
         )
 
     def _energy_state(self, today_summary: Any) -> HouseholdEnergyState:
@@ -278,14 +291,17 @@ class HouseholdStateEngine:
             intervals_today=int(number(today_summary, "intervals")),
         )
 
-    def _solar_state(self, today_summary: Any, capability_summary: Any, observed_at: datetime) -> HouseholdSolarState:
+    def _solar_state(self, today_summary: Any, capability_summary: Any, observed_at: datetime, live: dict[str, dict[str, Any]]) -> HouseholdSolarState:
         generated = number(today_summary, "solar_generated_kwh")
         intervals = int(number(today_summary, "intervals"))
         solar_capability = capability(capability_summary, "solar")
         present = bool(getattr(solar_capability, "present", False) or generated > 0)
         daylight = 6 <= observed_at.astimezone().hour < 18
         producing = None
-        if intervals > 0:
+        solar_power = live_number(live, "solar_live_power")
+        if solar_power is not None:
+            producing = solar_power > 0
+        elif intervals > 0:
             producing = bool(generated > 0 and daylight)
         return HouseholdSolarState(
             present=present,
@@ -293,28 +309,43 @@ class HouseholdStateEngine:
             generated_kwh_today=generated,
             exported_kwh_today=number(today_summary, "solar_exported_kwh"),
             export_pct_today=number(today_summary, "solar_export_pct"),
+            current_production_w=solar_power,
+            source="live_provider_observation" if solar_power is not None else "provider:solaredge",
             evidence_note=getattr(solar_capability, "reason", "") if solar_capability else "",
         )
 
-    def _ev_state(self, billing_summary: Any, capability_summary: Any) -> HouseholdEVState:
+    def _ev_state(self, billing_summary: Any, capability_summary: Any, live: dict[str, dict[str, Any]]) -> HouseholdEVState:
         ev_capability = capability(capability_summary, "ev")
         source = string_value(billing_summary, "ev_charging_source")
+        connected = live_value(live, "ev_connected_state")
+        charging = live_value(live, "ev_charging_state")
+        charging_power = live_number(live, "ev_charger_live_power")
         return HouseholdEVState(
             present=bool(getattr(ev_capability, "present", False) or number(billing_summary, "ev_charging_kwh") > 0),
-            connected=None,
-            charging_active=None,
+            connected=connected if isinstance(connected, bool) else None,
+            charging_active=charging if isinstance(charging, bool) else (charging_power > 0 if charging_power is not None else None),
             charging_source=source or None,
+            charging_power_w=charging_power,
             charging_kwh_billing_period=number(billing_summary, "ev_charging_kwh"),
             evidence_note=getattr(ev_capability, "reason", "No live EV state is available.") if ev_capability else "No live EV state is available.",
         )
 
-    def _battery_state(self, capability_summary: Any) -> HouseholdBatteryState:
+    def _battery_state(self, capability_summary: Any, live: dict[str, dict[str, Any]]) -> HouseholdBatteryState:
         battery = capability(capability_summary, "battery")
         present = bool(getattr(battery, "present", False))
+        soc = live_number(live, "battery_soc")
+        power = live_number(live, "battery_power")
+        if soc is not None or power is not None:
+            present = True
+        state = "not_detected"
+        if present:
+            state = "discharging" if power and power < 0 else "charging" if power and power > 0 else "present_unknown_state"
         return HouseholdBatteryState(
             present=present,
-            state="present_unknown_state" if present else "not_detected",
-            source=getattr(battery, "source", "capability_metadata") if battery else "capability_metadata",
+            state=state,
+            charge_pct=soc,
+            power_w=power,
+            source="live_provider_observation" if soc is not None or power is not None else getattr(battery, "source", "capability_metadata") if battery else "capability_metadata",
         )
 
     def _billing_state(self, billing_summary: Any, settings: Any, observed_at: datetime) -> HouseholdBillingState:
@@ -425,6 +456,34 @@ def capability(summary: Any, capability_id: str) -> Any:
     return None
 
 
+def _live_observations(provider_observations: dict[str, Any], promotion_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    live: dict[str, dict[str, Any]] = {}
+    for item in promotion_summary.get("latest_promotions", []) if isinstance(promotion_summary, dict) else []:
+        if item.get("state") != "ACCEPTED":
+            continue
+        observation_type = str(item.get("observation_type") or "")
+        if observation_type in LIVE_TYPES:
+            live.setdefault(observation_type, item)
+    for item in provider_observations.get("latest", []) if isinstance(provider_observations, dict) else []:
+        observation_type = str(item.get("observation_type") or "")
+        if observation_type in LIVE_TYPES:
+            live.setdefault(observation_type, item)
+    return live
+
+
+def live_value(live: dict[str, dict[str, Any]], observation_type: str) -> Any:
+    item = live.get(observation_type) or {}
+    return item.get("value")
+
+
+def live_number(live: dict[str, dict[str, Any]], observation_type: str) -> Optional[float]:
+    value = live_value(live, observation_type)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_date(value: Any) -> Optional[date]:
     if value is None or value == "":
         return None
@@ -440,3 +499,17 @@ def _tariff_label(bucket: str) -> str:
         "super_off_peak": "Super off peak",
         "peak": "Peak",
     }.get(bucket, bucket.replace("_", " ").title())
+
+
+LIVE_TYPES = {
+    "live_power",
+    "grid_live_power",
+    "solar_live_power",
+    "battery_state",
+    "battery_soc",
+    "battery_power",
+    "ev_charger_live_power",
+    "ev_connected_state",
+    "ev_charging_state",
+    "home_live_power",
+}

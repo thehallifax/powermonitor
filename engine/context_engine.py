@@ -178,7 +178,11 @@ class ContextEngine:
         solar_context = self._solar_context_from_state(household_state, time_context, evidence)
         tariff_context = self._tariff_context(bucket, rates)
         billing_context = self._billing_context_from_state(household_state, observed_at)
-        charging_context = self._charging_context(evidence, tariff_context, next_window or TariffWindow(bucket, TARIFF_LABELS.get(bucket, bucket), observed_at, household_state.tariff.active_rate), observed_at)
+        charging_context = (
+            ChargingContext.CHARGING_ACTIVE
+            if getattr(household_state.ev, "charging_active", None) is True
+            else self._charging_context(evidence, tariff_context, next_window or TariffWindow(bucket, TARIFF_LABELS.get(bucket, bucket), observed_at, household_state.tariff.active_rate), observed_at)
+        )
         confidence = ContextConfidence(getattr(household_state.evidence, "confidence", "UNKNOWN"))
         return HouseholdContext(
             observed_at=observed_at.astimezone().isoformat(timespec="seconds"),
@@ -205,6 +209,12 @@ class ContextEngine:
             return SolarContext.UNKNOWN
         if time_context == TimeContext.NIGHT:
             return SolarContext.SOLAR_IMPOSSIBLE
+        solar_power = getattr(household_state.solar, "current_production_w", None)
+        grid_power = getattr(household_state.power, "current_grid_power_w", None)
+        if solar_power is not None and solar_power > 0 and grid_power is not None and grid_power < 0:
+            return SolarContext.SOLAR_SURPLUS_POSSIBLE
+        if solar_power is not None and solar_power > 0:
+            return SolarContext.SOLAR_AVAILABLE
         if household_state.solar.producing is False:
             return SolarContext.LOW_SOLAR_DAY
         if household_state.solar.exported_kwh_today >= 0.5 and household_state.solar.export_pct_today >= 15:

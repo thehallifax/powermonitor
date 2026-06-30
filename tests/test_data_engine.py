@@ -197,6 +197,33 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(stored[0]["value"]["energy_kwh"], 7.5)
         self.assertEqual(summary["providers"][0]["capabilities"], ["ev_sessions"])
 
+    def test_live_provider_observation_serializes_safely(self):
+        stored = self.engine.persist_provider_observations(
+            [
+                ProviderObservation(
+                    ProviderCapability.BATTERY_STATE,
+                    "battery_soc",
+                    value=82,
+                    unit="%",
+                    provider_id="home_assistant",
+                    provider_type=ProviderType.HOME_AUTOMATION,
+                    household_id="default_household",
+                    observation_type=ProviderObservationType.BATTERY_SOC,
+                    observed_at="2026-06-30T08:00:00+08:00",
+                    received_at="2026-06-30T08:00:05+08:00",
+                    freshness=ProviderFreshness("fresh", "2026-06-30T08:00:00+08:00", 0.1),
+                    quality=ProviderObservationQuality.MEDIUM,
+                    provenance="HomeAssistantAdapter",
+                    raw_reference="sensor.battery_soc",
+                )
+            ]
+        )[0]
+
+        self.assertEqual(stored["observation_type"], "battery_soc")
+        self.assertEqual(stored["unit"], "%")
+        self.assertEqual(stored["raw_reference"], "sensor.battery_soc")
+        self.assertNotIn("token", str(stored).lower())
+
     def test_provider_observations_are_household_scoped(self):
         from engine.models import Account, Household, HouseholdContext, HouseholdMembership
 

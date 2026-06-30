@@ -53,6 +53,16 @@ class ProviderObservationType(str, Enum):
     TARIFF_CONFIG = "tariff_config"
     BILLING_PERIOD = "billing_period"
     COLLECTOR_HEALTH = "collector_health"
+    LIVE_POWER = "live_power"
+    GRID_LIVE_POWER = "grid_live_power"
+    SOLAR_LIVE_POWER = "solar_live_power"
+    BATTERY_STATE = "battery_state"
+    BATTERY_SOC = "battery_soc"
+    BATTERY_POWER = "battery_power"
+    EV_CHARGER_LIVE_POWER = "ev_charger_live_power"
+    EV_CONNECTED_STATE = "ev_connected_state"
+    EV_CHARGING_STATE = "ev_charging_state"
+    HOME_LIVE_POWER = "home_live_power"
 
 
 @dataclass(frozen=True)

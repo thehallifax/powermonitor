@@ -214,6 +214,8 @@ def capability_for_entity(entity: dict[str, Any]) -> Optional[ProviderCapability
     if "battery" in haystack and ("%" in unit or device_class == "battery"):
         return ProviderCapability.BATTERY_STATE
     if "ev" in haystack or "charger" in haystack or "ocpp" in haystack:
+        if any(word in haystack for word in ("connected", "plug", "connector", "charging")) and unit == "":
+            return ProviderCapability.EV_SESSIONS
         if device_class in {"power", "energy"} or unit in {"w", "kw", "wh", "kwh"}:
             return ProviderCapability.EV_SESSIONS
     if "solar" in haystack or "pv" in haystack or "production" in haystack:
@@ -227,19 +229,13 @@ def capability_for_entity(entity: dict[str, Any]) -> Optional[ProviderCapability
 
 
 def observation_from_entity(entity: dict[str, Any], capability: ProviderCapability, received_at: str) -> Optional[ProviderObservation]:
-    value = parse_numeric(entity.get("state"))
+    observation_type = observation_type_for_entity(entity, capability)
+    value = parse_value(entity.get("state"), observation_type)
     if value is None:
         return None
     attributes = entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
     entity_id = str(entity.get("entity_id") or "unknown_entity")
     observed_at = str(entity.get("last_updated") or entity.get("last_changed") or received_at).replace("Z", "+00:00")
-    observation_type = {
-        ProviderCapability.DAILY_SUMMARY: ProviderObservationType.SOLAR_GENERATION,
-        ProviderCapability.INTERVAL_HISTORY: ProviderObservationType.GRID_IMPORT,
-        ProviderCapability.EV_SESSIONS: ProviderObservationType.EV_SESSION,
-        ProviderCapability.BATTERY_STATE: ProviderObservationType.COLLECTOR_HEALTH,
-        ProviderCapability.LIVE_POWER: ProviderObservationType.COLLECTOR_HEALTH,
-    }.get(capability, ProviderObservationType.COLLECTOR_HEALTH)
     return ProviderObservation(
         capability=capability,
         name=entity_id,
@@ -258,6 +254,34 @@ def observation_from_entity(entity: dict[str, Any], capability: ProviderCapabili
     )
 
 
+def observation_type_for_entity(entity: dict[str, Any], capability: ProviderCapability) -> ProviderObservationType:
+    entity_id = str(entity.get("entity_id") or "").lower()
+    attributes = entity.get("attributes") if isinstance(entity.get("attributes"), dict) else {}
+    unit = str(attributes.get("unit_of_measurement") or "").lower()
+    device_class = str(attributes.get("device_class") or "").lower()
+    friendly = str(attributes.get("friendly_name") or entity_id).lower()
+    haystack = f"{entity_id} {friendly}"
+    if capability == ProviderCapability.BATTERY_STATE:
+        if "%" in unit or device_class == "battery" or "soc" in haystack or "state of charge" in haystack:
+            return ProviderObservationType.BATTERY_SOC
+        return ProviderObservationType.BATTERY_POWER
+    if capability == ProviderCapability.EV_SESSIONS:
+        if any(word in haystack for word in ("connected", "plug", "connector")) and unit == "":
+            return ProviderObservationType.EV_CONNECTED_STATE
+        if "charging" in haystack and unit == "":
+            return ProviderObservationType.EV_CHARGING_STATE
+        return ProviderObservationType.EV_CHARGER_LIVE_POWER
+    if capability == ProviderCapability.DAILY_SUMMARY:
+        return ProviderObservationType.SOLAR_LIVE_POWER if unit in {"w", "kw"} or device_class == "power" else ProviderObservationType.SOLAR_GENERATION
+    if capability == ProviderCapability.INTERVAL_HISTORY:
+        return ProviderObservationType.GRID_LIVE_POWER if unit in {"w", "kw"} or device_class == "power" else ProviderObservationType.GRID_IMPORT
+    if capability == ProviderCapability.LIVE_POWER:
+        if "grid" in haystack:
+            return ProviderObservationType.GRID_LIVE_POWER
+        return ProviderObservationType.HOME_LIVE_POWER
+    return ProviderObservationType.LIVE_POWER
+
+
 def parse_numeric(value: Any) -> Optional[float]:
     try:
         text = str(value).strip()
@@ -266,6 +290,17 @@ def parse_numeric(value: Any) -> Optional[float]:
         return float(text)
     except (TypeError, ValueError):
         return None
+
+
+def parse_value(value: Any, observation_type: ProviderObservationType) -> Any:
+    if observation_type in {ProviderObservationType.EV_CONNECTED_STATE, ProviderObservationType.EV_CHARGING_STATE, ProviderObservationType.BATTERY_STATE}:
+        text = str(value).strip().lower()
+        if text in {"on", "true", "connected", "charging", "1"}:
+            return True
+        if text in {"off", "false", "disconnected", "idle", "not_charging", "0"}:
+            return False
+        return text or None
+    return parse_numeric(value)
 
 
 def home_assistant_error_message(exc: BaseException) -> str:

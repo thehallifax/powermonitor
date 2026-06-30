@@ -54,15 +54,15 @@ def capability_summary(solar=True, ev=True, battery=False):
 
 
 class HouseholdStateEngineTests(unittest.TestCase):
-    def build(self, *, now, today=None, billing=None, settings=None, health=None, capabilities=None):
+    def build(self, *, now, today=None, billing=None, settings=None, health=None, capabilities=None, provider_observations=None, promotion_summary=None):
         return HouseholdStateEngine().build(
             today_summary=today or Summary(),
             billing_summary=billing or today or Summary(),
             settings=settings or Settings(RATES),
             health=health or {"status": "ok", "report_age_minutes": 5, "latest_measurement_time": "2026-06-29T09:55:00+08:00"},
             capability_summary=capabilities or capability_summary(),
-            provider_observations={"count": 1, "latest": [{"provider_id": "solaredge"}]},
-            promotion_summary={"latest_promotions": [{"provider_id": "solaredge"}]},
+            provider_observations=provider_observations or {"count": 1, "latest": [{"provider_id": "solaredge"}]},
+            promotion_summary=promotion_summary or {"latest_promotions": [{"provider_id": "solaredge"}]},
             household_id="default_household",
             now=now,
         )
@@ -125,6 +125,66 @@ class HouseholdStateEngineTests(unittest.TestCase):
         self.assertEqual(context.tariff, TariffContext.HIGHEST_COST)
         self.assertIn("Household State Engine", context.data_sources_used)
 
+    def test_live_observations_map_into_household_state(self):
+        state = self.build(
+            now=datetime(2026, 6, 29, 12, tzinfo=LOCAL),
+            promotion_summary={
+                "latest_promotions": [
+                    live_promotion("grid_live_power", -600, "W"),
+                    live_promotion("solar_live_power", 3200, "W"),
+                    live_promotion("battery_soc", 78, "%"),
+                    live_promotion("battery_power", -900, "W"),
+                    live_promotion("ev_connected_state", True, "state"),
+                    live_promotion("ev_charger_live_power", 7200, "W"),
+                ]
+            },
+        )
+        data = state.as_dict()
+
+        self.assertEqual(data["power"]["import_export_state"], "exporting")
+        self.assertEqual(data["power"]["current_grid_power_w"], -600.0)
+        self.assertEqual(data["solar"]["current_production_w"], 3200.0)
+        self.assertEqual(data["battery"]["charge_pct"], 78.0)
+        self.assertEqual(data["battery"]["power_w"], -900.0)
+        self.assertTrue(data["ev"]["connected"])
+        self.assertTrue(data["ev"]["charging_active"])
+        self.assertEqual(data["ev"]["charging_power_w"], 7200.0)
+
+    def test_context_engine_uses_live_solar_surplus_and_ev_charging(self):
+        state = self.build(
+            now=datetime(2026, 6, 29, 12, tzinfo=LOCAL),
+            promotion_summary={
+                "latest_promotions": [
+                    live_promotion("grid_live_power", -600, "W"),
+                    live_promotion("solar_live_power", 3200, "W"),
+                    live_promotion("ev_charging_state", True, "state"),
+                ]
+            },
+        )
+
+        context = ContextEngine().build(
+            today_summary=Summary(),
+            billing_summary=Summary(),
+            settings=Settings(RATES),
+            health={"status": "ok", "report_age_minutes": 5},
+            now=datetime(2026, 6, 29, 12, tzinfo=LOCAL),
+            household_state=state,
+        )
+
+        self.assertEqual(context.solar.value, "SOLAR_SURPLUS_POSSIBLE")
+        self.assertEqual(context.charging.value, "CHARGING_ACTIVE")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def live_promotion(observation_type, value, unit):
+    return {
+        "state": "ACCEPTED",
+        "provider_id": "home_assistant",
+        "observation_type": observation_type,
+        "value": value,
+        "unit": unit,
+        "observed_at": "2026-06-29T12:00:00+08:00",
+    }

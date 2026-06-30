@@ -61,6 +61,8 @@ class PromotionCandidate:
     observed_at: str
     value: Any
     quality: str
+    unit: Optional[str] = None
+    received_at: Optional[str] = None
     freshness: Optional[dict[str, Any]] = None
     raw_reference: Optional[str] = None
 
@@ -76,6 +78,8 @@ class PromotionCandidate:
             observed_at=str(observation.get("observed_at") or ""),
             value=observation.get("value"),
             quality=str(observation.get("quality") or "unknown"),
+            unit=observation.get("unit"),
+            received_at=observation.get("received_at"),
             freshness=observation.get("freshness") if isinstance(observation.get("freshness"), dict) else None,
             raw_reference=observation.get("raw_reference"),
         )
@@ -225,6 +229,14 @@ class PromotionEngine:
             reasons.append(PromotionReason("invalid_timestamp", "Observation timestamp is missing or invalid."))
         if str((candidate.freshness or {}).get("state") or "").lower() == "expired":
             reasons.append(PromotionReason("expired_observation", "Observation freshness is expired."))
+        if candidate.observation_type in _LIVE_OBSERVATION_TYPES and str((candidate.freshness or {}).get("state") or "").lower() in {"stale", "expired"}:
+            reasons.append(PromotionReason("stale_live_observation", "Live observation is stale and cannot represent current state."))
+        if candidate.observation_type in _UNIT_RULES and _normalised_unit(candidate.unit) not in _UNIT_RULES[candidate.observation_type]:
+            reasons.append(PromotionReason("invalid_unit", "Observation unit is not valid for this live observation type."))
+        if candidate.observation_type == "battery_soc":
+            numeric = _numeric_value(candidate)
+            if numeric is None or numeric < 0 or numeric > 100:
+                reasons.append(PromotionReason("invalid_battery_soc", "Battery state of charge must be between 0 and 100%."))
         if self._is_impossible_negative(candidate):
             reasons.append(PromotionReason("impossible_negative", "Observation reports an impossible negative energy value."))
         return ObservationValidation(valid=not reasons, reasons=reasons)
@@ -252,7 +264,7 @@ class PromotionEngine:
         )
 
     def _is_impossible_negative(self, candidate: PromotionCandidate) -> bool:
-        if candidate.observation_type not in {"solar_generation", "solar_export", "grid_import", "ev_session"}:
+        if candidate.observation_type not in _NON_NEGATIVE_TYPES:
             return False
         numeric = _numeric_value(candidate)
         return numeric is not None and numeric < 0
@@ -302,6 +314,54 @@ _CAPABILITY_COMPATIBILITY = {
     "tariff_config": {"tariff_data"},
     "billing_period": {"billing_data"},
     "collector_health": {"import_only", "live_power"},
+    "live_power": {"live_power"},
+    "grid_live_power": {"live_power", "interval_history"},
+    "solar_live_power": {"live_power", "daily_summary", "interval_history"},
+    "battery_state": {"battery_state"},
+    "battery_soc": {"battery_state"},
+    "battery_power": {"battery_state", "live_power"},
+    "ev_charger_live_power": {"ev_sessions", "live_power"},
+    "ev_connected_state": {"ev_sessions"},
+    "ev_charging_state": {"ev_sessions"},
+    "home_live_power": {"live_power"},
+}
+
+_LIVE_OBSERVATION_TYPES = {
+    "live_power",
+    "grid_live_power",
+    "solar_live_power",
+    "battery_state",
+    "battery_soc",
+    "battery_power",
+    "ev_charger_live_power",
+    "ev_connected_state",
+    "ev_charging_state",
+    "home_live_power",
+}
+
+_SIGNED_POWER_TYPES = {"grid_live_power", "battery_power"}
+_NON_NEGATIVE_TYPES = {
+    "solar_generation",
+    "solar_export",
+    "grid_import",
+    "ev_session",
+    "live_power",
+    "solar_live_power",
+    "battery_soc",
+    "ev_charger_live_power",
+    "home_live_power",
+}
+_UNIT_RULES = {
+    "live_power": {"w", "kw"},
+    "grid_live_power": {"w", "kw"},
+    "solar_live_power": {"w", "kw"},
+    "battery_power": {"w", "kw"},
+    "ev_charger_live_power": {"w", "kw"},
+    "home_live_power": {"w", "kw"},
+    "battery_soc": {"%", "percent"},
+    "ev_connected_state": {"state", ""},
+    "ev_charging_state": {"state", ""},
+    "battery_state": {"state", "%", "percent"},
 }
 
 
@@ -331,3 +391,7 @@ def _numeric_value(candidate: PromotionCandidate) -> Optional[float]:
                 except (TypeError, ValueError):
                     return None
     return None
+
+
+def _normalised_unit(unit: Optional[str]) -> str:
+    return str(unit or "").strip().lower()

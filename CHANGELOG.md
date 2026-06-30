@@ -1,5 +1,27 @@
 # Changelog
 
+## PI-004 - Live Power and Battery Observations
+
+- Added first-class provider observation types for live power, grid live power,
+  solar live power, battery state/SOC/power, EV charger live power, EV
+  connected/charging state, and home live power.
+- Added live observation promotion validation for valid units, battery SOC
+  bounds, stale live readings, impossible negatives, and signed grid/battery
+  power where direction is meaningful.
+- Updated Home Assistant entity mapping to emit normalized live observations
+  instead of forcing current-state values through historical energy types.
+- Mapped accepted live observations into Household State for current grid
+  import/export, solar production, battery SOC and charge/discharge, EV
+  connected/charging state, and EV charging power.
+- Updated Context Engine and Charging Advisor evidence so live solar surplus,
+  grid export/import, and active EV charging can influence Glance/advisor
+  context when live provider evidence is available.
+- Exposed live power and battery values on the System Household State card and
+  provider diagnostics via existing serialization paths.
+- Added regression tests for live observation validation, battery SOC
+  validation, signed power handling, Home Assistant live mapping, Household
+  State live mapping, Context live evidence, and API-safe serialization.
+
 ## PI-003 - Home Assistant Integration
 
 - Added a Home Assistant Provider Runtime adapter using the existing provider

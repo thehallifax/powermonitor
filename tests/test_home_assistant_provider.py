@@ -34,6 +34,12 @@ HOME_ASSISTANT_STATES = [
         "last_updated": "2026-06-30T08:03:00+08:00",
         "attributes": {"unit_of_measurement": "kW", "device_class": "power", "friendly_name": "EV charger power"},
     },
+    {
+        "entity_id": "binary_sensor.ev_connected",
+        "state": "on",
+        "last_updated": "2026-06-30T08:04:00+08:00",
+        "attributes": {"friendly_name": "EV connected"},
+    },
 ]
 
 
@@ -50,8 +56,10 @@ class HomeAssistantProviderTests(unittest.TestCase):
         observations = observations_from_entities(HOME_ASSISTANT_STATES)
 
         self.assertTrue(all(item.provider_id == "home_assistant" for item in observations))
-        self.assertIn(ProviderObservationType.SOLAR_GENERATION, {item.observation_type for item in observations})
-        self.assertIn(ProviderObservationType.EV_SESSION, {item.observation_type for item in observations})
+        self.assertIn(ProviderObservationType.SOLAR_LIVE_POWER, {item.observation_type for item in observations})
+        self.assertIn(ProviderObservationType.BATTERY_SOC, {item.observation_type for item in observations})
+        self.assertIn(ProviderObservationType.EV_CHARGER_LIVE_POWER, {item.observation_type for item in observations})
+        self.assertIn(ProviderObservationType.EV_CONNECTED_STATE, {item.observation_type for item in observations})
         self.assertTrue(all(item.raw_reference for item in observations))
 
     def test_connection_test_validates_authentication_and_version(self):

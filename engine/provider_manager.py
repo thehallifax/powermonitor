@@ -116,6 +116,7 @@ class ProviderDiagnostics:
     last_error: Optional[str] = None
     freshness: Optional[dict[str, Any]] = None
     observation_count: int = 0
+    live_observation_types: list[str] = field(default_factory=list)
     promotion_count: int = 0
     collector_version: str = "PowerMonitor local collector"
     warnings: list[str] = field(default_factory=list)
@@ -465,6 +466,7 @@ class ProviderManager:
     def _diagnostics(self, provider: Provider, lifecycle: ProviderConnectionStatus) -> ProviderDiagnostics:
         freshness = provider.freshness.as_dict() if provider.freshness else None
         observation_count = _observation_count(self.provider_observations, provider.provider_id)
+        live_observation_types = _live_observation_types(self.provider_observations, provider.provider_id)
         promotion_count = _promotion_count(self.promotion_summary, provider.provider_id)
         last_error = None
         warnings = []
@@ -481,6 +483,7 @@ class ProviderManager:
             last_error=last_error,
             freshness=freshness,
             observation_count=observation_count,
+            live_observation_types=live_observation_types,
             promotion_count=promotion_count,
             collector_version=str(self.health.get("collector_version") or "PowerMonitor local collector"),
             warnings=warnings,
@@ -877,3 +880,26 @@ def _promotion_count(summary: dict[str, Any], provider_id: str) -> int:
         if promotion.get("provider_id") == provider_id:
             count += 1
     return count
+
+
+def _live_observation_types(summary: dict[str, Any], provider_id: str) -> list[str]:
+    live_types = {
+        "live_power",
+        "grid_live_power",
+        "solar_live_power",
+        "battery_state",
+        "battery_soc",
+        "battery_power",
+        "ev_charger_live_power",
+        "ev_connected_state",
+        "ev_charging_state",
+        "home_live_power",
+    }
+    found = set()
+    for provider in summary.get("providers", []) if isinstance(summary, dict) else []:
+        if provider.get("provider_id") == provider_id:
+            found.update(item for item in provider.get("observation_types", []) if item in live_types)
+    for observation in summary.get("latest", []) if isinstance(summary, dict) else []:
+        if observation.get("provider_id") == provider_id and observation.get("observation_type") in live_types:
+            found.add(observation["observation_type"])
+    return sorted(found)
