@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Provider Management layer above the Provider Framework."""
 
+import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from .provider_framework import Provider, ProviderCapability, ProviderRegistry, ProviderStatus, ProviderType
 from .provider_entity_mapping import (
@@ -16,6 +18,13 @@ from .provider_entity_mapping import (
     load_provider_mapping_record,
     save_provider_entity_mappings,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROVIDER_STATE_PATH = PROJECT_ROOT / "config" / "provider_state.json"
+DEFAULT_SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.json"
+DEFAULT_SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
+DEFAULT_SOLAREDGE_COOKIE_PATH = PROJECT_ROOT / "collector" / "solaredge_cookie.txt"
 
 
 class ProviderConnectionStatus(str, Enum):
@@ -187,6 +196,34 @@ class ProviderTestResult:
 
 
 @dataclass(frozen=True)
+class ProviderActionResult:
+    provider_id: str
+    action: str
+    success: bool
+    status: str
+    user_message: str
+    next_step: str
+    technical_details: dict[str, Any] = field(default_factory=dict)
+    provider: Optional[dict[str, Any]] = None
+    configuration: Optional[dict[str, Any]] = None
+    test: Optional[dict[str, Any]] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider_id": self.provider_id,
+            "action": self.action,
+            "success": self.success,
+            "status": self.status,
+            "user_message": self.user_message,
+            "next_step": self.next_step,
+            "technical_details": dict(self.technical_details),
+            "provider": self.provider,
+            "configuration": self.configuration,
+            "test": self.test,
+        }
+
+
+@dataclass(frozen=True)
 class ProviderOnboardingGuide:
     provider_id: str
     state: ProviderOnboardingState
@@ -289,6 +326,10 @@ class ProviderManager:
         settings: Any = None,
         provider_entity_mappings: Optional[dict[str, Any]] = None,
         entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
+        provider_state_path: Path = DEFAULT_PROVIDER_STATE_PATH,
+        secrets_path: Path = DEFAULT_SECRETS_PATH,
+        settings_path: Path = DEFAULT_SETTINGS_PATH,
+        solaredge_cookie_path: Path = DEFAULT_SOLAREDGE_COOKIE_PATH,
     ) -> None:
         self.registry = registry
         self.health = health or {}
@@ -299,6 +340,11 @@ class ProviderManager:
         self.settings = settings
         self.provider_entity_mappings = provider_entity_mappings or {}
         self.entity_mapping_store_path = entity_mapping_store_path
+        self.provider_state_path = provider_state_path
+        self.secrets_path = secrets_path
+        self.settings_path = settings_path
+        self.solaredge_cookie_path = solaredge_cookie_path
+        self.provider_state = _load_json(provider_state_path)
 
     def providers(self) -> list[ManagedProvider]:
         existing = {provider.provider_id: provider for provider in self.registry.providers}
@@ -389,6 +435,9 @@ class ProviderManager:
         provider = self.get(provider_id)
         if provider is None:
             raise ValueError(f"Unknown provider: {provider_id}")
+        validation_errors = _validate_configuration_values(provider.provider_type, values)
+        if validation_errors:
+            raise ValueError("; ".join(validation_errors))
         saved_mapping = None
         if provider_id == "home_assistant":
             mappings_payload = values.get("entity_mappings") or values.get("selected_mappings") or values.get("selected_entity_mappings")
@@ -401,17 +450,19 @@ class ProviderManager:
                     clean_entity_mappings(mappings_payload),
                     path=self.entity_mapping_store_path,
                 )
+        stored = self._store_provider_configuration(provider, values)
         credentials = []
-        editable = _editable_fields(provider.provider_type)
+        editable = _editable_fields(provider.provider_type, provider.provider_id)
         for field_name in editable:
             value = values.get(field_name)
+            configured = _credential_configured(field_name, value, provider.provider_type, stored)
             credentials.append(
                 ProviderCredential(
                     field=field_name,
                     label=field_name.replace("_", " ").title(),
-                    required=field_name in _required_fields(provider.provider_type),
+                    required=field_name in _required_fields(provider.provider_type, provider.provider_id),
                     sensitive=field_name in SENSITIVE_FIELDS,
-                    configured=value is not None and str(value) != "",
+                    configured=configured,
                     value=str(value) if value is not None else None,
                 )
             )
@@ -439,6 +490,68 @@ class ProviderManager:
             notes=notes,
         )
 
+    def action(self, provider_id: str, action: str, values: Optional[dict[str, Any]] = None) -> ProviderActionResult:
+        normalized = action.strip().lower().replace(" ", "_")
+        values = values or {}
+        if normalized in {"configure", "edit", "save"}:
+            configuration = self.configure(provider_id, values)
+            provider = self.get(provider_id)
+            return ProviderActionResult(
+                provider_id=provider_id,
+                action=normalized,
+                success=configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED,
+                status="success" if configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED else "warning",
+                user_message=configuration.notes or "Provider configuration saved.",
+                next_step="Run Test Connection before relying on this provider.",
+                configuration=configuration.as_dict(),
+                provider=provider.as_dict() if provider else None,
+                technical_details={"stored_fields": _stored_field_summary(self.provider_state.get(provider_id, {}))},
+            )
+        if normalized == "test":
+            result = self.test_connection(provider_id)
+            return ProviderActionResult(
+                provider_id=provider_id,
+                action=normalized,
+                success=result.success,
+                status=result.status,
+                user_message=result.user_message,
+                next_step=result.next_step,
+                test=result.as_dict(),
+                technical_details=result.technical_details,
+            )
+        if normalized == "reset":
+            provider = self.get(provider_id)
+            if provider is None:
+                raise ValueError(f"Unknown provider: {provider_id}")
+            if provider_id == "home_assistant":
+                current_plan = provider.configuration.entity_mapping or {}
+                save_provider_entity_mappings(
+                    provider_id,
+                    clean_entity_mappings(current_plan.get("recommended_mappings") or {}),
+                    path=self.entity_mapping_store_path,
+                )
+            return self._state_action(provider_id, "reset", enabled=True, removed=False, message="Provider settings were reset to recommended local defaults.")
+        if normalized == "reconnect":
+            test_result = self.test_connection(provider_id)
+            status = "success" if test_result.success else test_result.status
+            return ProviderActionResult(
+                provider_id=provider_id,
+                action=normalized,
+                success=test_result.success,
+                status=status,
+                user_message=test_result.user_message,
+                next_step=test_result.next_step,
+                test=test_result.as_dict(),
+                technical_details={"reconnect": "test_connection", **test_result.technical_details},
+            )
+        if normalized == "disable":
+            return self._state_action(provider_id, normalized, enabled=False, removed=False, message="Provider disabled. PowerMonitor will keep existing data but will not rely on new provider syncs.")
+        if normalized == "enable":
+            return self._state_action(provider_id, normalized, enabled=True, removed=False, message="Provider enabled. Run Test Connection before relying on new data.")
+        if normalized == "remove":
+            return self._state_action(provider_id, normalized, enabled=False, removed=True, clear=True, message="Provider configuration removed from local Provider Management.")
+        raise ValueError(f"Unsupported provider action: {action}")
+
     def transition(self, provider_id: str, action: str) -> ManagedProvider:
         provider = self.get(provider_id)
         if provider is None:
@@ -449,8 +562,102 @@ class ProviderManager:
             raise ValueError(f"Unsupported provider action: {action}")
         return provider
 
+    def _state_action(
+        self,
+        provider_id: str,
+        action: str,
+        *,
+        enabled: bool,
+        removed: bool,
+        message: str,
+        clear: bool = False,
+    ) -> ProviderActionResult:
+        provider = self.get(provider_id)
+        if provider is None:
+            raise ValueError(f"Unknown provider: {provider_id}")
+        if clear:
+            self._clear_provider_configuration(provider_id)
+        record = {} if clear else dict(self.provider_state.get(provider_id, {}))
+        record["enabled"] = enabled
+        record["removed"] = removed
+        record["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.provider_state[provider_id] = record
+        _save_json(self.provider_state_path, self.provider_state)
+        refreshed = self.get(provider_id)
+        return ProviderActionResult(
+            provider_id=provider_id,
+            action=action,
+            success=True,
+            status="success",
+            user_message=message,
+            next_step="Run Test Connection after changing provider state." if enabled else "Enable this provider when you want PowerMonitor to use it again.",
+            provider=refreshed.as_dict() if refreshed else None,
+            technical_details={"enabled": enabled, "removed": removed},
+        )
+
+    def _clear_provider_configuration(self, provider_id: str) -> None:
+        if provider_id == "home_assistant":
+            secrets = _load_json(self.secrets_path)
+            for key in ("home_assistant_token", "ha_token"):
+                secrets.pop(key, None)
+            _save_json(self.secrets_path, secrets)
+            save_provider_entity_mappings(provider_id, {}, path=self.entity_mapping_store_path)
+        elif provider_id == "solaredge":
+            secrets = _load_json(self.secrets_path)
+            for key in ("solaredge_username", "solaredge_password"):
+                secrets.pop(key, None)
+            _save_json(self.secrets_path, secrets)
+            self.solaredge_cookie_path.unlink(missing_ok=True)
+
+    def _store_provider_configuration(self, provider: ManagedProvider, values: dict[str, Any]) -> dict[str, Any]:
+        record = dict(self.provider_state.get(provider.provider_id, {}))
+        configured_fields = set(record.get("configured_fields") or [])
+        public_values = dict(record.get("public_values") or {})
+        for field_name in _editable_fields(provider.provider_type, provider.provider_id):
+            if field_name not in values:
+                continue
+            raw = values.get(field_name)
+            if raw is None or str(raw) == "":
+                continue
+            configured_fields.add(field_name)
+            if field_name not in SENSITIVE_FIELDS:
+                public_values[field_name] = str(raw)
+            self._persist_provider_value(provider.provider_id, provider.provider_type, field_name, str(raw))
+        record.update(
+            {
+                "enabled": True,
+                "removed": False,
+                "configured_fields": sorted(configured_fields),
+                "public_values": public_values,
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        )
+        self.provider_state[provider.provider_id] = record
+        _save_json(self.provider_state_path, self.provider_state)
+        return record
+
+    def _persist_provider_value(self, provider_id: str, provider_type: ProviderType, field_name: str, value: str) -> None:
+        if provider_id == "home_assistant":
+            if field_name == "endpoint":
+                settings = _load_json(self.settings_path)
+                settings["home_assistant_url"] = value.rstrip("/")
+                _save_json(self.settings_path, settings)
+            elif field_name == "api_key":
+                secrets = _load_json(self.secrets_path)
+                secrets["home_assistant_token"] = value
+                _save_json(self.secrets_path, secrets)
+        elif provider_id == "solaredge":
+            if field_name == "cookie":
+                self.solaredge_cookie_path.parent.mkdir(parents=True, exist_ok=True)
+                self.solaredge_cookie_path.write_text(value.strip() + "\n", encoding="utf-8")
+            elif field_name in {"username", "password"}:
+                secrets = _load_json(self.secrets_path)
+                secrets[f"solaredge_{field_name}"] = value
+                _save_json(self.secrets_path, secrets)
+
     def _managed_provider(self, provider: Provider) -> ManagedProvider:
-        lifecycle = _lifecycle_from_provider(provider, self.health)
+        state_record = self.provider_state.get(provider.provider_id, {})
+        lifecycle = _lifecycle_from_provider(provider, self.health, state_record)
         diagnostics = self._diagnostics(provider, lifecycle)
         capability_summary = ProviderCapabilitySummary(
             provider_id=provider.provider_id,
@@ -463,8 +670,8 @@ class ProviderManager:
             provider_name=provider.name,
             provider_type=provider.provider_type,
             lifecycle_state=lifecycle,
-            credentials=_credential_templates(provider.provider_type, lifecycle),
-            editable_fields=_editable_fields(provider.provider_type),
+            credentials=_credential_templates(provider.provider_type, lifecycle, state_record, provider.provider_id),
+            editable_fields=_editable_fields(provider.provider_type, provider.provider_id),
             entity_mapping=self._entity_mapping_for_provider(provider.provider_id),
             enabled=lifecycle != ProviderConnectionStatus.DISABLED,
             notes=provider.note,
@@ -555,6 +762,10 @@ def build_provider_management(
     settings: Any = None,
     provider_entity_mappings: Optional[dict[str, Any]] = None,
     entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
+    provider_state_path: Path = DEFAULT_PROVIDER_STATE_PATH,
+    secrets_path: Path = DEFAULT_SECRETS_PATH,
+    settings_path: Path = DEFAULT_SETTINGS_PATH,
+    solaredge_cookie_path: Path = DEFAULT_SOLAREDGE_COOKIE_PATH,
 ) -> ProviderManager:
     return ProviderManager(
         provider_registry,
@@ -566,10 +777,19 @@ def build_provider_management(
         settings=settings,
         provider_entity_mappings=provider_entity_mappings,
         entity_mapping_store_path=entity_mapping_store_path,
+        provider_state_path=provider_state_path,
+        secrets_path=secrets_path,
+        settings_path=settings_path,
+        solaredge_cookie_path=solaredge_cookie_path,
     )
 
 
-def _lifecycle_from_provider(provider: Provider, health: dict[str, Any]) -> ProviderConnectionStatus:
+def _lifecycle_from_provider(provider: Provider, health: dict[str, Any], state_record: Optional[dict[str, Any]] = None) -> ProviderConnectionStatus:
+    state_record = state_record or {}
+    if state_record.get("removed"):
+        return ProviderConnectionStatus.NOT_CONFIGURED
+    if state_record.get("enabled") is False:
+        return ProviderConnectionStatus.DISABLED
     if provider.status == ProviderStatus.MISSING:
         return ProviderConnectionStatus.NOT_CONFIGURED
     if provider.status == ProviderStatus.DEGRADED:
@@ -878,7 +1098,9 @@ def _next_sync_label(provider_type: ProviderType) -> str:
     return "Next collector run"
 
 
-def _editable_fields(provider_type: ProviderType) -> list[str]:
+def _editable_fields(provider_type: ProviderType, provider_id: Optional[str] = None) -> list[str]:
+    if provider_id == "ocular_export":
+        return []
     fields = {
         ProviderType.SOLAR: ["username", "password", "cookie", "endpoint"],
         ProviderType.EV_CHARGER: ["username", "password", "api_key", "endpoint"],
@@ -892,7 +1114,9 @@ def _editable_fields(provider_type: ProviderType) -> list[str]:
     return fields.get(provider_type, ["api_key", "endpoint"])
 
 
-def _required_fields(provider_type: ProviderType) -> set[str]:
+def _required_fields(provider_type: ProviderType, provider_id: Optional[str] = None) -> set[str]:
+    if provider_id == "ocular_export":
+        return set()
     if provider_type == ProviderType.GENERIC_IMPORT:
         return set()
     if provider_type == ProviderType.SOLAR:
@@ -904,17 +1128,26 @@ def _required_fields(provider_type: ProviderType) -> set[str]:
     return {"endpoint"}
 
 
-def _credential_templates(provider_type: ProviderType, lifecycle: ProviderConnectionStatus) -> list[ProviderCredential]:
+def _credential_templates(
+    provider_type: ProviderType,
+    lifecycle: ProviderConnectionStatus,
+    state_record: Optional[dict[str, Any]] = None,
+    provider_id: Optional[str] = None,
+) -> list[ProviderCredential]:
     configured = lifecycle != ProviderConnectionStatus.NOT_CONFIGURED
+    state_record = state_record or {}
+    configured_fields = set(state_record.get("configured_fields") or [])
+    public_values = state_record.get("public_values") if isinstance(state_record.get("public_values"), dict) else {}
     return [
         ProviderCredential(
             field=field_name,
             label=field_name.replace("_", " ").title(),
-            required=field_name in _required_fields(provider_type),
+            required=field_name in _required_fields(provider_type, provider_id),
             sensitive=field_name in SENSITIVE_FIELDS,
-            configured=configured and field_name not in SENSITIVE_FIELDS,
+            configured=field_name in configured_fields or (configured and field_name not in SENSITIVE_FIELDS),
+            value=public_values.get(field_name) if field_name not in SENSITIVE_FIELDS else None,
         )
-        for field_name in _editable_fields(provider_type)
+        for field_name in _editable_fields(provider_type, provider_id)
     ]
 
 
@@ -925,6 +1158,56 @@ def _future_provider_catalog() -> list[Provider]:
         Provider("fronius", "Fronius", ProviderType.SOLAR, [ProviderCapability.LIVE_POWER, ProviderCapability.INTERVAL_HISTORY], note="Future solar inverter provider."),
         Provider("enphase", "Enphase", ProviderType.SOLAR, [ProviderCapability.LIVE_POWER, ProviderCapability.INTERVAL_HISTORY, ProviderCapability.BATTERY_STATE], note="Future solar and battery provider."),
     ]
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _validate_configuration_values(provider_type: ProviderType, values: dict[str, Any]) -> list[str]:
+    errors = []
+    for field_name, raw in values.items():
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if field_name == "endpoint":
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                errors.append("Endpoint must be a valid http or https URL.")
+        if field_name == "api_key" and provider_type == ProviderType.HOME_AUTOMATION and len(value) < 20:
+            errors.append("Home Assistant token looks too short. Paste a long-lived access token.")
+    return errors
+
+
+def _credential_configured(field_name: str, value: Any, provider_type: ProviderType, state_record: dict[str, Any]) -> bool:
+    if value is not None and str(value) != "":
+        return True
+    if field_name in set(state_record.get("configured_fields") or []):
+        return True
+    public_values = state_record.get("public_values") if isinstance(state_record.get("public_values"), dict) else {}
+    return field_name in public_values
+
+
+def _stored_field_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "configured_fields": list(record.get("configured_fields") or []),
+        "enabled": bool(record.get("enabled", True)),
+        "removed": bool(record.get("removed", False)),
+        "updated_at": record.get("updated_at"),
+    }
 
 
 def _observation_count(summary: dict[str, Any], provider_id: str) -> int:

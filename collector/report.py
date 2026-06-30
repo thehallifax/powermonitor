@@ -3709,6 +3709,81 @@ def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
     """
 
 
+def _provider_configuration_form_html(data: dict) -> str:
+    provider_id = str(data.get("provider_id") or "")
+    configuration = data.get("configuration") or {}
+    credentials = configuration.get("credentials") or []
+    fields = []
+    for credential in credentials:
+        if not isinstance(credential, dict):
+            continue
+        field = str(credential.get("field") or "")
+        if not field:
+            continue
+        label = str(credential.get("label") or friendly_label(field))
+        sensitive = bool(credential.get("sensitive"))
+        required = bool(credential.get("required"))
+        configured = bool(credential.get("configured"))
+        value = "" if sensitive else str(credential.get("value") or "")
+        placeholder = "Already saved; paste a new value to replace it" if sensitive and configured else "Required" if required else "Optional"
+        input_type = "password" if sensitive else "url" if field == "endpoint" else "text"
+        fields.append(
+            f"""
+            <label>
+              <span>{html.escape(label)}{' *' if required else ''}</span>
+              <input type="{input_type}" name="{html.escape(field)}" value="{html.escape(value)}" placeholder="{html.escape(placeholder)}" autocomplete="off">
+              <small>{html.escape('Configured' if configured else 'Not configured')}</small>
+            </label>
+            """
+        )
+    mapping = configuration.get("entity_mapping") or {}
+    mapping_fields = []
+    for target in mapping.get("targets", []):
+        if not isinstance(target, dict):
+            continue
+        target_id = str(target.get("target_id") or "")
+        if not target_id:
+            continue
+        selected = str((mapping.get("selected_mappings") or {}).get(target_id) or "")
+        recommended = str((mapping.get("recommended_mappings") or {}).get(target_id) or "")
+        mapping_fields.append(
+            f"""
+            <label>
+              <span>{html.escape(str(target.get("label") or friendly_label(target_id)))}</span>
+              <input type="text" name="entity_mappings.{html.escape(target_id)}" value="{html.escape(selected)}" placeholder="{html.escape(recommended or 'Run Test Connection for recommendations')}">
+              <small>{html.escape(str(target.get("category") or '').replace('_', ' ').title())}</small>
+            </label>
+            """
+        )
+    mapping_html = ""
+    if mapping_fields:
+        mapping_html = f"""
+          <div class="provider-form-section">
+            <span>Home Assistant entity mappings</span>
+            <div class="provider-form-grid">{''.join(mapping_fields)}</div>
+          </div>
+        """
+    return f"""
+      <form class="provider-config-form" data-provider-id="{html.escape(provider_id)}">
+        <div class="provider-form-section">
+          <span>Connection details</span>
+          <div class="provider-form-grid">{''.join(fields) or '<p class="notice">No editable connection fields for this provider.</p>'}</div>
+        </div>
+        {mapping_html}
+        <div class="provider-action-row">
+          <button type="submit" data-provider-action="save">Save</button>
+          <button type="button" data-provider-action="test">Test Connection</button>
+          <button type="button" data-provider-action="reconnect">Reconnect</button>
+          <button type="button" data-provider-action="reset">Reset</button>
+          <button type="button" data-provider-action="disable">Disable</button>
+          <button type="button" data-provider-action="enable">Enable</button>
+          <button type="button" data-provider-action="remove">Remove</button>
+        </div>
+        <div class="provider-action-result" aria-live="polite"></div>
+      </form>
+    """
+
+
 def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
     if not provider_management:
         return """
@@ -3742,6 +3817,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
           </div>
         """
         mapping_body = _provider_entity_mapping_html((data.get("configuration") or {}).get("entity_mapping") or (data.get("diagnostics") or {}).get("entity_mapping"))
+        configuration_body = _provider_configuration_form_html(data)
         technical_body = f"""
           <div class="config-grid">{_technical_detail_rows(onboarding.get("technical_details") or {})}</div>
           <div class="config-grid">
@@ -3775,6 +3851,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
               </div>
               <p>Provides: {html.escape(capabilities)}.</p>
               <small>{actions}</small>
+              {disclosure_html("Configure provider", "Save settings, test, reconnect, reset, enable, disable, or remove", configuration_body, css_class="provider-details")}
               {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
               {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body else ""}
               {disclosure_html("Technical diagnostics", "Lifecycle, sync, observations, and collector details", technical_body, css_class="provider-details")}
@@ -5200,6 +5277,25 @@ def write_html(
     .provider-guidance-grid span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-guidance-grid strong {{ display:block; margin-top:4px; font-size:12px; line-height:1.35; }}
     .provider-guidance-grid ul {{ margin:6px 0 0; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.4; }}
+    .provider-config-form {{ display:grid; gap:12px; }}
+    .provider-form-section > span {{ display:block; margin:0 0 8px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    .provider-form-grid label {{ display:block; padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
+    .provider-form-grid label span,.provider-form-grid label small {{ display:block; }}
+    .provider-form-grid label span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-form-grid label small {{ margin-top:4px; color:var(--muted); font-size:10px; }}
+    .provider-form-grid input {{ width:100%; min-height:38px; margin-top:5px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; }}
+    .provider-action-row {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .provider-action-row button {{ min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
+    .provider-action-row button[data-provider-action="remove"],.provider-action-row button[data-provider-action="disable"] {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
+    .provider-action-row button[data-provider-action="reset"] {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
+    .provider-action-result {{ display:none; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
+    .provider-action-result.visible {{ display:block; }}
+    .provider-action-result.success {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-action-result.warning {{ background:#fffaf0; border-color:#eeddb0; }} .provider-action-result.failure {{ background:#fff5f3; border-color:#f0cec8; }}
+    .provider-action-result strong,.provider-action-result span,.provider-action-result small {{ display:block; }}
+    .provider-action-result span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-action-result strong {{ margin-top:3px; font-size:13px; }} .provider-action-result small {{ margin-top:4px; color:var(--muted); font-size:11px; }}
+    .provider-action-result pre {{ max-height:220px; overflow:auto; margin:9px 0 0; padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; font-size:10px; white-space:pre-wrap; }}
     .import-panel {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .import-panel table {{ width:100%; border-collapse:collapse; }}
     .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
@@ -5347,6 +5443,7 @@ def write_html(
       .glance-panel strong {{ font-size:24px; }}
       .glance-panel.score strong {{ font-size:54px; }}
       .setup-progress-card {{ align-items:flex-start; flex-direction:column; }} .setup-progress-card a,.setup-task-meta a {{ width:100%; text-align:center; }}
+      .provider-form-grid {{ grid-template-columns:1fr; }} .provider-action-row button {{ flex:1 1 140px; }}
       .completeness-row {{ grid-template-columns:1fr; }} .completeness-row strong {{ overflow-wrap:anywhere; }}
       .system-card table,.import-panel table {{ min-width:640px; }}
     }}
@@ -5373,7 +5470,86 @@ def write_html(
   {chrome_html}
   {pages_html}
   {footer_html}
-</main></body></html>
+</main>
+<script>
+(() => {{
+  function payloadFromForm(form) {{
+    const payload = {{}};
+    const mappings = {{}};
+    new FormData(form).forEach((value, key) => {{
+      const text = String(value || "").trim();
+      if (!text) return;
+      if (key.startsWith("entity_mappings.")) {{
+        mappings[key.slice("entity_mappings.".length)] = text;
+      }} else {{
+        payload[key] = text;
+      }}
+    }});
+    if (Object.keys(mappings).length) payload.entity_mappings = mappings;
+    return payload;
+  }}
+
+  function renderResult(container, action) {{
+    if (!container || !action) return;
+    const status = action.status || (action.success ? "success" : "failure");
+    container.className = "provider-action-result visible " + status;
+    const details = action.technical_details || (action.test && action.test.technical_details) || {{}};
+    const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (char) => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[char]));
+    container.innerHTML = `
+      <span>${{escapeHtml(status)}}</span>
+      <strong>${{escapeHtml(action.user_message || "Provider action completed.")}}</strong>
+      <small>${{escapeHtml(action.next_step || "Review provider status.")}}</small>
+      <details>
+        <summary>Technical details</summary>
+        <pre>${{escapeHtml(JSON.stringify(details, null, 2))}}</pre>
+      </details>
+    `;
+  }}
+
+  async function runProviderAction(form, actionName) {{
+    const providerId = form.dataset.providerId;
+    const result = form.querySelector(".provider-action-result");
+    const payload = ["save", "configure", "edit"].includes(actionName) ? payloadFromForm(form) : {{}};
+    if (actionName === "reset") payload.reset_entity_mappings = true;
+    result.className = "provider-action-result visible warning";
+    result.innerHTML = "<span>Running</span><strong>Working on provider action...</strong>";
+    try {{
+      const response = await fetch(`/api/providers/${{encodeURIComponent(providerId)}}/${{encodeURIComponent(actionName)}}`, {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json();
+      renderResult(result, data.action || {{
+        success: false,
+        status: "failure",
+        user_message: data.error || "Provider action failed.",
+        next_step: "Review the provider form and try again.",
+        technical_details: data
+      }});
+    }} catch (error) {{
+      renderResult(result, {{
+        success: false,
+        status: "failure",
+        user_message: "Provider action failed before PowerMonitor could process it.",
+        next_step: "Check that the local web server is running, then try again.",
+        technical_details: {{message: String(error)}}
+      }});
+    }}
+  }}
+
+  document.querySelectorAll(".provider-config-form").forEach((form) => {{
+    form.addEventListener("submit", (event) => {{
+      event.preventDefault();
+      runProviderAction(form, "save");
+    }});
+    form.querySelectorAll("[data-provider-action]").forEach((button) => {{
+      button.addEventListener("click", () => runProviderAction(form, button.dataset.providerAction));
+    }});
+  }});
+}})();
+</script>
+</body></html>
 """
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

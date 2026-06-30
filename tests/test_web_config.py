@@ -104,6 +104,19 @@ class WebConfigTests(unittest.TestCase):
                     current_plan="synergy_ev_add_on",
                 )
 
+    def test_provider_payload_normalizes_mapping_fields(self):
+        payload = web.normalize_provider_payload(
+            {
+                "endpoint": "http://homeassistant.local:8123",
+                "entity_mappings.solar_live_power": "sensor.solar_power",
+                "entity_mappings.battery_soc": "sensor.battery_soc",
+            }
+        )
+
+        self.assertEqual(payload["endpoint"], "http://homeassistant.local:8123")
+        self.assertEqual(payload["entity_mappings"]["solar_live_power"], "sensor.solar_power")
+        self.assertEqual(payload["entity_mappings"]["battery_soc"], "sensor.battery_soc")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,23 @@ def load_web_bind_config(settings_path: Path) -> dict:
     }
 
 
+def normalize_provider_payload(payload: dict) -> dict:
+    normalized = {}
+    mappings = {}
+    for key, value in payload.items():
+        key_text = str(key)
+        if key_text.startswith("entity_mappings."):
+            mappings[key_text.split(".", 1)[1]] = value
+        else:
+            normalized[key_text] = value
+    existing = normalized.get("entity_mappings")
+    if isinstance(existing, dict):
+        mappings.update(existing)
+    if mappings:
+        normalized["entity_mappings"] = mappings
+    return normalized
+
+
 def parse_port(value) -> int:
     try:
         port = int(value)
@@ -182,7 +199,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "not found"}, status=404)
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
-            logging.error("POST failed for %s: %s", request.path, exc)
+            logging.error("POST failed for %s", request.path)
             if request.path.startswith("/imports/"):
                 self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export and try again.", status=400)
             elif request.path == "/setup/billing-cycle":
@@ -193,7 +210,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 self.send_html(result_html.encode("utf-8"))
             else:
-                self.send_json({"error": "request update failed"}, status=500)
+                self.send_json(
+                    {
+                        "action": {
+                            "success": False,
+                            "status": "failure",
+                            "user_message": str(exc) if isinstance(exc, ValueError) else "Request update failed.",
+                            "next_step": "Review the highlighted fields and try again.",
+                            "technical_details": {"path": request.path},
+                        }
+                    },
+                    status=400 if isinstance(exc, ValueError) else 500,
+                )
 
     @staticmethod
     def param(params: dict, name: str, default=None):
@@ -260,14 +288,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         action = parts[3]
         manager = report.provider_management_data()
         if action == "test":
-            self.send_json({"test": manager.test_connection(provider_id).as_dict()})
+            self.send_json({"action": manager.action(provider_id, action).as_dict()})
             return
         payload = self.read_request_payload()
-        if action == "configure":
-            self.send_json({"configuration": manager.configure(provider_id, payload).as_dict()})
+        if action in {"configure", "edit", "save", "reset", "reconnect", "disable", "enable", "remove"}:
+            self.send_json({"action": manager.action(provider_id, action, payload).as_dict()})
             return
-        provider = manager.transition(provider_id, action)
-        self.send_json({"provider": provider.as_dict(), "requested_action": action})
+        self.send_json({"error": "unsupported provider action"}, status=400)
 
     def read_request_payload(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -279,8 +306,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw_body)
             if not isinstance(payload, dict):
                 raise ValueError("JSON body must be an object")
-            return payload
-        return {key: values[-1] for key, values in parse_qs(raw_body).items()}
+            return normalize_provider_payload(payload)
+        return normalize_provider_payload({key: values[-1] for key, values in parse_qs(raw_body).items()})
 
     def update_recommendation_lifecycle(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)

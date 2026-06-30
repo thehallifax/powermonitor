@@ -1,5 +1,28 @@
 # Changelog
 
+## PI-006 - Interactive Provider Configuration
+
+- Added local interactive provider configuration controls to System provider
+  cards for save, test connection, reconnect, reset, disable, enable, and
+  remove actions.
+- Added normalized provider action results with success/warning/failure status,
+  plain-language messages, next steps, and technical details behind disclosure.
+- Added safe local provider action endpoints that redact sensitive values and
+  avoid logging submitted secrets.
+- Added local Provider Manager state persistence for enabled/disabled/removed
+  providers and configured-field metadata.
+- Wired Home Assistant UI mapping fields into Provider Manager save/reset
+  actions so entity mappings can be manually edited, validated, saved, and
+  reset from the local web UI.
+- Wired Home Assistant endpoint/token and SolarEdge session details into
+  existing local settings/secret surfaces where practical, with sensitive
+  fields remaining write-only in reports and API responses.
+- Clarified Ocular export as an import-provider workflow instead of requesting
+  account credentials.
+- Added tests for provider save/test/reset/disable/enable/remove actions,
+  Home Assistant mapping save, redaction, invalid configuration validation,
+  Ocular import-provider configuration, and web payload normalization.
+
 ## PI-005 - Home Assistant Entity Configuration
 
 - Added a reusable provider entity mapping model with Home Assistant entity

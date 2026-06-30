@@ -58,6 +58,21 @@ def registry_with_home_assistant(status=ProviderStatus.AVAILABLE):
     )
 
 
+def manager_paths(directory):
+    root = Path(directory)
+    return {
+        "provider_state_path": root / "provider_state.json",
+        "entity_mapping_store_path": root / "provider_mappings.json",
+        "secrets_path": root / "secrets.json",
+        "settings_path": root / "settings.json",
+        "solaredge_cookie_path": root / "solaredge_cookie.txt",
+    }
+
+
+def paths_read(path):
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
 class ProviderManagerTests(unittest.TestCase):
     def test_configuration_lifecycle_and_state_transitions(self):
         manager = ProviderManager(registry())
@@ -68,16 +83,17 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("Remove", provider.actions)
 
     def test_credential_updates_are_redacted(self):
-        manager = ProviderManager(registry(status=ProviderStatus.MISSING))
-        configuration = manager.configure(
-            "solaredge",
-            {
-                "username": "user@example.com",
-                "password": "redaction-fixture-one",
-                "cookie": "redaction-fixture-two",
-                "endpoint": "https://example.invalid",
-            },
-        ).as_dict()
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory))
+            configuration = manager.configure(
+                "solaredge",
+                {
+                    "username": "user@example.com",
+                    "password": "redaction-fixture-one",
+                    "cookie": "redaction-fixture-two",
+                    "endpoint": "https://example.invalid",
+                },
+            ).as_dict()
 
         serialized = str(configuration)
         self.assertNotIn("redaction-fixture-one", serialized)
@@ -86,9 +102,9 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(configuration["lifecycle_state"], "CONFIGURED")
 
     def test_required_cookie_must_be_present_before_configuration_is_ready(self):
-        manager = ProviderManager(registry(status=ProviderStatus.MISSING))
-
-        configuration = manager.configure("solaredge", {"username": "user@example.com"}).as_dict()
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory))
+            configuration = manager.configure("solaredge", {"username": "user@example.com"}).as_dict()
 
         self.assertEqual(configuration["lifecycle_state"], "NOT_CONFIGURED")
         self.assertIn("Cookie", configuration["notes"])
@@ -226,11 +242,18 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(tesla.lifecycle_state, ProviderConnectionStatus.NOT_CONFIGURED)
         self.assertIn("Configure", tesla.actions)
 
+    def test_ocular_import_provider_does_not_request_account_credentials(self):
+        provider = ProviderManager(registry()).get("ocular_export").as_dict()
+
+        self.assertEqual(provider["configuration"]["editable_fields"], [])
+        self.assertEqual(provider["configuration"]["credentials"], [])
+
     def test_api_serialization_never_returns_sensitive_values(self):
-        manager = ProviderManager(registry())
-        configuration = manager.configure("solaredge", {"password": "redaction-fixture-three", "cookie": "redaction-fixture-four"})
-        payload = manager.as_dict()
-        config_payload = configuration.as_dict()
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry(), **manager_paths(directory))
+            configuration = manager.configure("solaredge", {"password": "redaction-fixture-three", "cookie": "redaction-fixture-four"})
+            payload = manager.as_dict()
+            config_payload = configuration.as_dict()
 
         self.assertIn("providers", payload)
         self.assertNotIn("redaction-fixture-three", str(config_payload))
@@ -238,8 +261,9 @@ class ProviderManagerTests(unittest.TestCase):
 
     def test_home_assistant_entity_mapping_is_serialized_and_persisted(self):
         with TemporaryDirectory() as directory:
-            path = Path(directory) / "provider_mappings.json"
-            manager = ProviderManager(registry_with_home_assistant(), entity_mapping_store_path=path)
+            paths = manager_paths(directory)
+            path = paths["entity_mapping_store_path"]
+            manager = ProviderManager(registry_with_home_assistant(), **paths)
 
             configuration = manager.configure(
                 "home_assistant",
@@ -254,7 +278,7 @@ class ProviderManagerTests(unittest.TestCase):
             ).as_dict()
             reloaded = ProviderManager(
                 registry_with_home_assistant(),
-                entity_mapping_store_path=path,
+                **paths,
                 provider_observations={
                     "latest": [
                         {
@@ -278,6 +302,45 @@ class ProviderManagerTests(unittest.TestCase):
                 "2026-06-30T08:00:00+08:00",
             )
             self.assertTrue(path.exists())
+
+    def test_provider_action_save_test_reset_disable_enable_and_remove(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(
+                registry_with_home_assistant(),
+                connection_testers={"home_assistant": lambda: {"success": True, "authentication_status": "authenticated", "warnings": []}},
+                **manager_paths(directory),
+            )
+
+            save = manager.action(
+                "home_assistant",
+                "save",
+                {
+                    "endpoint": "http://homeassistant.local:8123",
+                    "api_key": "redaction-fixture-home-assistant-token",
+                    "entity_mappings": {"solar_live_power": "sensor.solar_power"},
+                },
+            ).as_dict()
+            test = manager.action("home_assistant", "test").as_dict()
+            reset = manager.action("home_assistant", "reset").as_dict()
+            disabled = manager.action("home_assistant", "disable").as_dict()
+            enabled = manager.action("home_assistant", "enable").as_dict()
+            removed = manager.action("home_assistant", "remove").as_dict()
+
+            self.assertTrue(save["success"])
+            self.assertEqual(test["status"], "success")
+            self.assertTrue(reset["success"])
+            self.assertEqual(disabled["provider"]["lifecycle_state"], "DISABLED")
+            self.assertTrue(enabled["success"])
+            self.assertEqual(removed["provider"]["lifecycle_state"], "NOT_CONFIGURED")
+            self.assertNotIn("redaction-fixture-home-assistant-token", str(save))
+            self.assertNotIn("home_assistant_token", paths_read(manager_paths(directory)["secrets_path"]))
+
+    def test_invalid_provider_configuration_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry_with_home_assistant(), **manager_paths(directory))
+
+            with self.assertRaises(ValueError):
+                manager.action("home_assistant", "save", {"endpoint": "homeassistant.local", "api_key": "short"})
 
     def test_home_assistant_connection_test_exposes_entity_mapping_diagnostics(self):
         manager = ProviderManager(
