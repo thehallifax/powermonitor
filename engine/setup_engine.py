@@ -120,8 +120,8 @@ class SetupEngine:
             ready,
             "high",
             "2 minutes",
-            "Edit Tariff Plan",
-            "#setup-billing",
+            "Go to Tariff Settings",
+            "#setup-tariff",
             tariff.reason if tariff else "Tariff capability is unavailable.",
             "HouseholdCapabilitySummary.tariff",
         )
@@ -154,7 +154,7 @@ class SetupEngine:
             "medium",
             "3 minutes",
             "Review Goals",
-            "#home",
+            "#home-goals",
             "Goal Engine has active household goals." if ready else "Goal Engine has no active household goals to evaluate.",
             "GoalsEngine",
         )
@@ -186,6 +186,7 @@ class SetupEngine:
             elif solar_provider:
                 rationale = f"{rationale} Provider: {solar_provider.name} ({solar_provider.status.value})."
                 source = "ProviderRegistry.solar"
+                action_href = f"#system-provider-registry-{solar_provider.provider_id}"
             tasks.append(
                 task(
                     "connect_solar_provider",
@@ -253,8 +254,8 @@ class SetupEngine:
             ready,
             "high",
             "3 minutes",
-            "Review data connection",
-            "#system-collector",
+            "Review Live Data",
+            "#system-live-data",
             str(collector_health.get("collector_message") or collector_health.get("message") or status),
             "Data connection",
         )

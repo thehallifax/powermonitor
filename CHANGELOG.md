@@ -1,5 +1,17 @@
 # Changelog
 
+## UX-002 - Navigation and Action Links
+
+- Retargeted setup actions so tariff settings, live data review, goals review,
+  import history, billing cycle, and data quality links open the specific
+  dashboard section needed to act.
+- Added deep hash routing support for nested Setup and System anchors so links
+  reveal the parent page, open containing disclosure panels, scroll to the
+  target, and highlight provider cards.
+- Expanded provider cards with configuration controls visible by default and
+  added a clear Glance return-to-dashboard action.
+- Added regression coverage for major action targets and presentation anchors.
+
 ## UX-001 - Human Language Pass
 
 - Reworded customer-facing Home, Daily Briefing, Glance, Recommendations,

@@ -2271,6 +2271,7 @@ def glance_page_html(glance: GlanceState) -> str:
     score = str(glance.energy_score) if glance.energy_score is not None else "N/A"
     return f"""
     <section class="glance-display glance-{html.escape(glance.tone)}" aria-label="Glance Mode">
+      <a class="glance-return" href="#home">Return Home</a>
       <div class="glance-topline">
         <div>
           <span>Glance Mode</span>
@@ -2799,7 +2800,7 @@ def top_actions_html(recommendations: list) -> str:
             """
         )
     return f"""
-    <section id="system-collector" class="report-section compact-section">
+    <section id="top-actions" class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Top actions</span><h2>Next best moves</h2></div><p>Top {len(items)}</p></div>
       <div class="action-grid">{''.join(cards)}</div>
     </section>
@@ -3045,7 +3046,7 @@ def goals_progress_html(goals: list[GoalProgress]) -> str:
             """
         )
     return f"""
-    <section class="briefing-block">
+    <section id="home-goals" class="briefing-block">
       <div class="section-title"><div><span class="eyebrow">Today's Progress</span><h2>{len(goals)} active goal{'s' if len(goals) != 1 else ''}</h2></div></div>
       <div class="briefing-grid">{''.join(cards)}</div>
     </section>
@@ -3281,9 +3282,9 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
         <p>Used by bills, projections, comparisons, and setup readiness</p>
       </div>
       <form class="setup-config-form" method="post" action="/setup/billing-cycle">
-        <label><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
+        <label id="setup-billing-cycle"><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
         <label><span>Retailer</span><input type="text" name="retailer" value="{retailer}" placeholder="Optional"></label>
-        <label><span>Tariff plan</span><select name="current_plan">{options}</select></label>
+        <label id="setup-tariff"><span>Tariff plan</span><select name="current_plan">{options}</select></label>
         <button type="submit">Save Billing Cycle</button>
       </form>
       <p class="notice">Saving this completes the Billing Cycle setup task immediately. Current billing-period date overrides can still be kept in <code>config/settings.json</code> for exact bill matching.</p>
@@ -3603,7 +3604,7 @@ def data_completeness_html(summary: Summary, settings: Settings) -> str:
             """
         )
     return f"""
-    <div id="system-data-quality" class="system-card">
+    <div class="system-card">
       <div class="chart-heading"><h3>Data completeness</h3><span>{html.escape(completeness["confidence"])} confidence</span></div>
       <p class="scenario-note">{html.escape(completeness["confidence_note"])}</p>
       <div class="completeness-grid">{''.join(rows)}</div>
@@ -3647,7 +3648,7 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
         capabilities = ", ".join(capability.value.replace("_", " ") for capability in provider.capabilities)
         rows.append(
             f"""
-            <div class="completeness-row {'good' if provider.available else 'bad'}">
+            <div id="system-provider-registry-{html.escape(provider.provider_id)}" class="completeness-row {'good' if provider.available else 'bad'}">
               <span>{html.escape(provider.name)}</span>
               <strong>{html.escape(provider.status.value.title())}</strong>
               <small>{html.escape(provider.provider_type.value.replace("_", " ").title())}: {html.escape(capabilities or "No capabilities")}</small>
@@ -3895,7 +3896,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
               </div>
               <p>Provides: {html.escape(capabilities)}.</p>
               <small>{actions}</small>
-              {disclosure_html("Configure provider", "Save settings, test, reconnect, reset, enable, disable, or remove", configuration_body, css_class="provider-details")}
+              {disclosure_html("Configure provider", "Save settings, test, reconnect, reset, enable, disable, or remove", configuration_body, open_by_default=True, css_class="provider-details provider-config-details")}
               {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
               {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body else ""}
               {disclosure_html("Technical diagnostics", "Connection lifecycle, sync, source readings, and local data details", technical_body, css_class="provider-details")}
@@ -3942,7 +3943,7 @@ def provider_runtime_html(provider_runtime: Optional[ProviderRuntime]) -> str:
 def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
         return """
-    <div id="system-data-quality" class="system-card">
+    <div class="system-card">
       <div class="chart-heading"><h3>Source readings</h3><span>Not available yet</span></div>
       <p class="notice">Older readings may exist before source reading history was introduced. New imports and live data refreshes will fill this in as they run.</p>
     </div>
@@ -3959,7 +3960,7 @@ def provider_observations_html(summary: Optional[dict]) -> str:
             """
         )
     return f"""
-    <div id="system-data-quality" class="system-card">
+    <div class="system-card">
       <div class="chart-heading"><h3>Source readings</h3><span>{int(summary.get("count") or 0)} recent</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before source reading history. New imports and live data refreshes will populate readings as they run.</p>'}</div>
     </div>
@@ -4403,13 +4404,15 @@ def system_page_html(
         {provider_management_html(provider_management)}
         {provider_registry_html(provider_registry)}
       ''', open_by_default=True, css_class="system-group")}
-      {disclosure_html("Live Data", "Data recency, failures, and report freshness", collector_body, open_by_default=True, css_class="system-group")}
+      {disclosure_html("Live Data", "Data recency, failures, and report freshness", f'<div id="system-live-data">{collector_body}</div>', open_by_default=True, css_class="system-group")}
       {disclosure_html("Recommendations", "Active household recommendations and confidence", f'''
         {household_decisions_html(household_decisions, decision_summary)}
       ''', css_class="system-group")}
       {disclosure_html("Confidence", "Source readings and data confidence", f'''
-        {provider_observations_html(provider_observations)}
-        {data_completeness_html(summary, settings)}
+        <div id="system-data-quality">
+          {provider_observations_html(provider_observations)}
+          {data_completeness_html(summary, settings)}
+        </div>
       ''', css_class="system-group")}
       {disclosure_html("Advanced Diagnostics", "Data connections, behaviour, recommendation trail, notifications, and local configuration", advanced_body, css_class="system-group advanced-diagnostics")}
     </section>
@@ -5068,7 +5071,23 @@ def write_html(
     .top-nav a:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
     .mobile-shortcuts {{ display:none; }}
     .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
-    body:has(.page:target) #home {{ display:none; }} body:has(#home:target) #home {{ display:block; }}
+    body:has(.page:target) #home,
+    body:has(#setup-billing:target) #home,
+    body:has(#setup-billing-cycle:target) #home,
+    body:has(#setup-tariff:target) #home,
+    body:has(#system-collector:target) #home,
+    body:has(#system-live-data:target) #home,
+    body:has(#system-data-quality:target) #home,
+    body:has([id^="system-provider-"]:target) #home {{ display:none; }}
+    body:has(#home:target) #home,
+    body:has(#home-goals:target) #home,
+    body:has(#setup-billing:target) #setup,
+    body:has(#setup-billing-cycle:target) #setup,
+    body:has(#setup-tariff:target) #setup,
+    body:has(#system-collector:target) #system,
+    body:has(#system-live-data:target) #system,
+    body:has(#system-data-quality:target) #system,
+    body:has([id^="system-provider-"]:target) #system {{ display:block; }}
     .page-heading {{ margin-top:18px; padding:18px 22px; background:#fff; border:1px solid var(--line); border-radius:20px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ margin:0; }} .page-heading p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }}
     .page-breadcrumb {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; color:var(--muted); font-size:11px; font-weight:800; }}
@@ -5306,6 +5325,7 @@ def write_html(
     .system-group .disclosure-body {{ padding-top:1px; }}
     .provider-status-card {{ margin-top:10px; padding:14px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
     .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }} .provider-status-card.neutral {{ background:#fffaf0; border-color:#eeddb0; }}
+    .provider-status-card:target,.deep-link-target {{ outline:3px solid rgba(31,107,80,.32); scroll-margin-top:24px; }}
     .provider-status-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
     .provider-status-head span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-status-head strong {{ font-size:15px; }}
@@ -5363,6 +5383,7 @@ def write_html(
     .decision-lines .primary-action {{ padding:11px 12px; color:var(--ink); background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.06); border-radius:12px; font-size:13px; }}
     .glance-page {{ min-height:calc(100vh - 180px); }}
     .glance-display {{ min-height:calc(100vh - 220px); display:grid; align-content:space-between; gap:clamp(18px,3vh,34px); padding:clamp(26px,5vw,62px); color:#f8fffc; background:#101418; border-radius:32px; box-shadow:0 28px 80px rgba(16,20,24,.22); }}
+    .glance-return {{ justify-self:start; align-self:start; padding:10px 13px; color:#101418; background:#fff; border-radius:10px; text-decoration:none; font-size:12px; font-weight:850; }}
     .glance-only {{ min-height:100vh; overflow:hidden; background:#101418; }}
     .glance-only main {{ width:100vw; min-height:100vh; margin:0; }}
     .glance-only .page {{ display:block; }}
@@ -5410,7 +5431,15 @@ def write_html(
     body:has(#timeline:target) .top-nav a[href="#timeline"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
     body:has(#imports:target) .top-nav a[href="#imports"],
-    body:has(#system:target) .top-nav a[href="#system"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
+    body:has(#system:target) .top-nav a[href="#system"],
+    body:has(#system-collector:target) .top-nav a[href="#system"],
+    body:has(#system-live-data:target) .top-nav a[href="#system"],
+    body:has(#system-data-quality:target) .top-nav a[href="#system"],
+    body:has([id^="system-provider-"]:target) .top-nav a[href="#system"],
+    body:has(#setup-billing:target) .top-nav a[href="#setup"],
+    body:has(#setup-billing-cycle:target) .top-nav a[href="#setup"],
+    body:has(#setup-tariff:target) .top-nav a[href="#setup"],
+    body:has(#home-goals:target) .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ font-size:34px; letter-spacing:-.055em; }} .page-heading p {{ max-width:620px; font-size:14px; }}
     .report-section {{ margin-top:18px; padding:30px; border:0; border-radius:28px; background:rgba(255,255,255,.88); box-shadow:var(--shadow); }}
@@ -5517,6 +5546,27 @@ def write_html(
 </main>
 <script>
 (() => {{
+  function revealHashTarget() {{
+    document.querySelectorAll(".deep-link-target").forEach((item) => item.classList.remove("deep-link-target"));
+    const id = decodeURIComponent((window.location.hash || "").slice(1));
+    if (!id) return;
+    const target = document.getElementById(id);
+    if (!target) return;
+    target.closest(".page")?.style.removeProperty("display");
+    target.querySelectorAll("details.provider-config-details").forEach((details) => details.open = true);
+    let current = target.parentElement;
+    while (current) {{
+      if (current.tagName === "DETAILS") current.open = true;
+      current = current.parentElement;
+    }}
+    target.classList.add("deep-link-target");
+    window.requestAnimationFrame(() => target.scrollIntoView({{block: "start", inline: "nearest"}}));
+  }}
+
+  window.addEventListener("hashchange", revealHashTarget);
+  window.addEventListener("load", revealHashTarget);
+  revealHashTarget();
+
   function payloadFromForm(form) {{
     const payload = {{}};
     const mappings = {{}};

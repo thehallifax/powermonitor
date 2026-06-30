@@ -1,3 +1,4 @@
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -11,8 +12,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
-from engine.models import DecisionTimeline, TimelineEntry
+from engine.models import DecisionTimeline, Goal, GoalProgress, GoalStatus, TimelineEntry
 from engine.provider_framework import ProviderCapability
+from presentation.glance import GlanceState
 
 
 class MobilePresentationTests(unittest.TestCase):
@@ -89,6 +91,8 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Setup and recovery", html)
         self.assertIn("Technical diagnostics", html)
         self.assertIn("Not yet", html)
+        self.assertIn("provider-config-details", html)
+        self.assertIn("<details class=\"disclosure-panel provider-details provider-config-details\" open>", html)
 
     def test_import_provider_cards_deep_link_to_provider_setup(self):
         provider = SimpleNamespace(
@@ -103,6 +107,75 @@ class MobilePresentationTests(unittest.TestCase):
         html = report.imports_page_html(provider_management=manager)
 
         self.assertIn('href="#system-provider-ocular_export"', html)
+
+    def test_setup_configuration_sections_have_deep_link_targets(self):
+        html = report.billing_cycle_setup_html(
+            SimpleNamespace(
+                billing_period_start_day=6,
+                retailer="Synergy",
+                current_plan="synergy_ev_add_on",
+            )
+        )
+
+        self.assertIn('id="setup-billing"', html)
+        self.assertIn('id="setup-billing-cycle"', html)
+        self.assertIn('id="setup-tariff"', html)
+
+    def test_goals_and_glance_have_direct_action_targets(self):
+        goal = GoalProgress(
+            goal=Goal(
+                goal_id="bill_target",
+                title="Keep the bill predictable",
+                outcome="Bill control",
+                advisor_types=["COST"],
+                recommendation_categories=["Bills"],
+            ),
+            progress_pct=50,
+            status=GoalStatus("ON_TRACK", "On track", "Progress is on track."),
+            confidence="High",
+            summary="You are tracking close to the target.",
+            supporting_advisors=["cost_advisor"],
+            supporting_evidence=["Bill estimate"],
+            recommended_action="Keep monitoring.",
+        )
+        goals_html = report.goals_progress_html([goal])
+        glance_html = report.glance_page_html(
+            GlanceState(
+                status="WAIT",
+                tone="wait",
+                current_recommendation="Wait for the next lower-cost tariff window.",
+                reason="A cheaper window is coming soon.",
+                current_tariff="Peak",
+                current_tariff_bucket="peak",
+                next_window="9pm",
+                lowest_cost_window="11pm",
+                energy_score=82,
+                energy_score_label="Good",
+                bill_current=120.0,
+                bill_projected=180.0,
+                bill_projection_basis="Current run-rate",
+                solar_status="Solar unavailable",
+                freshness="Fresh",
+                last_updated="2026-06-30T09:15:00+08:00",
+                confidence="High",
+                evidence_quality="HIGH",
+                evidence_reason="Recent readings available.",
+            )
+        )
+
+        self.assertIn('id="home-goals"', goals_html)
+        self.assertIn('class="glance-return"', glance_html)
+        self.assertIn("Return Home", glance_html)
+        self.assertIn('href="#home"', glance_html)
+
+    def test_report_shell_reveals_deep_hash_routes(self):
+        html = inspect.getsource(report.write_html) + inspect.getsource(report.system_page_html)
+
+        self.assertIn("body:has(#setup-tariff:target) #setup", html)
+        self.assertIn("body:has(#system-live-data:target) #system", html)
+        self.assertIn('id="system-live-data"', html)
+        self.assertIn('id="system-data-quality"', html)
+        self.assertIn("revealHashTarget", html)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust the data?", "Connected sources and confidence.")

@@ -83,6 +83,7 @@ class SetupEngineTests(unittest.TestCase):
         tasks = {task.task_id: task for task in checklist.tasks}
 
         self.assertIn("Provider:", tasks["connect_solar_provider"].rationale)
+        self.assertEqual(tasks["connect_solar_provider"].action_href, "#system-provider-registry-solaredge")
         self.assertIn("Ocular export", tasks["upload_ev_charging_history"].rationale)
 
     def test_completed_setup_reaches_full_progress(self):
@@ -138,12 +139,14 @@ class SetupEngineTests(unittest.TestCase):
 
         tasks = {task.task_id: task for task in checklist.tasks}
 
-        self.assertEqual(tasks["configure_tariff"].action_href, "#setup-billing")
-        self.assertEqual(tasks["configure_tariff"].action_label, "Edit Tariff Plan")
+        self.assertEqual(tasks["configure_tariff"].action_href, "#setup-tariff")
+        self.assertEqual(tasks["configure_tariff"].action_label, "Go to Tariff Settings")
         self.assertEqual(tasks["upload_ev_charging_history"].action_href, "#imports")
         self.assertEqual(tasks["upload_ev_charging_history"].action_label, "Upload History")
-        self.assertEqual(tasks["collector_offline"].action_href, "#system-collector")
+        self.assertEqual(tasks["collector_offline"].action_href, "#system-live-data")
+        self.assertEqual(tasks["collector_offline"].action_label, "Review Live Data")
         self.assertEqual(tasks["data_older_than_24_hours"].action_href, "#system-data-quality")
+        self.assertEqual(tasks["configure_household_goals"].action_href, "#home-goals")
         self.assertNotIn("enable_notifications", tasks)
 
 
@@ -190,6 +193,9 @@ class settings:
     def __init__(self, billing_configured: bool) -> None:
         self.current_billing_period_start = date(2026, 6, 1) if billing_configured else None
         self.current_billing_period_end = date(2026, 6, 30) if billing_configured else None
+        self.billing_period_start_day = 1
+        self.retailer = "Synergy"
+        self.current_plan = "synergy_ev_add_on"
 
 
 if __name__ == "__main__":
