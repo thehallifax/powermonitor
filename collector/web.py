@@ -89,9 +89,9 @@ def update_billing_cycle_settings(
     try:
         start_day = int(billing_period_start_day)
     except (TypeError, ValueError) as exc:
-        raise ValueError("Billing cycle start day must be a number from 1 to 28") from exc
+        raise ValueError("Enter a billing cycle start day from 1 to 28.") from exc
     if not 1 <= start_day <= 28:
-        raise ValueError("Billing cycle start day must be from 1 to 28")
+        raise ValueError("Choose a billing cycle start day from 1 to 28.")
     allowed_plans = {
         "synergy_ev_add_on",
         "synergy_home_plan",
@@ -99,7 +99,7 @@ def update_billing_cycle_settings(
     }
     plan = str(current_plan or "synergy_ev_add_on")
     if plan not in allowed_plans:
-        raise ValueError("Unsupported tariff plan")
+        raise ValueError("Choose one of the listed tariff plans.")
 
     if settings_path.exists():
         try:
@@ -184,7 +184,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
             logging.error("POST failed for %s: %s", request.path, exc)
             if request.path.startswith("/imports/"):
-                self.send_import_error("Import could not be completed.", status=400)
+                self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export and try again.", status=400)
+            elif request.path == "/setup/billing-cycle":
+                result_html = self.import_result_html(
+                    "Billing cycle not saved",
+                    str(exc),
+                    success=False,
+                )
+                self.send_html(result_html.encode("utf-8"))
             else:
                 self.send_json({"error": "request update failed"}, status=500)
 
@@ -336,7 +343,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         importer = detect_importer(upload_path, self.importers())
         if importer is None:
             upload_path.unlink(missing_ok=True)
-            self.send_import_error("Unsupported import format.", status=400)
+            self.send_import_error("That file type is not supported yet. Please choose an Ocular Excel export (.xlsx or .xlsm).", status=400)
             return
 
         parsed = importer.parse(upload_path)
@@ -382,7 +389,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         importer = detect_importer(upload_path, self.importers())
         if importer is None:
             engine.update_import_job(job_id, "failed", message="Unsupported import format")
-            self.send_import_error("Unsupported import format.", status=400)
+            self.send_import_error("That uploaded file is not a supported Ocular Excel export. Please upload it again.", status=400)
             return
 
         parsed = importer.parse(upload_path)
@@ -434,10 +441,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         field = form["import_file"] if "import_file" in form else None
         if field is None or not getattr(field, "filename", None):
-            raise ValueError("No import file supplied")
+            raise ValueError("Choose an Ocular Excel file before previewing the import.")
         content = field.file.read()
         if not content:
-            raise ValueError("Import file is empty")
+            raise ValueError("That file is empty. Please choose the exported spreadsheet again.")
         return safe_filename(field.filename), content
 
     def write_upload(self, filename: str, content: bytes) -> Path:

@@ -1894,6 +1894,36 @@ def display_timestamp(value: Optional[str]) -> str:
         return value
 
 
+def friendly_label(value: object) -> str:
+    return str(value or "Unknown").replace("_", " ").replace("-", " ").title()
+
+
+def page_heading_html(title: str, description: str, parent: str = "Home") -> str:
+    return f"""
+    <div class="page-heading">
+      <div class="page-breadcrumb"><a href="#home">{html.escape(parent)}</a><span>/</span><strong>{html.escape(title)}</strong></div>
+      <h2>{html.escape(title)}</h2>
+      <p>{html.escape(description)}</p>
+    </div>
+    """
+
+
+def recommendation_confidence_note(decision) -> str:
+    confidence = recommendation_confidence(decision)
+    if is_recommendation_presentation(decision):
+        rationale = getattr(decision, "rationale", None)
+        if rationale:
+            return rationale
+    explanation = getattr(decision, "explanation", None)
+    if explanation and getattr(explanation, "confidence_reason", None):
+        return explanation.confidence_reason
+    if str(confidence).lower() == "high":
+        return "The available data is strong enough to act on this now."
+    if str(confidence).lower() == "medium":
+        return "Useful signal, with some uncertainty in the supporting data."
+    return "PowerMonitor has limited evidence, so treat this as a prompt to review."
+
+
 def recommendations_html(recommendations: list) -> str:
     if not recommendations:
         return ""
@@ -2515,6 +2545,7 @@ def recommendation_centre_html(
     cards = []
     for decision in ranked:
         why = recommendation_why(decision)
+        confidence_note = recommendation_confidence_note(decision)
         goal_links = recommendation_goal_links_html(decision, goals)
         cards.append(
             f"""
@@ -2533,8 +2564,9 @@ def recommendation_centre_html(
                 <span><small>Monthly impact</small><strong>{html.escape(recommendation_monthly_impact(decision))}</strong></span>
               </div>
               <div class="decision-lines">
-                <p><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
+                <p class="primary-action"><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
                 <p><strong>Why?</strong>{html.escape(why)}</p>
+                <p><strong>Confidence</strong>{html.escape(confidence_note)}</p>
                 {recommendation_decision_provenance_html(decision, household_decisions)}
                 {goal_links}
               </div>
@@ -2564,7 +2596,7 @@ def recommendation_centre_html(
                 <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
               </div>
               <div class="decision-lines">
-                <p><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
+                <p class="primary-action"><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
               </div>
               {recommendation_controls_html(decision, hidden=True)}
             </article>
@@ -2584,7 +2616,7 @@ def recommendation_centre_html(
         else ""
     )
     active_notice = (
-        '<p class="notice">No recommendations are active for this period.</p>'
+        '<p class="notice">Nothing needs a decision right now. PowerMonitor will surface a recommendation here when the data points to a useful action.</p>'
         if not cards
         else ""
     )
@@ -2592,7 +2624,7 @@ def recommendation_centre_html(
     {advisor_centre_html(advisors)}
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
-        <div><span class="eyebrow">Recommendation centre</span><h2>Ranked household opportunities</h2></div>
+        <div><span class="eyebrow">Recommendation centre</span><h2>What should I do next?</h2></div>
         <p>{len(ranked)} active</p>
       </div>
       {lifecycle_note}
@@ -2640,11 +2672,11 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
                 <span>{html.escape(advisor.freshness)}</span>
               </div>
               <div class="decision-lines">
-                <p><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
+                <p class="primary-action"><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
                 <p><strong>Why?</strong>{html.escape(advisor.confidence_reason)}</p>
-                <p><strong>Evidence Quality</strong>{html.escape(evidence_quality)}</p>
-                <p><strong>Missing evidence</strong>{html.escape(missing_text)}</p>
-                <p><strong>Why confidence is reduced</strong>{html.escape(confidence_reduced)}</p>
+                <p><strong>Evidence quality</strong>{html.escape(evidence_quality)}</p>
+                <p><strong>Still missing</strong>{html.escape(missing_text)}</p>
+                <p><strong>Confidence note</strong>{html.escape(confidence_reduced)}</p>
               </div>
             </article>
             """
@@ -2652,7 +2684,7 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
     return f"""
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
-        <div><span class="eyebrow">Advisors</span><h2>Active advisor calls</h2></div>
+        <div><span class="eyebrow">Advisors</span><h2>Background checks</h2></div>
         <p>{len(advisors)} active</p>
       </div>
       <div class="recommendation-grid">{''.join(cards)}</div>
@@ -2684,11 +2716,42 @@ def top_actions_html(recommendations: list) -> str:
             """
         )
     return f"""
-    <section class="report-section compact-section">
+    <section id="system-collector" class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Top actions</span><h2>Next best moves</h2></div><p>Top {len(items)}</p></div>
       <div class="action-grid">{''.join(cards)}</div>
     </section>
     """
+
+
+def timeline_event_icon(event_type: str) -> str:
+    value = str(event_type or "").lower()
+    if "bill" in value or "cost" in value:
+        return "$"
+    if "solar" in value:
+        return "S"
+    if "charging" in value or "ev" in value:
+        return "EV"
+    if "provider" in value or "data" in value or "system" in value:
+        return "D"
+    if "recommend" in value or "decision" in value:
+        return "!"
+    return "*"
+
+
+def timeline_event_group(timestamp: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        return parsed.astimezone().strftime("%A, %d %b")
+    except ValueError:
+        return "Recent events"
+
+
+def timeline_time_label(timestamp: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        return parsed.astimezone().strftime("%H:%M")
+    except ValueError:
+        return str(timestamp or "Time unknown")
 
 
 def timeline_html(timeline: DecisionTimeline) -> str:
@@ -2700,24 +2763,30 @@ def timeline_html(timeline: DecisionTimeline) -> str:
         </section>
         """
     rows = []
+    current_group = None
     for entry in timeline.entries:
+        group = timeline_event_group(entry.timestamp)
+        if group != current_group:
+            current_group = group
+            rows.append(f'<div class="timeline-day">{html.escape(group)}</div>')
         impact = (
             f'<small>{html.escape(entry.financial_impact)}</small>'
             if entry.financial_impact
             else "<small>Financial impact not quantified</small>"
         )
         sources = ", ".join(entry.evidence_sources) if entry.evidence_sources else "No evidence sources"
+        kind = friendly_label(entry.event_type)
         rows.append(
             f"""
             <article class="timeline-entry">
-              <time>{html.escape(entry.timestamp)}</time>
+              <div class="timeline-stamp"><span aria-hidden="true">{html.escape(timeline_event_icon(entry.event_type))}</span><time>{html.escape(timeline_time_label(entry.timestamp))}</time></div>
               <div>
                 <span>{html.escape(entry.confidence)} confidence</span>
                 <h3>{html.escape(entry.title)}</h3>
                 <p>{html.escape(entry.summary)}</p>
                 <div class="timeline-meta">
                   {impact}
-                  <small>Type: {html.escape(entry.event_type)}</small>
+                  <small>{html.escape(kind)}</small>
                   <small>Sources: {html.escape(sources)}</small>
                 </div>
               </div>
@@ -2730,6 +2799,7 @@ def timeline_html(timeline: DecisionTimeline) -> str:
         <div><span class="eyebrow">Decision timeline</span><h2>Household memory</h2></div>
         <p>{len(timeline.entries)} events</p>
       </div>
+      <p class="scenario-note">Grouped by day so important household changes are easier to scan.</p>
       <div class="timeline-list">{''.join(rows)}</div>
     </section>
     """
@@ -3248,7 +3318,8 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
     current = plan["current_plan"]
     return f"""
     <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Bill attribution</span><h2>What is driving the bill?</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">Bill attribution</span><h2>What is driving the bill?</h2></div><p>Biggest bill components first</p></div>
+      <p class="scenario-note">This splits the estimated bill into the parts a household can usually act on: grid energy, fixed supply charge, solar export credit, EV charging, and peak usage.</p>
       <div class="metrics">
         {metric("Grid energy", money(summary.import_cost), kwh(summary.grid_import_kwh), "grid")}
         {metric("Supply charge", money(summary.supply_cost), f"{money(summary.supply_cost / summary.supply_days)}/day", "supply")}
@@ -3419,7 +3490,7 @@ def data_completeness_html(summary: Summary, settings: Settings) -> str:
             """
         )
     return f"""
-    <div class="system-card">
+    <div id="system-data-quality" class="system-card">
       <div class="chart-heading"><h3>Data completeness</h3><span>{html.escape(completeness["confidence"])} confidence</span></div>
       <p class="scenario-note">{html.escape(completeness["confidence_note"])}</p>
       <div class="completeness-grid">{''.join(rows)}</div>
@@ -3452,7 +3523,12 @@ def capability_summary_html(capability_summary) -> str:
 
 def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str:
     if not provider_registry:
-        return ""
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Available providers</h3><span>Not loaded</span></div>
+      <p class="notice">Provider guidance is not available in this report. Check System again after the dashboard refreshes.</p>
+    </div>
+    """
     rows = []
     for provider in provider_registry.providers:
         capabilities = ", ".join(capability.value.replace("_", " ") for capability in provider.capabilities)
@@ -3475,7 +3551,12 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
 
 def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
     if not provider_management:
-        return ""
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Provider connections</h3><span>No connection manager</span></div>
+      <p class="notice">Connection status is unavailable. Existing readings can still be shown, but provider setup guidance may be incomplete.</p>
+    </div>
+    """
     rows = []
     for provider in provider_management.providers():
         data = provider.as_dict()
@@ -3486,23 +3567,25 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
         diagnostics = data.get("diagnostics", {})
         last_sync = diagnostics.get("last_successful_sync") or "Never synced"
         tone = "good" if data["lifecycle_state"] in {"CONNECTED", "SYNCING", "CONFIGURED"} else "bad"
+        connection_label = friendly_label(data["lifecycle_state"])
+        health_label = friendly_label(data["health"].get("collector_status") or "unknown")
         actions = " ".join(
-            f'<span class="chip">{html.escape(action)}</span>'
+            f'<span class="chip">{html.escape(friendly_label(action))}</span>'
             for action in data.get("actions", [])[:4]
         )
         rows.append(
             f"""
             <div id="system-provider-{html.escape(provider.provider_id)}" class="completeness-row {tone}">
               <span>{html.escape(provider.name)}</span>
-              <strong>{html.escape(data["lifecycle_state"].replace("_", " ").title())}</strong>
-              <small>Last sync: {html.escape(str(last_sync))}. Collector: {html.escape(str(data["health"].get("collector_status") or "unknown").title())}. Capabilities: {html.escape(capabilities)}.</small>
+              <strong>{html.escape(connection_label)}</strong>
+              <small>Last successful sync: {html.escape(str(last_sync))}. Current health: {html.escape(health_label)}. Provides: {html.escape(capabilities)}.</small>
               <small>{actions}</small>
             </div>
             """
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider Management</h3><span>{len(rows)} providers</span></div>
+      <div class="chart-heading"><h3>Provider connections</h3><span>{len(rows)} providers</span></div>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
@@ -3538,7 +3621,12 @@ def provider_runtime_html(provider_runtime: Optional[ProviderRuntime]) -> str:
 
 def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
-        return ""
+        return """
+    <div id="system-data-quality" class="system-card">
+      <div class="chart-heading"><h3>Provider observations</h3><span>Not available yet</span></div>
+      <p class="notice">Older readings may exist before provider observations were introduced. New imports and collectors will fill this in as they run.</p>
+    </div>
+    """
     rows = []
     for observation in summary.get("latest", [])[:8]:
         rows.append(
@@ -3551,8 +3639,8 @@ def provider_observations_html(summary: Optional[dict]) -> str:
             """
         )
     return f"""
-    <div class="system-card">
-      <div class="chart-heading"><h3>Latest provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+    <div id="system-data-quality" class="system-card">
+      <div class="chart-heading"><h3>Provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before the Provider Observation pipeline. New imports and collectors will populate observations as they run.</p>'}</div>
     </div>
     """
@@ -4109,12 +4197,12 @@ def comparison_html(comparison: dict) -> str:
 
     cards = "".join(
         [
-            delta_card("Net cost delta", deltas["net_cost"], signed_money, True),
-            delta_card("Grid import delta", deltas["grid_import_kwh"], signed_kwh, True),
-            delta_card("Solar generation delta", deltas["solar_generated_kwh"], signed_kwh),
-            delta_card("Peak cost delta", deltas["peak_cost"], signed_money, True),
-            delta_card("Solar self-consumption delta", deltas["self_consumption_pct"], lambda v: f"{v:+.1f} pp" if v else "0.0 pp"),
-            delta_card("EV charging delta", deltas["ev_charging_kwh"], signed_kwh, True),
+            delta_card("Net cost change", deltas["net_cost"], signed_money, True),
+            delta_card("Grid import change", deltas["grid_import_kwh"], signed_kwh, True),
+            delta_card("Solar generation change", deltas["solar_generated_kwh"], signed_kwh),
+            delta_card("Peak cost change", deltas["peak_cost"], signed_money, True),
+            delta_card("Solar self-consumption change", deltas["self_consumption_pct"], lambda v: f"{v:+.1f} pp" if v else "0.0 pp"),
+            delta_card("EV charging change", deltas["ev_charging_kwh"], signed_kwh, True),
         ]
     )
     return f"""
@@ -4508,47 +4596,47 @@ def write_html(
     {home_page_html(briefing, goals, setup_checklist)}
   </section>
   <section id="setup" class="page">
-    <div class="page-heading"><h2>Finish household setup</h2><p>Continuous readiness guidance generated from household capability, import, collector, and recommendation state.</p></div>
+    {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
     {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict())}
   </section>
   <section id="recommendations" class="page">
-    <div class="page-heading"><h2>Recommendation Centre</h2><p>All active household opportunities ranked by Recommendation Engine priority.</p></div>
+    {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.")}
     {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
   </section>
   <section id="bills" class="page">
-    <div class="page-heading"><h2>Where did my money go?</h2><p>Bill attribution, tariff exposure, export credits, and plan comparison.</p></div>
+    {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
     {summary_html(selected_period.label, period_summary, settings)}
     {bill_attribution_html(period_summary, plan, settings)}
     {comparison_html(comparison) if comparison else ""}
     {plan_comparison_html(plan, car_comparison(settings))}
   </section>
   <section id="solar" class="page">
-    <div class="page-heading"><h2>How well is my solar performing?</h2><p>Generation, self-consumption, exports, and lost opportunity.</p></div>
+    {page_heading_html("How well is my solar performing?", "Generation, self-consumption, exports, and lost opportunity.")}
     {solar_page_html(period_summary, recommendation_presentations)}
   </section>
   <section id="ev" class="page">
-    <div class="page-heading"><h2>What did my vehicle cost to charge?</h2><p>Actual session source, charging cost, tariff split, and session history.</p></div>
+    {page_heading_html("What did my vehicle cost to charge?", "Actual charging cost, tariff split, and session history.")}
     {ev_page_html(period_summary, settings)}
   </section>
   <section id="whatif" class="page">
-    <div class="page-heading"><h2>What should I change?</h2><p>Decision cards for tariff, charging, solar, and battery scenarios.</p></div>
+    {page_heading_html("What should I change?", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
     {whatif_page_html(scenarios, plan, recommendation_presentations)}
   </section>
   <section id="timeline" class="page">
-    <div class="page-heading"><h2>What has happened over time?</h2><p>A chronological memory of decisions, outcomes, confidence, and evidence sources.</p></div>
+    {page_heading_html("What has happened over time?", "A household history of decisions, outcomes, confidence, and evidence.")}
     {timeline_html(display_timeline)}
   </section>
   <section id="analytics" class="page">
-    <div class="page-heading"><h2>What patterns exist?</h2><p>Daily trends, historical comparison, and larger analytical detail.</p></div>
+    {page_heading_html("What patterns exist?", "Daily trends, historical comparison, and larger analytical detail.")}
     {trends_html(trends, settings)}
     {comparison_html(comparison) if comparison else ""}
   </section>
   <section id="imports" class="page">
-    <div class="page-heading"><h2>Upload household data</h2><p>Preview and import supported local household exports.</p></div>
+    {page_heading_html("Upload household data", "Preview and import supported local household exports.")}
     {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
   </section>
   <section id="system" class="page">
-    <div class="page-heading"><h2>Can I trust the data?</h2><p>Connected sources, completeness, confidence, collection health, and privacy-safe status.</p></div>
+    {page_heading_html("Can I trust the data?", "Connected sources, completeness, confidence, collection health, and privacy-safe status.")}
     {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
@@ -4607,6 +4695,8 @@ def write_html(
     body:has(.page:target) #home {{ display:none; }} body:has(#home:target) #home {{ display:block; }}
     .page-heading {{ margin-top:18px; padding:18px 22px; background:#fff; border:1px solid var(--line); border-radius:20px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ margin:0; }} .page-heading p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }}
+    .page-breadcrumb {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; color:var(--muted); font-size:11px; font-weight:800; }}
+    .page-breadcrumb a {{ color:var(--deep-2); text-decoration:none; }} .page-breadcrumb strong {{ color:var(--ink); }}
     .report-section {{ margin-top:24px; padding:28px; background:rgba(255,255,255,.82); border:1px solid rgba(215,228,222,.9); border-radius:24px; box-shadow:var(--shadow); }}
     .compact-section {{ margin-top:16px; }}
     .auth-alert {{ margin-top:18px; padding:20px 22px; color:#812f25; background:linear-gradient(135deg,#fff3ef,#ffe6df); border:1px solid #efbcb2; border-left:6px solid var(--red); border-radius:18px; box-shadow:var(--shadow); }}
@@ -4799,9 +4889,12 @@ def write_html(
     .scenario-insights {{ margin-top:14px; padding:18px; background:#fffaf0; border:1px solid #eeddb0; border-radius:17px; }}
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
     .timeline-list {{ display:grid; gap:12px; }}
+    .timeline-day {{ margin:8px 0 0; color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .timeline-entry {{ display:grid; grid-template-columns:120px 1fr; gap:16px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .timeline-stamp {{ display:flex; align-items:center; gap:8px; }}
+    .timeline-stamp span {{ display:inline-grid; place-items:center; min-width:28px; height:28px; padding:0; color:#fff; background:var(--deep-2); border-radius:50%; font-size:10px; font-weight:900; letter-spacing:0; }}
     .timeline-entry time {{ color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.06em; text-transform:uppercase; }}
-    .timeline-entry span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
+    .timeline-entry > div:last-child > span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
     .timeline-entry h3 {{ margin:9px 0 4px; font-size:18px; letter-spacing:-.025em; }}
     .timeline-entry p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .timeline-meta {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
@@ -4839,6 +4932,7 @@ def write_html(
     .decision-lines {{ display:grid; gap:12px; margin-top:14px; }}
     .decision-lines p,.action-card p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .decision-lines strong,.action-card p strong {{ display:block; margin-bottom:2px; color:var(--ink); font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
+    .decision-lines .primary-action {{ padding:11px 12px; color:var(--ink); background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.06); border-radius:12px; font-size:13px; }}
     .glance-page {{ min-height:calc(100vh - 180px); }}
     .glance-display {{ min-height:calc(100vh - 220px); display:grid; align-content:space-between; gap:clamp(18px,3vh,34px); padding:clamp(26px,5vw,62px); color:#f8fffc; background:#101418; border-radius:32px; box-shadow:0 28px 80px rgba(16,20,24,.22); }}
     .glance-only {{ min-height:100vh; overflow:hidden; background:#101418; }}
@@ -4944,7 +5038,7 @@ def write_html(
       .period-controls {{ padding:14px; }} .period-controls form {{ grid-template-columns:1fr; }} .period-controls button,.setup-config-form button,.import-form button {{ min-height:46px; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
-      .timeline-entry {{ grid-template-columns:1fr; gap:8px; padding:15px; }} .timeline-meta small {{ width:100%; }}
+      .timeline-entry {{ grid-template-columns:1fr; gap:8px; padding:15px; }} .timeline-stamp {{ justify-content:flex-start; }} .timeline-meta small {{ width:100%; }}
       .hero-alert {{ align-items:flex-start; flex-direction:column; }}
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
       .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}

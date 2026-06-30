@@ -122,6 +122,30 @@ class SetupEngineTests(unittest.TestCase):
         self.assertEqual(tasks["configure_billing_cycle"].action_href, "#setup-billing")
         self.assertEqual(tasks["configure_billing_cycle"].action_label, "Edit Billing Cycle")
 
+    def test_setup_tasks_point_to_real_configuration_locations(self):
+        checklist = SetupEngine(context_with("ev")).build_checklist(
+            capability_summary(
+                solar=False,
+                ev=False,
+                tariff=False,
+                latest=datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "stale", "message": "Collection has not completed today."},
+            import_sources=[ImportSource("ocular", "Ocular", (".xlsx", ".xlsm"))],
+            settings=settings(billing_configured=False),
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        tasks = {task.task_id: task for task in checklist.tasks}
+
+        self.assertEqual(tasks["configure_tariff"].action_href, "#setup-billing")
+        self.assertEqual(tasks["configure_tariff"].action_label, "Edit Tariff Plan")
+        self.assertEqual(tasks["upload_ev_charging_history"].action_href, "#imports")
+        self.assertEqual(tasks["upload_ev_charging_history"].action_label, "Upload History")
+        self.assertEqual(tasks["collector_offline"].action_href, "#system-collector")
+        self.assertEqual(tasks["data_older_than_24_hours"].action_href, "#system-data-quality")
+        self.assertNotIn("enable_notifications", tasks)
+
 
 def context_with(*capabilities: str) -> HouseholdContext:
     return HouseholdContext(

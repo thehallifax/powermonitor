@@ -78,7 +78,8 @@ class WebImportUploadTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as raised:
                 multipart_post(base_url, "/imports/preview", "notes.txt", b"hello")
             body = raised.exception.read().decode("utf-8")
-            self.assertIn("Unsupported import format", body)
+            self.assertIn("That file type is not supported yet", body)
+            self.assertIn("Ocular Excel export", body)
             self.assertNotIn(str(self.temp_dir.name), body)
         finally:
             stop_server(server, thread)

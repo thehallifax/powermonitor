@@ -55,7 +55,6 @@ class SetupEngine:
                     self._tariff_task(capability_summary),
                     self._billing_cycle_task(settings),
                     self._goals_task(goals),
-                    self._notifications_task(),
                 ],
             ),
             SetupSection(
@@ -121,8 +120,8 @@ class SetupEngine:
             ready,
             "high",
             "2 minutes",
-            "Go to Tariff Settings",
-            "#system",
+            "Edit Tariff Plan",
+            "#setup-billing",
             tariff.reason if tariff else "Tariff capability is unavailable.",
             "HouseholdCapabilitySummary.tariff",
         )
@@ -158,19 +157,6 @@ class SetupEngine:
             "#home",
             "Goal Engine has active household goals." if ready else "Goal Engine has no active household goals to evaluate.",
             "GoalsEngine",
-        )
-
-    def _notifications_task(self) -> SetupTask:
-        return SetupTask(
-            task_id="enable_notifications",
-            title="Enable notifications",
-            status="future",
-            priority=SetupTaskPriority("medium"),
-            estimated_effort="2 minutes",
-            action_label="Coming later",
-            action_href="#setup",
-            rationale="Notification setup is reserved for a future local workflow.",
-            source="future_placeholder",
         )
 
     def _provider_tasks(
@@ -243,7 +229,6 @@ class SetupEngine:
                 import_provider_names = [provider.name for provider in managed_imports]
             if import_provider_names:
                 detail = f"{detail} Import providers: {', '.join(import_provider_names)}."
-            href = f"#system-provider-{managed_imports[0].provider_id}" if managed_imports else "#imports"
             tasks.append(
                 task(
                     "upload_ev_charging_history",
@@ -251,8 +236,8 @@ class SetupEngine:
                     bool(ev and ev.usable),
                     "high",
                     "4 minutes",
-                    "Manage Provider",
-                    href,
+                    "Upload History",
+                    "#imports",
                     detail,
                     "ProviderManagement.imports" if managed_imports else "Import Framework",
                 )
@@ -269,7 +254,7 @@ class SetupEngine:
             "high",
             "3 minutes",
             "Review Collector Health",
-            "#system",
+            "#system-collector",
             str(collector_health.get("collector_message") or collector_health.get("message") or status),
             "Collector Health",
         )
@@ -290,7 +275,7 @@ class SetupEngine:
             "high",
             "2 minutes",
             "Review Data Quality",
-            "#system",
+            "#system-data-quality",
             data_freshness.reason if data_freshness else "No data freshness capability is available.",
             "DataEngine.freshness",
         )

@@ -1,5 +1,24 @@
 # Changelog
 
+## BR-002 - Product Experience
+
+- Added consistent Home breadcrumbs to primary dashboard pages so users always
+  have a clear route back to the main view.
+- Tightened Setup task destinations: tariff and billing tasks open the billing
+  configuration panel, EV history opens Imports, and collector/data-quality
+  tasks jump to the matching System diagnostics.
+- Removed the unfinished notification setup item from active setup rendering so
+  users are not sent to a future placeholder workflow.
+- Improved Recommendation Centre cards with clearer action emphasis,
+  conversational confidence notes, and more approachable empty-state wording.
+- Grouped Timeline events by day, added compact event markers, and replaced raw
+  event type strings with readable labels.
+- Improved financial and provider-management presentation with clearer bill
+  attribution guidance, friendlier comparison labels, provider empty states,
+  connection-health wording, and user-facing form/upload validation messages.
+- Added regression tests for breadcrumbs, timeline grouping, setup destinations,
+  and revised upload errors.
+
 ## BR-001 - Mobile Experience
 
 - Added a compact mobile shortcut rail for Home, Glance, Setup, and System so
