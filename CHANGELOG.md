@@ -1,5 +1,21 @@
 # Changelog
 
+## BR-003 - Guided Onboarding
+
+- Added reusable disclosure panels so dense dashboard, financial, import, and
+  system details can stay available without overwhelming first-time users.
+- Refocused Bills around a financial overview, headline bill cards, savings
+  opportunity, and collapsed detailed tariff calculations/charts.
+- Added guided Setup and Imports onboarding steps that explain the basic path,
+  supported Ocular Excel exports, preview behavior, import outcomes, and common
+  troubleshooting.
+- Reworked System into progressive sections for Household Status, Providers,
+  Collector Health, Decisions, Evidence, and Advanced Diagnostics.
+- Updated provider cards to answer whether each provider is connected, healthy,
+  recently updated, and what the user should do next.
+- Added regression tests for disclosure panels, import guidance, and provider
+  onboarding cards.
+
 ## BR-002 - Product Experience
 
 - Added consistent Home breadcrumbs to primary dashboard pages so users always

@@ -1808,11 +1808,17 @@ def ev_tariff_breakdown_html(summary: Summary) -> str:
 def summary_html(title: str, summary: Summary, settings: Settings) -> str:
     peak_cost = summary.buckets["peak"]["cost"]
     no_data = '<p class="notice">No readings found for this period.</p>' if not summary.intervals else ""
-    cards = "".join(
+    headline_cards = "".join(
         [
-            metric("Net estimated cost", money(summary.net_cost), "Import + supply - export credit", "primary"),
+            metric("Net estimated cost", money(summary.net_cost), "Current billing period estimate", "primary"),
+            metric("Average daily cost", money(summary.average_daily_net_cost), f"Across {summary.supply_days} elapsed days", "cost"),
+            metric("Peak usage cost", money(peak_cost), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad" if peak_cost else "grid"),
+            metric("Solar export credit", f"-{money(summary.export_credit)}", f"{kwh(summary.solar_exported_kwh)} exported", "credit"),
+        ]
+    )
+    detail_cards = "".join(
+        [
             metric("Total before export credit", money(summary.total_cost), "Import plus daily supply", "cost"),
-            metric("Export credit", f"-{money(summary.export_credit)}", f"{money(settings.export_credit_rate)}/kWh exported", "credit"),
             metric("Grid import", kwh(summary.grid_import_kwh), "Energy drawn from the grid", "grid"),
             metric("Import cost", money(summary.import_cost), "Usage charges by tariff", "cost"),
             metric(
@@ -1833,9 +1839,6 @@ def summary_html(title: str, summary: Summary, settings: Settings) -> str:
                 "ev",
             ) if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
             metric(ev_cost_label(settings, summary), money(summary.ev_charging_cost), ev_note(settings, summary), "ev") if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
-            metric("Average daily grid import", kwh(summary.average_daily_grid_import_kwh), f"Across {summary.reading_days} days with readings", "grid"),
-            metric("Average daily solar generation", kwh(summary.average_daily_solar_generation_kwh), f"Across {summary.reading_days} days with readings", "solar"),
-            metric("Average daily net cost", money(summary.average_daily_net_cost), f"Across {summary.supply_days} elapsed days", "cost"),
         ]
     )
     insights = "".join(
@@ -1873,14 +1876,20 @@ def summary_html(title: str, summary: Summary, settings: Settings) -> str:
         <p>{summary.start.strftime("%d %b %Y")} <span>to</span> {summary.end.strftime("%d %b %Y")}</p>
       </div>
       {no_data}
-      <div class="metrics">{cards}</div>
+      <div class="metrics">{headline_cards}</div>
+      <p class="scenario-note">Start here: the bill estimate, daily run-rate, peak exposure, and solar credit usually explain the household story fastest.</p>
+      <div class="insights">{insights}</div>
+      {disclosure_html("Detailed bill calculations", "Tariff, solar, EV, and average daily components", f'''
+      <div class="metrics">{detail_cards}</div>
       {actual_ev_card_html(summary, settings)}
+      ''')}
+      {disclosure_html("Tariff charts", "Grid import and cost by tariff bucket", f'''
       <div class="charts">
         {bar_chart(summary, "kwh", "Grid import by tariff bucket", "kwh")}
         {bar_chart(summary, "cost", "Import cost by tariff bucket", "money")}
         {ev_tariff_breakdown_html(summary)}
       </div>
-      <div class="insights">{insights}</div>
+      ''')}
     </section>
     """
 
@@ -1905,6 +1914,17 @@ def page_heading_html(title: str, description: str, parent: str = "Home") -> str
       <h2>{html.escape(title)}</h2>
       <p>{html.escape(description)}</p>
     </div>
+    """
+
+
+def disclosure_html(title: str, summary: str, body: str, *, open_by_default: bool = False, css_class: str = "") -> str:
+    open_attr = " open" if open_by_default else ""
+    class_attr = f"disclosure-panel {html.escape(css_class)}".rstrip()
+    return f"""
+    <details class="{class_attr}"{open_attr}>
+      <summary><span>{html.escape(title)}</span><small>{html.escape(summary)}</small></summary>
+      <div class="disclosure-body">{body}</div>
+    </details>
     """
 
 
@@ -3158,6 +3178,14 @@ def setup_page_html(
     return f"""
     {conflict_notice}
     {notification_notice}
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Guided setup</span><h2>Start with these basics</h2></div><p>Most households only need billing, tariff, and one data source to begin.</p></div>
+      <div class="onboarding-steps">
+        <div><span>1</span><strong>Set billing and tariff</strong><p>Use the Billing Cycle panel below for the start day, retailer, and plan.</p></div>
+        <div><span>2</span><strong>Add household data</strong><p>Use Imports for Ocular EV history, or Providers for live/local data when available.</p></div>
+        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a data-quality or collector issue.</p></div>
+      </div>
+    </section>
     {billing_cycle_setup_html(settings)}
     <section class="report-section compact-section">
       <div class="section-title">
@@ -3328,6 +3356,28 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
         {metric("Household usage cost", money(current["household_usage_cost"]), "Grid cost excluding EV charging", "cost")}
         {metric("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad")}
         {metric("Plan savings/loss", signed_money(-plan["difference"]), plan["recommendation"], "good" if plan["savings"] > 0 else "bad" if plan["savings"] < 0 else "neutral")}
+      </div>
+    </section>
+    """
+
+
+def financial_highlights_html(summary: Summary, projected_bill_value: float, plan: dict, recommendations: list) -> str:
+    saving_text = (
+        f"{money(plan['savings'])} ahead on the current plan"
+        if plan.get("savings", 0) > 0
+        else f"{money(abs(plan.get('savings', 0)))} possible plan gap"
+        if plan.get("savings", 0) < 0
+        else "No plan gap detected"
+    )
+    top_action = recommendation_action(recommendations[0]) if recommendations else "No savings recommendation is active right now."
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Financial overview</span><h2>Start here</h2></div><p>Current bill, projection, and next opportunity</p></div>
+      <div class="metrics">
+        {metric("Current billing period", money(summary.net_cost), f"{summary.start.strftime('%d %b')} to {summary.end.strftime('%d %b %Y')}", "primary")}
+        {metric("Projected bill", money(projected_bill_value), "Based on current period run-rate", "cost")}
+        {metric("Savings opportunity", saving_text, plan["recommendation"], "good" if plan.get("savings", 0) > 0 else "neutral")}
+        {metric("Next useful action", top_action, "From active recommendations", "solar")}
       </div>
     </section>
     """
@@ -3569,16 +3619,25 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
         tone = "good" if data["lifecycle_state"] in {"CONNECTED", "SYNCING", "CONFIGURED"} else "bad"
         connection_label = friendly_label(data["lifecycle_state"])
         health_label = friendly_label(data["health"].get("collector_status") or "unknown")
+        next_step = "No action needed right now." if tone == "good" else "Open this provider's setup details and complete the connection."
         actions = " ".join(
             f'<span class="chip">{html.escape(friendly_label(action))}</span>'
             for action in data.get("actions", [])[:4]
         )
         rows.append(
             f"""
-            <div id="system-provider-{html.escape(provider.provider_id)}" class="completeness-row {tone}">
-              <span>{html.escape(provider.name)}</span>
-              <strong>{html.escape(connection_label)}</strong>
-              <small>Last successful sync: {html.escape(str(last_sync))}. Current health: {html.escape(health_label)}. Provides: {html.escape(capabilities)}.</small>
+            <div id="system-provider-{html.escape(provider.provider_id)}" class="provider-status-card {tone}">
+              <div class="provider-status-head">
+                <span>{html.escape(provider.name)}</span>
+                <strong>{html.escape(connection_label)}</strong>
+              </div>
+              <div class="provider-status-grid">
+                <div><span>Connected?</span><strong>{html.escape('Yes' if tone == 'good' else 'Not yet')}</strong></div>
+                <div><span>Healthy?</span><strong>{html.escape(health_label)}</strong></div>
+                <div><span>Last updated</span><strong>{html.escape(str(last_sync))}</strong></div>
+                <div><span>Next step</span><strong>{html.escape(next_step)}</strong></div>
+              </div>
+              <p>Provides: {html.escape(capabilities)}.</p>
               <small>{actions}</small>
             </div>
             """
@@ -4012,9 +4071,7 @@ def system_page_html(
         "comparison_flat_rate": money(settings.comparison_plan_rates["flat_import_rate"]),
     }
     config_html = "".join(f"<div><span>{html.escape(key)}</span><strong>{html.escape(str(value))}</strong></div>" for key, value in config_rows.items())
-    return f"""
-    <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">System</span><h2>Collector and data sources</h2></div></div>
+    collector_body = f"""
       <div class="metrics">
         {metric("Collector status", collector_status_text(health), "Current collector state", "good" if health.get("status") == "ok" else "bad")}
         {metric("Last successful collection", display_timestamp(health.get("last_successful_collection")), "Most recent successful collector run", "grid")}
@@ -4023,37 +4080,53 @@ def system_page_html(
         {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
         {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Continuous Setup Engine readiness", "good" if setup and setup.progress.complete else "grid")}
       </div>
-      <div class="system-grid">
-        {provider_management_html(provider_management)}
-        {provider_runtime_html(provider_runtime)}
-        {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
-        {household_behaviour_html(household_behaviour)}
-        {household_anomalies_html(household_anomalies)}
-        {household_decisions_html(household_decisions, decision_summary)}
-        {decision_provenance_html(household_decisions, advisor_explanations)}
-        {state_changes_html(state_change_summary)}
-        {notification_preferences_html(notification_preferences)}
-        {notification_readiness_html(notification_readiness_summary)}
-        {notification_history_html(notification_history)}
-        {provider_observations_html(provider_observations)}
-        {promotion_summary_html(promotion_summary)}
-        {context_summary_html(context)}
-        {capability_summary_html(capability_summary)}
-        {data_completeness_html(summary, settings)}
-        <div class="system-card">
-          <div class="chart-heading"><h3>EV source counts</h3><span>Grouped by source</span></div>
-          <table><thead><tr><th>Source</th><th>Sessions</th><th>kWh</th><th>Cost</th></tr></thead><tbody>{count_rows}</tbody></table>
-        </div>
-        <div class="system-card">
-          <div class="chart-heading"><h3>Config summary</h3><span>Privacy safe</span></div>
-          <div class="config-grid">{config_html}</div>
-        </div>
+    """
+    advanced_body = f"""
+      {provider_runtime_html(provider_runtime)}
+      {household_behaviour_html(household_behaviour)}
+      {household_anomalies_html(household_anomalies)}
+      {decision_provenance_html(household_decisions, advisor_explanations)}
+      {state_changes_html(state_change_summary)}
+      {notification_preferences_html(notification_preferences)}
+      {notification_readiness_html(notification_readiness_summary)}
+      {notification_history_html(notification_history)}
+      {promotion_summary_html(promotion_summary)}
+      {context_summary_html(context)}
+      {capability_summary_html(capability_summary)}
+      <div class="system-card">
+        <div class="chart-heading"><h3>EV source counts</h3><span>Grouped by source</span></div>
+        <table><thead><tr><th>Source</th><th>Sessions</th><th>kWh</th><th>Cost</th></tr></thead><tbody>{count_rows}</tbody></table>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Config summary</h3><span>Privacy safe</span></div>
+        <div class="config-grid">{config_html}</div>
       </div>
       <div class="system-card">
         <div class="chart-heading"><h3>Import instructions</h3><span>No secrets displayed</span></div>
         <p>Ocular: <code>python3 collector/import_ocular_export.py /path/to/export.xlsx</code></p>
         <p>SolarEdge: refresh <code>collector/solaredge_cookie.txt</code> only when the session warning appears. Cookie contents are never displayed here.</p>
       </div>
+    """
+    return f"""
+    <section id="system-collector" class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">System</span><h2>Can I trust the data?</h2></div><p>Start with household status. Open deeper checks only when something looks wrong.</p></div>
+      <div class="system-overview-grid">
+        {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
+        {data_completeness_html(summary, settings)}
+      </div>
+      {disclosure_html("Providers", "Connection status and next steps", f'''
+        {provider_management_html(provider_management)}
+        {provider_registry_html(provider_registry)}
+      ''', open_by_default=True, css_class="system-group")}
+      {disclosure_html("Collector Health", "Collection recency, failures, and report freshness", collector_body, open_by_default=True, css_class="system-group")}
+      {disclosure_html("Decisions", "Active household decisions and confidence", f'''
+        {household_decisions_html(household_decisions, decision_summary)}
+      ''', css_class="system-group")}
+      {disclosure_html("Evidence", "Provider observations and data confidence", f'''
+        {provider_observations_html(provider_observations)}
+        {data_completeness_html(summary, settings)}
+      ''', css_class="system-group")}
+      {disclosure_html("Advanced Diagnostics", "Runtime, behaviour, provenance, notifications, and raw configuration", advanced_body, css_class="system-group advanced-diagnostics")}
     </section>
     """
 
@@ -4156,10 +4229,26 @@ def imports_page_html(
         f'<div class="system-card"><div class="chart-heading"><h3>Observation providers</h3><span>Latest provider-created observations</span></div><div class="completeness-grid">{observation_rows}</div></div>'
         if observation_rows else ""
     )
+    import_guidance = """
+      <div class="onboarding-steps">
+        <div><span>1</span><strong>Choose provider export</strong><p>PowerMonitor currently supports Ocular EV charging history Excel exports.</p></div>
+        <div><span>2</span><strong>Preview before saving</strong><p>The preview checks rows, dates, energy totals, and validation issues before anything is imported.</p></div>
+        <div><span>3</span><strong>Import updates the dashboard</strong><p>Accepted sessions are matched to your household and used in bills, EV analytics, and confidence messaging.</p></div>
+      </div>
+    """
+    troubleshooting = """
+      <ul class="guidance-list">
+        <li>Use the original `.xlsx` or `.xlsm` export from Ocular where possible.</li>
+        <li>If preview shows validation issues, export the charging history again and retry before committing.</li>
+        <li>Re-importing history is safe: existing sessions are updated rather than duplicated.</li>
+        <li>The main dashboard will not auto-refresh while you are choosing or uploading a file.</li>
+      </ul>
+    """
 
     return f"""
     <section class="report-section import-panel">
       <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Choose an Ocular Excel export from your phone, tablet, or Mac.</p></div>
+      {disclosure_html("First-time import guide", "What to upload and what happens next", import_guidance, open_by_default=True, css_class="onboarding-guide")}
       {capability_note}
       {provider_html}
       {observation_html}
@@ -4169,6 +4258,7 @@ def imports_page_html(
         <button type="submit">Preview import</button>
       </form>
       <p class="notice">The dashboard will not auto-refresh while you are choosing or uploading a file.</p>
+      {disclosure_html("Troubleshooting uploads", "Formats, validation, and safe re-imports", troubleshooting, css_class="onboarding-guide")}
     </section>
     <section class="report-section import-panel compact-section">
       <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
@@ -4605,6 +4695,7 @@ def write_html(
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
+    {financial_highlights_html(period_summary, glance_projected, plan, recommendation_presentations)}
     {summary_html(selected_period.label, period_summary, settings)}
     {bill_attribution_html(period_summary, plan, settings)}
     {comparison_html(comparison) if comparison else ""}
@@ -4710,6 +4801,20 @@ def write_html(
     .period-controls select,.period-controls input,.period-controls button {{ width:100%; min-height:39px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
     .period-controls button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
     .period-controls p,.scenario-note {{ margin:10px 0 0; color:var(--muted); font-size:11px; }}
+    .disclosure-panel {{ margin-top:14px; background:#fff; border:1px solid var(--line); border-radius:16px; overflow:hidden; }}
+    .disclosure-panel summary {{ position:relative; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:15px 17px; cursor:pointer; list-style:none; }}
+    .disclosure-panel summary::-webkit-details-marker {{ display:none; }}
+    .disclosure-panel summary span {{ color:var(--ink); font-size:13px; font-weight:850; }}
+    .disclosure-panel summary small {{ color:var(--muted); font-size:11px; text-align:right; }}
+    .disclosure-panel summary::after {{ content:"+"; display:grid; place-items:center; flex:0 0 24px; height:24px; color:var(--deep-2); background:#eef5f2; border-radius:50%; font-weight:900; }}
+    .disclosure-panel[open] summary::after {{ content:"-"; }}
+    .disclosure-body {{ padding:0 17px 17px; }}
+    .onboarding-steps {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px; }}
+    .onboarding-steps div {{ padding:15px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
+    .onboarding-steps span {{ display:grid; place-items:center; width:28px; height:28px; color:#fff; background:var(--deep-2); border-radius:50%; font-size:12px; font-weight:900; }}
+    .onboarding-steps strong {{ display:block; margin-top:10px; font-size:14px; }}
+    .onboarding-steps p,.guidance-list {{ margin:6px 0 0; color:var(--muted); font-size:12px; }}
+    .guidance-list {{ display:grid; gap:7px; padding-left:18px; }}
     .section-title {{ margin-bottom:20px; }} .eyebrow {{ color:var(--green); font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }}
     h2 {{ margin:2px 0 0; font-size:28px; letter-spacing:-.045em; }} .section-title p {{ margin:0; color:var(--muted); font-size:13px; }}
     .section-title p span {{ margin:0 5px; color:#a0ada9; }}
@@ -4912,6 +5017,19 @@ def write_html(
     .system-card {{ margin-top:14px; overflow-x:auto; overflow-wrap:anywhere; -webkit-overflow-scrolling:touch; }}
     .system-card table {{ width:100%; border-collapse:collapse; }} .system-card th,.system-card td {{ padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; }}
     .system-card th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .system-overview-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+    .system-group .disclosure-body {{ padding-top:1px; }}
+    .provider-status-card {{ margin-top:10px; padding:14px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
+    .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }}
+    .provider-status-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
+    .provider-status-head span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-status-head strong {{ font-size:15px; }}
+    .provider-status-grid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:10px; }}
+    .provider-status-grid div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:10px; }}
+    .provider-status-grid span,.provider-status-grid strong {{ display:block; }}
+    .provider-status-grid span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-status-grid strong {{ margin-top:3px; font-size:12px; line-height:1.3; }}
+    .provider-status-card p {{ margin:9px 0 0; color:var(--muted); font-size:12px; }}
     .import-panel {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .import-panel table {{ width:100%; border-collapse:collapse; }}
     .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
@@ -5022,7 +5140,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.config-grid,.import-form,.setup-task,.setup-config-form {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
@@ -5036,6 +5154,7 @@ def write_html(
       .metric {{ min-height:auto; padding:16px; }} .metric span {{ max-width:none; }} .metric strong,.metric.primary strong {{ margin-top:16px; font-size:26px; letter-spacing:-.03em; }}
       .status-strip {{ grid-template-columns:1fr; }}
       .period-controls {{ padding:14px; }} .period-controls form {{ grid-template-columns:1fr; }} .period-controls button,.setup-config-form button,.import-form button {{ min-height:46px; }}
+      .disclosure-panel summary {{ align-items:flex-start; flex-direction:column; }} .disclosure-panel summary small {{ text-align:left; }} .disclosure-panel summary::after {{ position:absolute; right:17px; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
       .timeline-entry {{ grid-template-columns:1fr; gap:8px; padding:15px; }} .timeline-stamp {{ justify-content:flex-start; }} .timeline-meta small {{ width:100%; }}
