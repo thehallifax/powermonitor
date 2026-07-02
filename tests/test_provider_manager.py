@@ -75,10 +75,11 @@ def paths_read(path):
 
 class ProviderManagerTests(unittest.TestCase):
     def test_configuration_lifecycle_and_state_transitions(self):
-        manager = ProviderManager(registry())
-        provider = manager.get("solaredge")
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry(), **manager_paths(directory))
+            provider = manager.get("solaredge")
 
-        self.assertEqual(provider.lifecycle_state, ProviderConnectionStatus.CONNECTED)
+        self.assertEqual(provider.lifecycle_state, ProviderConnectionStatus.CONFIGURED)
         self.assertIn("Reconnect", provider.actions)
         self.assertIn("Remove", provider.actions)
 
@@ -110,21 +111,23 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("Cookie", configuration["notes"])
 
     def test_diagnostics_serialization_and_capability_detection(self):
-        manager = ProviderManager(
-            registry(),
-            health={"status": "ok", "latest_measurement_time": "2026-06-29T10:00:00+08:00"},
-            provider_observations={"latest": [{"provider_id": "solaredge"}]},
-            promotion_summary={"latest_promotions": [{"provider_id": "solaredge"}]},
-        )
-        provider = manager.get("solaredge").as_dict()
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(
+                registry(),
+                health={"status": "ok", "latest_measurement_time": "2026-06-29T10:00:00+08:00"},
+                provider_observations={"latest": [{"provider_id": "solaredge"}]},
+                promotion_summary={"latest_promotions": [{"provider_id": "solaredge"}]},
+                **manager_paths(directory),
+            )
+            provider = manager.get("solaredge").as_dict()
 
         self.assertEqual(provider["diagnostics"]["observation_count"], 1)
         self.assertEqual(provider["diagnostics"]["promotion_count"], 1)
         self.assertTrue(provider["capability_summary"]["detected"])
         self.assertIn("daily_summary", provider["capability_summary"]["capabilities"])
-        self.assertEqual(provider["onboarding"]["state"], "CONNECTED")
-        self.assertTrue(provider["onboarding"]["connected"])
-        self.assertTrue(provider["onboarding"]["healthy"])
+        self.assertEqual(provider["onboarding"]["state"], "CONFIGURATION_REQUIRED")
+        self.assertFalse(provider["onboarding"]["connected"])
+        self.assertFalse(provider["onboarding"]["healthy"])
         self.assertEqual(provider["onboarding"]["sync_frequency"], "Refresh schedule")
         self.assertIn("why_required", provider["onboarding"])
         self.assertIn("recovery_steps", provider["onboarding"])
@@ -167,12 +170,36 @@ class ProviderManagerTests(unittest.TestCase):
         connected = ProviderManager(registry()).test_connection("solaredge").as_dict()
         missing = ProviderManager(registry(status=ProviderStatus.MISSING)).test_connection("solaredge").as_dict()
 
-        self.assertTrue(connected["success"])
-        self.assertEqual(connected["authentication_status"], "authenticated")
+        self.assertFalse(connected["success"])
+        self.assertEqual(connected["authentication_status"], "not_authenticated")
         self.assertFalse(missing["success"])
         self.assertIn("Provider is not configured.", missing["warnings"])
-        self.assertEqual(connected["status"], "success")
-        self.assertIn("Connection test succeeded", connected["user_message"])
+        self.assertEqual(connected["status"], "failure")
+        self.assertIn("Unable to connect", connected["user_message"])
+
+    def test_connected_state_requires_successful_test_and_data_retrieval(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(
+                registry(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": True,
+                        "authentication_status": "authenticated",
+                        "available_datasets": ["daily_summary"],
+                        "warnings": [],
+                    }
+                },
+                **paths,
+            )
+
+            manager.action("solaredge", "save", {"cookie": "redaction-fixture-cookie"})
+            test = manager.action("solaredge", "test").as_dict()
+            refreshed = ProviderManager(registry(), **paths).get("solaredge")
+
+            self.assertTrue(test["success"])
+            self.assertEqual(test["user_message"], "Connected successfully.")
+            self.assertEqual(refreshed.lifecycle_state, ProviderConnectionStatus.CONNECTED)
 
     def test_solaredge_adapter_test_result_is_normalized_with_guidance(self):
         manager = ProviderManager(
@@ -307,7 +334,14 @@ class ProviderManagerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             manager = ProviderManager(
                 registry_with_home_assistant(),
-                connection_testers={"home_assistant": lambda: {"success": True, "authentication_status": "authenticated", "warnings": []}},
+                connection_testers={
+                    "home_assistant": lambda: {
+                        "success": True,
+                        "authentication_status": "authenticated",
+                        "available_datasets": ["live_power"],
+                        "warnings": [],
+                    }
+                },
                 **manager_paths(directory),
             )
 
@@ -321,13 +355,19 @@ class ProviderManagerTests(unittest.TestCase):
                 },
             ).as_dict()
             test = manager.action("home_assistant", "test").as_dict()
+            reconnect = manager.action("home_assistant", "reconnect").as_dict()
             reset = manager.action("home_assistant", "reset").as_dict()
             disabled = manager.action("home_assistant", "disable").as_dict()
             enabled = manager.action("home_assistant", "enable").as_dict()
             removed = manager.action("home_assistant", "remove").as_dict()
 
             self.assertTrue(save["success"])
+            self.assertEqual(save["user_message"], "Settings saved successfully.")
             self.assertEqual(test["status"], "success")
+            self.assertEqual(test["user_message"], "Connected successfully.")
+            self.assertEqual(test["provider"]["lifecycle_state"], "CONNECTED")
+            self.assertEqual(reconnect["user_message"], "Connected successfully.")
+            self.assertEqual(reconnect["provider"]["lifecycle_state"], "CONNECTED")
             self.assertTrue(reset["success"])
             self.assertEqual(disabled["provider"]["lifecycle_state"], "DISABLED")
             self.assertTrue(enabled["success"])

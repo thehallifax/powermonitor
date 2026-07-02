@@ -124,8 +124,8 @@ class GlanceModeTests(unittest.TestCase):
         state = build_state(datetime(2026, 6, 27, 18, 0, tzinfo=LOCAL))
 
         self.assertEqual(state.status, "AVOID")
-        self.assertEqual(state.reason, "Avoid charging now. Cheaper charging starts in 180 minutes.")
-        self.assertEqual(state.current_recommendation, "Use Off peak from 9:00 PM instead.")
+        self.assertEqual(state.reason, "Peak tariff now. Cheaper charging starts in 180 minutes.")
+        self.assertEqual(state.current_recommendation, "Use Off peak from 9:00 PM instead if the load can wait.")
         self.assertEqual(state.next_window, "Off peak from 9:00 PM")
         self.assertEqual(state.lowest_cost_window, "Super off peak from 9:00 AM")
 
@@ -137,14 +137,15 @@ class GlanceModeTests(unittest.TestCase):
         self.assertIn("Overnight", state.next_window)
         self.assertIn("Super off peak", state.lowest_cost_window)
 
-    def test_stale_or_missing_data_maps_to_unavailable(self):
+    def test_stale_or_missing_data_uses_recent_household_information(self):
         state = build_state(
             datetime(2026, 6, 27, 12, 0, tzinfo=LOCAL),
             health={"status": "stale", "report_age_minutes": 5},
         )
 
-        self.assertEqual(state.status, "DATA UNAVAILABLE")
-        self.assertEqual(state.reason, "Charging advice needs fresher data.")
+        self.assertEqual(state.status, "LIVE DATA UNAVAILABLE")
+        self.assertEqual(state.reason, "Live data unavailable. Using recent household information.")
+        self.assertEqual(state.current_recommendation, "Unable to verify live conditions. Use recent household information with caution.")
         self.assertEqual(state.confidence, "Low")
         self.assertEqual(state.evidence_quality, "LOW")
 

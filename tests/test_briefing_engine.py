@@ -181,8 +181,9 @@ class BriefingEngineTests(unittest.TestCase):
             context=household_context(datetime(2026, 6, 28, 23, 30, tzinfo=LOCAL)),
         )
 
-        self.assertIn("Night context", briefing.overall_household_status)
+        self.assertIn("overnight tariffs", briefing.overall_household_status)
         self.assertIn("tomorrow", briefing.suggested_next_action.lower())
+        self.assertIn("Good evening", briefing.greeting)
 
     def test_day_context_briefing_keeps_solar_focus(self):
         briefing = BriefingEngine().build(
@@ -191,8 +192,9 @@ class BriefingEngineTests(unittest.TestCase):
             context=household_context(datetime(2026, 6, 28, 12, 0, tzinfo=LOCAL)),
         )
 
-        self.assertIn("Daylight context", briefing.overall_household_status)
+        self.assertIn("solar use", briefing.overall_household_status)
         self.assertIn("solar", briefing.overall_household_status.lower())
+        self.assertIn("Good afternoon", briefing.greeting)
 
 
 if __name__ == "__main__":

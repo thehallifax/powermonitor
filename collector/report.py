@@ -3,6 +3,7 @@ import html
 import json
 import logging
 import math
+import re
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
@@ -1952,15 +1953,15 @@ def recommendation_confidence_note(decision) -> str:
     if is_recommendation_presentation(decision):
         rationale = getattr(decision, "rationale", None)
         if rationale:
-            return rationale
+            return trust_wording(rationale)
     explanation = getattr(decision, "explanation", None)
     if explanation and getattr(explanation, "confidence_reason", None):
-        return explanation.confidence_reason
+        return trust_wording(explanation.confidence_reason)
     if str(confidence).lower() == "high":
         return "The available data is strong enough to act on this now."
     if str(confidence).lower() == "medium":
-        return "Useful signal, with some uncertainty in the supporting data."
-    return "PowerMonitor has limited evidence, so treat this as a prompt to review."
+        return "Some uncertainty remains; this is based on available readings and tariff timing."
+    return "Low confidence: we can't verify enough live household data, so review before acting."
 
 
 def recommendations_html(recommendations: list) -> str:
@@ -2002,7 +2003,7 @@ def hero_html(
 ) -> str:
     status_class = "healthy" if health["status"] == "ok" else "warning"
     status_text = (
-        "SolarEdge session expired"
+        "Live data sign-in needs attention"
         if health["status"] == "SolarEdge session expired"
         else health["status"].title()
     )
@@ -2292,7 +2293,7 @@ def glance_page_html(glance: GlanceState) -> str:
         <div class="glance-panel">
           <span>Confidence</span>
           <strong>{html.escape(glance.evidence_quality.title())}</strong>
-          <small>{html.escape(glance.evidence_reason)}</small>
+          <small>{html.escape(trust_wording(glance.evidence_reason))}</small>
         </div>
         <div class="glance-panel">
           <span>Current tariff/window</span>
@@ -2318,7 +2319,7 @@ def glance_page_html(glance: GlanceState) -> str:
         </div>
         <div class="glance-panel solar">
           <span>Solar/export status</span>
-          <strong>{html.escape(glance.solar_status)}</strong>
+          <strong>{html.escape(trust_wording(glance.solar_status))}</strong>
         </div>
         <div class="glance-panel">
           <span>Last updated</span>
@@ -2331,21 +2332,21 @@ def glance_page_html(glance: GlanceState) -> str:
 
 def confidence_label(summary: Summary) -> tuple[str, str]:
     if not summary.intervals or not summary.reading_days:
-        return "Low", "missing interval data"
+        return "Low", "We can't verify live conditions right now."
     if summary.reading_days / max(summary.supply_days, 1) < 0.5:
-        return "Low", "partial SolarEdge interval data"
+        return "Low", "Some readings are missing, so confidence is reduced."
     if summary.ev_charging_source == "ocular_export":
-        return "High", "SolarEdge interval data + actual Ocular sessions"
+        return "High", "Live readings plus charger session history"
     if summary.ev_charging_source == "estimated":
-        return "Medium", "SolarEdge interval data + estimated EV charging"
+        return "Medium", "Uses tariff schedule and estimated EV charging, not charger session data"
     if summary.ev_charging_source == "home_assistant_ocpp":
-        return "Medium", "SolarEdge interval data + HA OCPP session snapshots"
-    return "Low", "limited source coverage"
+        return "Medium", "Uses household readings plus Home Assistant charger snapshots"
+    return "Low", "Limited source coverage"
 
 
 def collector_status_text(health: dict) -> str:
     return (
-        "SolarEdge session expired"
+        "Live data sign-in needs attention"
         if health.get("status") == "SolarEdge session expired"
         else str(health.get("status") or "unknown").title()
     )
@@ -2356,23 +2357,63 @@ def customer_label(value: Any) -> str:
     replacements = {
         "AdvisorCollection": "recommendations",
         "DecisionEngine": "today's recommendation",
+        "StateChangeEngine": "household changes",
         "DataEngine": "household data",
         "FinancialEngine": "bill estimate",
+        "Recommendation Engine": "recommendations",
         "RecommendationPresentation": "recommendation",
+        "Household Decision": "recommendation",
         "HouseholdDecision": "recommendation",
+        "Household State": "household status",
+        "Provider Health": "source health",
         "Household State Engine": "household status",
         "Collector health": "live data",
         "Provider observations": "source readings",
         "Provider Observation": "source reading",
         "Provider Observation pipeline": "source reading history",
         "Provider Runtime": "data connection status",
+        "Provider Management": "data source setup",
+        "provider session": "source sign-in",
+        "Provider": "Data source",
+        "provider": "source",
         "Runtime": "data connection",
         "Collector": "live data",
         "collector": "live data",
+        "SolarEdge session expired": "We can't verify live conditions right now",
+        "session expired": "live data sign-in needs attention",
+        "Investigate anomaly": "Potential issue detected",
+        "Investigate unusual household behaviour": "Potential issue detected",
+        "Investigate unusual behaviour": "Potential issue detected",
+        "active anomaly": "potential issue",
         "Evidence quality": "Confidence",
         "evidence quality": "confidence",
         "Not quantified": "Unable to estimate",
         "not quantified": "unable to estimate",
+    }
+    for internal, friendly in replacements.items():
+        text = text.replace(internal, friendly)
+    return text
+
+
+def trust_wording(value: Any) -> str:
+    text = customer_label(value)
+    replacements = {
+        "Charging advice needs fresher data": "We can't verify live conditions right now",
+        "Avoid charging now": "Peak tariff now",
+        "Avoid flexible loads": "Use tariff timing before starting flexible loads",
+        "Low confidence because comparison data is unavailable": "Low confidence because some comparison data is missing",
+        "Low confidence because solar interval evidence is unavailable": "Low confidence because live solar readings are unavailable",
+        "Low confidence because overnight baseload data is unavailable": "Low confidence because overnight usage readings are unavailable",
+        "available source data is stale": "live household readings are not fresh",
+        "available source data is missing": "live household readings are missing",
+        "available household data": "the household data PowerMonitor can verify",
+        "available interval data": "available household readings",
+        "interval data": "household readings",
+        "evidence trail": "supporting data",
+        "Evidence trail": "Supporting data",
+        "anomaly": "potential issue",
+        "Anomaly": "Potential issue",
+        "HA OCPP": "Home Assistant charger",
     }
     for internal, friendly in replacements.items():
         text = text.replace(internal, friendly)
@@ -2480,21 +2521,49 @@ def recommendation_difficulty(decision) -> str:
 
 
 def recommendation_title(decision) -> str:
-    return decision.title
+    return trust_wording(decision.title)
 
 
 def recommendation_action(decision) -> str:
-    return decision.recommended_action if is_recommendation_presentation(decision) else decision.recommendation
+    action = decision.recommended_action if is_recommendation_presentation(decision) else decision.recommendation
+    return trust_wording(action)
 
 
 def recommendation_why(decision) -> str:
     if is_recommendation_presentation(decision):
-        return decision.rationale
+        return trust_wording(decision.rationale)
     return (
-        decision.explanation.why_this_matters
+        trust_wording(decision.explanation.why_this_matters)
         if decision.explanation
-        else "This recommendation is based on available Recommendation Engine evidence."
+        else "This recommendation is based on the household data PowerMonitor can verify."
     )
+
+
+def recommendation_what_happened(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return trust_wording(decision.what_happened)
+    return trust_wording(decision.summary if hasattr(decision, "summary") else decision.finding)
+
+
+def recommendation_why_we_think_this(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return trust_wording(decision.why_we_think_this)
+    return recommendation_why(decision)
+
+
+def recommendation_what_to_check(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return trust_wording(decision.what_to_check)
+    return trust_wording(recommendation_action(decision))
+
+
+def recommendation_if_ignored(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return trust_wording(decision.if_ignored)
+    impact = recommendation_impact(decision)
+    if impact != unable_to_estimate():
+        return f"The pattern may continue and could affect costs by around {impact}."
+    return "The pattern may continue, but PowerMonitor cannot estimate the impact yet."
 
 
 def recommendation_evidence_html(decision) -> str:
@@ -2502,7 +2571,7 @@ def recommendation_evidence_html(decision) -> str:
         if not decision.evidence:
             return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
         rows = [
-            f"<li><strong>{html.escape(customer_source(item.signal))}</strong><span>{html.escape(customer_label(item.value))}</span><small>{html.escape(customer_source(item.source))} - {html.escape(customer_label(item.quality).title())}</small></li>"
+            f"<li><strong>{html.escape(customer_source(item.signal))}</strong><span>{html.escape(trust_wording(item.value))}</span><small>{html.escape(customer_source(item.source))} - {html.escape(customer_label(item.quality).title())}</small></li>"
             for item in decision.evidence
         ]
         return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
@@ -2522,7 +2591,7 @@ def recommendation_evidence_html(decision) -> str:
             continue
         label = key.replace("_", " ").capitalize()
         rows.append(
-            f"<li><strong>{html.escape(label)}</strong><span>{html.escape(str(value))}</span></li>"
+            f"<li><strong>{html.escape(label)}</strong><span>{html.escape(trust_wording(value))}</span></li>"
         )
     if not rows:
         return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
@@ -2648,8 +2717,10 @@ def recommendation_centre_html(
                 <span><small>Monthly impact</small><strong>{html.escape(recommendation_monthly_impact(decision))}</strong></span>
               </div>
               <div class="decision-lines">
-                <p class="primary-action"><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
-                <p><strong>Why?</strong>{html.escape(why)}</p>
+                <p><strong>What happened?</strong>{html.escape(recommendation_what_happened(decision))}</p>
+                <p><strong>Why? Why do we think this?</strong>{html.escape(recommendation_why_we_think_this(decision))}</p>
+                <p class="primary-action"><strong>What should I check?</strong>{html.escape(recommendation_what_to_check(decision))}</p>
+                <p><strong>What happens if I ignore it?</strong>{html.escape(recommendation_if_ignored(decision))}</p>
                 <p><strong>Confidence</strong>{html.escape(confidence_note)}</p>
                 {recommendation_decision_provenance_html(decision, household_decisions)}
                 {goal_links}
@@ -2674,7 +2745,7 @@ def recommendation_centre_html(
                 <span class="recommendation-level">{html.escape(state_text.title())}</span>
                 <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
               </div>
-              <h3>{html.escape(decision.title)}</h3>
+              <h3>{html.escape(recommendation_title(decision))}</h3>
               <div class="recommendation-centre-meta">
                 <span>{html.escape(recommendation_category(decision).title())}</span>
                 <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
@@ -2741,8 +2812,8 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
         evidence_summary = getattr(advisor, "evidence_summary", None)
         evidence_quality = evidence_summary.evidence_quality.value.title() if evidence_summary else "Unknown"
         missing = ", ".join(item.name for item in evidence_summary.missing_evidence) if evidence_summary else ""
-        missing_text = missing or "No required evidence gaps declared."
-        confidence_reduced = evidence_summary.confidence_reason if evidence_summary else advisor.confidence_reason
+        missing_text = trust_wording(missing or "No required data gaps declared.")
+        confidence_reduced = trust_wording(evidence_summary.confidence_reason if evidence_summary else advisor.confidence_reason)
         cards.append(
             f"""
             <article class="recommendation-card recommendation-centre-card">
@@ -2750,14 +2821,14 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
                 <span class="recommendation-level">{html.escape(advisor.confidence)} confidence</span>
                 <div><small>Status</small><strong>{html.escape(advisor.status.replace("_", " "))}</strong></div>
               </div>
-              <h3>{html.escape(advisor.headline)}</h3>
+              <h3>{html.escape(trust_wording(advisor.headline))}</h3>
               <div class="recommendation-centre-meta">
                 <span>{html.escape(advisor.advisor_type.replace("_", " ").title())}</span>
                 <span>{html.escape(advisor.freshness)}</span>
               </div>
               <div class="decision-lines">
-                <p class="primary-action"><strong>Recommended action</strong>{html.escape(advisor.recommendation)}</p>
-                <p><strong>Why?</strong>{html.escape(advisor.confidence_reason)}</p>
+                <p class="primary-action"><strong>Recommended action</strong>{html.escape(trust_wording(advisor.recommendation))}</p>
+                <p><strong>Why?</strong>{html.escape(trust_wording(advisor.confidence_reason))}</p>
                 <p><strong>Confidence</strong>{html.escape(evidence_quality)}</p>
                 <p><strong>Still missing</strong>{html.escape(missing_text)}</p>
                 <p><strong>Confidence note</strong>{html.escape(confidence_reduced)}</p>
@@ -2858,8 +2929,8 @@ def timeline_html(timeline: DecisionTimeline) -> str:
             if entry.financial_impact
             else "<small>Financial impact not quantified</small>"
         )
-        sources = ", ".join(entry.evidence_sources) if entry.evidence_sources else "No evidence sources"
-        kind = friendly_label(entry.event_type)
+        sources = ", ".join(customer_source(source) for source in entry.evidence_sources) if entry.evidence_sources else "No sources"
+        kind = customer_label(friendly_label(entry.event_type))
         rows.append(
             f"""
             <article class="timeline-entry">
@@ -2901,8 +2972,8 @@ def briefing_card_html(
         <span>{html.escape(eyebrow)}</span>
         <strong>{html.escape(item.confidence)} confidence</strong>
       </div>
-      <h3>{html.escape(heading or item.title)}</h3>
-      <p>{html.escape(item.body)}</p>
+      <h3>{html.escape(trust_wording(heading or item.title))}</h3>
+      <p>{html.escape(trust_wording(item.body))}</p>
       <div class="briefing-meta">
         <small>{html.escape(item.category)}</small>
         <small>{html.escape(item.financial_impact)}</small>
@@ -2916,11 +2987,11 @@ def decision_explanation_html(explanation) -> str:
     if not explanation:
         return ""
     evidence_items = "".join(
-        f"<li>{html.escape(evidence)}</li>"
+        f"<li>{html.escape(trust_wording(evidence))}</li>"
         for evidence in explanation.evidence_used
     )
     sources = (
-        ", ".join(explanation.data_sources_used)
+        ", ".join(customer_source(source) for source in explanation.data_sources_used)
         if explanation.data_sources_used
         else "No decision sources"
     )
@@ -2940,15 +3011,15 @@ def decision_explanation_html(explanation) -> str:
         <div class="decision-explanation-grid">
           <div>
             <span>Why this matters</span>
-            <p>{html.escape(explanation.why_this_matters)}</p>
+            <p>{html.escape(trust_wording(explanation.why_this_matters))}</p>
           </div>
           <div>
             <span>Financial impact</span>
-            <p>{html.escape(explanation.financial_impact)}</p>
+            <p>{html.escape(trust_wording(explanation.financial_impact))}</p>
           </div>
           <div>
             <span>Confidence reason</span>
-            <p>{html.escape(explanation.confidence_reason)}</p>
+            <p>{html.escape(trust_wording(explanation.confidence_reason))}</p>
           </div>
           {freshness}
           <div>
@@ -2984,43 +3055,213 @@ def briefing_opportunities_html(items: list[BriefingItem]) -> str:
     """
 
 
-def daily_briefing_html(briefing: DailyBriefing, goals: Optional[list[GoalProgress]] = None) -> str:
-    priorities = briefing_priority_grid_html(briefing.top_priorities, "Today's Best Action", "No immediate action", "PowerMonitor has not found an urgent household priority today.")
-    positives = briefing_priority_grid_html(briefing.positive_outcomes, "You're Doing Well", "No positive signal yet", "PowerMonitor does not have enough positive household data to call out a win today.")
-    watch = briefing_priority_grid_html(briefing.items_to_watch, "Watch This", "Nothing else to watch", "No lower-priority advisor watch items are active today.")
+def daily_briefing_html(
+    briefing: DailyBriefing,
+    goals: Optional[list[GoalProgress]] = None,
+    glance: Optional[GlanceState] = None,
+) -> str:
+    action_items = dedupe_briefing_items([*briefing.top_priorities, *briefing.items_to_watch])
+    positive_items = dedupe_briefing_items(briefing.positive_outcomes)
+    primary_items = action_items[:1]
+    secondary_items = dedupe_briefing_items([*action_items[1:], *positive_items])[:2]
+    actions = home_action_section_html(primary_items)
+    secondary = home_secondary_section_html(secondary_items)
+    change_note = home_change_note([*primary_items, *secondary_items])
     goal_progress = goals_progress_html(goals or [])
-    savings = briefing.estimated_savings_opportunity
-    savings_text = unable_to_estimate()
-    if savings:
-        value = savings.billing_period if savings.billing_period is not None else savings.today
-        if value is not None:
-            savings_text = money(value)
     return f"""
     <section class="report-section briefing-section">
-      <div class="briefing-hero">
+      {home_assistant_hero_html(briefing)}
+      {home_status_strip_html(briefing, glance)}
+      {actions}
+      {secondary}
+      <section class="briefing-block home-change-block">
+        <div class="section-title"><div><span class="eyebrow">What changed?</span><h2>{html.escape(change_note[0])}</h2></div></div>
+        <p class="notice">{html.escape(change_note[1])}</p>
+      </section>
+      {goal_progress}
+    </section>
+    """
+
+
+def home_assistant_hero_html(briefing: DailyBriefing) -> str:
+    headline = trust_wording(briefing.suggested_next_action)
+    if not briefing.top_priorities and not briefing.items_to_watch:
+        headline = "Everything looks normal."
+    return f"""
+      <div class="briefing-hero home-assistant-hero">
         <div>
-          <span class="eyebrow">Daily briefing</span>
-          <h2>{html.escape(briefing.greeting)}</h2>
-          <p>{html.escape(briefing.overall_household_status)}</p>
+          <span class="eyebrow">Home</span>
+          <h2>{html.escape(headline)}</h2>
+          <p>{html.escape(trust_wording(briefing.overall_household_status))}</p>
         </div>
         <div class="briefing-readtime">
           <span>{html.escape(briefing.overall_confidence)} confidence</span>
-          <strong>{briefing.read_time_minutes} min read</strong>
+          <strong>{html.escape(home_attention_summary(briefing))}</strong>
         </div>
       </div>
-      <p class="briefing-headline">{html.escape(briefing.suggested_next_action)}</p>
-      <div class="metrics">
-        {metric("Data freshness", customer_label(briefing.overall_freshness), "Current household data", "primary")}
-        {metric("Savings opportunity", savings_text, customer_label(savings.basis) if savings and savings.basis else "Measured household impacts", "cost")}
-        {metric("Recommendation count", str(len(briefing.advisor_summary)), "Active recommendations", "ev")}
-        {metric("Read time", f"{briefing.read_time_minutes} min", "Briefing estimate", "solar")}
-      </div>
-      {goal_progress}
-      {priorities}
-      {positives}
-      {watch}
-    </section>
     """
+
+
+def home_status_strip_html(briefing: DailyBriefing, glance: Optional[GlanceState]) -> str:
+    charge_title, charge_body, charge_tone = home_charge_summary(glance)
+    spend_title, spend_body, spend_tone = home_spending_summary(briefing)
+    health_title, health_body, health_tone = home_health_summary(briefing, glance)
+    return f"""
+      <div class="home-status-grid">
+        {home_status_tile_html("Can I charge?", charge_title, charge_body, charge_tone)}
+        {home_status_tile_html("Am I spending more than normal?", spend_title, spend_body, spend_tone)}
+        {home_status_tile_html("Is everything healthy?", health_title, health_body, health_tone)}
+      </div>
+    """
+
+
+def home_status_tile_html(question: str, title: str, body: str, tone: str) -> str:
+    return f"""
+      <article class="home-status-tile {html.escape(tone)}">
+        <span>{html.escape(question)}</span>
+        <h3>{html.escape(title)}</h3>
+        <p>{html.escape(body)}</p>
+      </article>
+    """
+
+
+def home_charge_summary(glance: Optional[GlanceState]) -> tuple[str, str, str]:
+    if not glance:
+        return "Use tariff timing.", "Live charging guidance is not available on this report.", "amber"
+    if glance.status == "CHARGE NOW":
+        return "Charge now.", trust_wording(glance.reason), "green"
+    if glance.status == "WAIT":
+        return "Wait if you can.", trust_wording(glance.reason), "amber"
+    if glance.status == "AVOID":
+        return "Use a cheaper window.", trust_wording(glance.reason), "amber"
+    return "Use tariff timing only.", trust_wording(glance.reason), "amber"
+
+
+def home_spending_summary(briefing: DailyBriefing) -> tuple[str, str, str]:
+    impact = briefing.estimated_savings_opportunity
+    value = None
+    if impact:
+        value = impact.billing_period if impact.billing_period is not None else impact.today
+    if value and float(value) > 0:
+        return "We found a possible saving.", f"{money(float(value))} may be worth reviewing this billing period.", "amber"
+    if str(briefing.overall_confidence).lower() == "low":
+        return "Spending needs fresher data.", "PowerMonitor cannot verify enough household data for a confident spending check.", "amber"
+    return "Spending looks normal.", "No unusual bill pressure is showing in the current briefing.", "green"
+
+
+def home_health_summary(briefing: DailyBriefing, glance: Optional[GlanceState]) -> tuple[str, str, str]:
+    if glance and glance.status in {"LIVE DATA UNAVAILABLE", "UNABLE TO VERIFY LIVE CONDITIONS"}:
+        return "Live data needs attention.", trust_wording(glance.reason), "amber"
+    if glance and glance.status == "NO DATA AVAILABLE":
+        return "Waiting for household data.", trust_wording(glance.reason), "amber"
+    if str(briefing.overall_confidence).lower() == "low":
+        return "Confidence is reduced.", "Some readings are missing, so PowerMonitor is being cautious.", "amber"
+    return "Everything looks healthy.", "Current household data is good enough for today's guidance.", "green"
+
+
+def home_attention_summary(briefing: DailyBriefing) -> str:
+    count = len(dedupe_briefing_items([*briefing.top_priorities, *briefing.items_to_watch]))
+    if count == 0:
+        return "Looks normal"
+    if count == 1:
+        return "One thing to check"
+    return "A few things to check"
+
+
+def home_action_section_html(items: list[BriefingPriority]) -> str:
+    if not items:
+        return """
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">What should I do?</span><h2>Nothing important needs action.</h2></div></div>
+        <p class="notice">Everything looks normal. PowerMonitor will call out a specific action when the data supports one.</p>
+      </section>
+        """
+    cards = "".join(briefing_priority_card_html(item, "Primary recommendation") for item in items[:1])
+    return f"""
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">What should I do?</span><h2>{html.escape(home_action_heading(items))}</h2></div></div>
+        <div class="briefing-grid">{cards}</div>
+      </section>
+    """
+
+
+def home_action_heading(items: list[BriefingPriority]) -> str:
+    return "We found one thing worth checking." if len(items) == 1 else "We found a few things worth checking."
+
+
+def home_positive_section_html(items: list[BriefingPriority]) -> str:
+    if not items:
+        return """
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">Good signs</span><h2>Everything looks good today.</h2></div></div>
+        <p class="notice">No positive signal needs a deep dive. The household picture looks steady.</p>
+      </section>
+        """
+    cards = "".join(briefing_priority_card_html(item, "Good sign") for item in items[:2])
+    return f"""
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">Good signs</span><h2>{html.escape(home_positive_heading(items))}</h2></div></div>
+        <div class="briefing-grid two-up">{cards}</div>
+      </section>
+    """
+
+
+def home_secondary_section_html(items: list[BriefingPriority]) -> str:
+    if not items:
+        return """
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">Secondary observations</span><h2>Everything looks good today.</h2></div></div>
+        <p class="notice">No secondary observation needs attention. PowerMonitor will show up to two when something is worth checking.</p>
+      </section>
+        """
+    cards = "".join(briefing_priority_card_html(item, "Secondary observation") for item in items[:2])
+    return f"""
+      <section class="briefing-block">
+        <div class="section-title"><div><span class="eyebrow">Secondary observations</span><h2>{html.escape(home_secondary_heading(items))}</h2></div><p>Up to two</p></div>
+        <div class="briefing-grid two-up">{cards}</div>
+      </section>
+    """
+
+
+def home_secondary_heading(items: list[BriefingPriority]) -> str:
+    if len(items) == 1:
+        return "One other thing is worth knowing."
+    return "Two other things are worth knowing."
+
+
+def home_positive_heading(items: list[BriefingPriority]) -> str:
+    if len(items) == 1:
+        return positive_signal_text(items[0])
+    return "A few household patterns look good today."
+
+
+def positive_signal_text(item: BriefingPriority) -> str:
+    text = f"{item.title} {item.summary}".lower()
+    if "solar" in text:
+        return "Solar production is tracking normally."
+    if "charg" in text or "ev" in text:
+        return "Charging behaviour matches your usual pattern."
+    return "Everything looks good today."
+
+
+def home_change_note(items: list[BriefingPriority]) -> tuple[str, str]:
+    watch_items = [item for item in items if item.status in {"WATCH", "UNKNOWN", "WAIT"}]
+    if not watch_items:
+        return "No important changes.", "Nothing new needs attention in this briefing."
+    item = watch_items[0]
+    return "One thing changed.", trust_wording(item.summary or item.title)
+
+
+def dedupe_briefing_items(items: list[BriefingPriority]) -> list[BriefingPriority]:
+    deduped: list[BriefingPriority] = []
+    seen: set[str] = set()
+    for item in items:
+        key = re.sub(r"[^a-z0-9]+", " ", f"{item.title} {item.recommendation}".lower()).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def goals_progress_html(goals: list[GoalProgress]) -> str:
@@ -3036,8 +3277,8 @@ def goals_progress_html(goals: list[GoalProgress]) -> str:
                 <span>{html.escape(goal.goal.outcome)}</span>
                 <strong>{html.escape(goal.confidence)} confidence</strong>
               </div>
-              <h3>{html.escape(goal.goal.title)}</h3>
-              <p>{html.escape(goal.summary)}</p>
+              <h3>{html.escape(trust_wording(goal.goal.title))}</h3>
+              <p>{html.escape(trust_wording(goal.summary))}</p>
               <div class="briefing-meta">
                 <small>{html.escape(progress)}</small>
                 <small>{html.escape(goal.status.label)}</small>
@@ -3093,8 +3334,8 @@ def briefing_priority_card_html(item: BriefingPriority, eyebrow: str) -> str:
         <span>{html.escape(eyebrow)}</span>
         <strong>{html.escape(item.confidence)} confidence</strong>
       </div>
-      <h3>{html.escape(item.title)}</h3>
-      <p>{html.escape(item.summary)}</p>
+      <h3>{html.escape(trust_wording(item.title))}</h3>
+      <p>{html.escape(trust_wording(item.summary))}</p>
       <div class="briefing-meta">
         <small>{html.escape(item.advisor_type.replace("_", " ").title())}</small>
         <small>{html.escape(briefing_priority_impact(item))}</small>
@@ -3189,7 +3430,7 @@ def setup_task_html(task: SetupTask) -> str:
       <div class="setup-task-main">
         <span>{html.escape(status)}</span>
         <h3>{html.escape(task.title)}</h3>
-        <p>{html.escape(task.rationale)}</p>
+        <p>{html.escape(trust_wording(task.rationale))}</p>
       </div>
       <div class="setup-task-meta">
         <div><span>Priority</span><strong>{html.escape(task.priority.value.title())}</strong></div>
@@ -3213,11 +3454,46 @@ def setup_section_html(section: SetupSection) -> str:
     """
 
 
+def setup_integrations_html(provider_management: Optional[ProviderManager]) -> str:
+    if not provider_management:
+        return ""
+    connected = []
+    optional = []
+    for provider in provider_management.providers():
+        data = provider.as_dict()
+        onboarding = data.get("onboarding") or {}
+        provider_id = str(data.get("provider_id") or provider.provider_id)
+        if provider_id == "smart_meter_readings":
+            continue
+        name = _source_display_name(provider_id, data)
+        if _should_show_data_source(provider_id, data, onboarding):
+            connected.append(name)
+        elif _is_future_optional_source(provider_id, data, onboarding):
+            optional.append(name)
+        elif provider_id == "home_assistant" and not _provider_is_configured_or_available(data, onboarding):
+            optional.append(name)
+    connected_rows = "".join(f"<li>{html.escape(name)}</li>" for name in sorted(set(connected))) or "<li>No integrations connected yet.</li>"
+    optional_rows = "".join(f"<li>{html.escape(name)}</li>" for name in sorted(set(optional))) or "<li>No optional integrations listed yet.</li>"
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Available integrations</span><h2>Connect only what your household uses</h2></div>
+        <p>PowerMonitor can work with imports, live services, and local configuration without showing internal plumbing.</p>
+      </div>
+      <div class="provider-guidance-grid integration-summary-grid">
+        <div><span>Connected</span><ul>{connected_rows}</ul></div>
+        <div><span>Optional</span><ul>{optional_rows}</ul></div>
+      </div>
+    </section>
+    """
+
+
 def setup_page_html(
     setup: Optional[SetupChecklist],
     settings: Optional[Settings] = None,
     promotion_summary: Optional[dict] = None,
     notification_preferences: Optional[dict] = None,
+    provider_management: Optional[ProviderManager] = None,
 ) -> str:
     if not setup:
         return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
@@ -3246,10 +3522,11 @@ def setup_page_html(
       <div class="section-title"><div><span class="eyebrow">Guided setup</span><h2>Start with these basics</h2></div><p>Most households only need billing, tariff, and one data source to begin.</p></div>
       <div class="onboarding-steps">
         <div><span>1</span><strong>Set billing and tariff</strong><p>Use the Billing Cycle panel below for the start day, retailer, and plan.</p></div>
-        <div><span>2</span><strong>Add household data</strong><p>Use Imports for Ocular EV history, or Providers for live/local data when available.</p></div>
-        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a data quality or live data issue.</p></div>
+        <div><span>2</span><strong>Add household data</strong><p>Use Imports for Ocular EV history, or connect a live service such as SolarEdge or Home Assistant.</p></div>
+        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a source or data freshness issue.</p></div>
       </div>
     </section>
+    {setup_integrations_html(provider_management)}
     {billing_cycle_setup_html(settings)}
     <section class="report-section compact-section">
       <div class="section-title">
@@ -3296,8 +3573,9 @@ def home_page_html(
     briefing: DailyBriefing,
     goals: Optional[list[GoalProgress]] = None,
     setup: Optional[SetupChecklist] = None,
+    glance: Optional[GlanceState] = None,
 ) -> str:
-    return setup_progress_card_html(setup) + daily_briefing_html(briefing, goals or [])
+    return daily_briefing_html(briefing, goals or [], glance) + setup_progress_card_html(setup)
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -3678,12 +3956,12 @@ def _provider_onboarding_fallback(data: dict) -> dict:
         "next_scheduled_sync": "Next data refresh",
         "sync_frequency": "Refresh schedule",
         "required_information": ["Provider configuration details"],
-        "why_required": "Provider details let PowerMonitor test access and explain which data is safe to use.",
+        "why_required": "Provider details let PowerMonitor check access and explain which data is safe to use.",
         "connection_status": "Connected and available for analysis." if healthy else "Waiting for setup.",
-        "health_status": friendly_label((data.get("health") or {}).get("collector_status") or "unknown"),
-        "next_step": "No action needed right now." if healthy else "Open this provider's setup details and complete the connection.",
-        "common_failures": ["Expired session or credential", "Provider service unavailable", "No recent data returned"],
-        "recovery_steps": ["Check the required information", "Reconnect or refresh the provider session", "Run Test Connection"],
+        "health_status": trust_wording(friendly_label((data.get("health") or {}).get("collector_status") or "unknown")),
+        "next_step": "No action needed right now." if healthy else "Reconnect live data when convenient. Until then PowerMonitor uses tariff timing and stored readings.",
+        "common_failures": ["Live data sign-in needs attention", "Provider service unavailable", "No recent data returned"],
+        "recovery_steps": ["Check the required information", "Reconnect live data", "Run Test Connection"],
         "technical_details": {
             "lifecycle_state": lifecycle,
             "sync_state": data.get("sync_state"),
@@ -3693,12 +3971,12 @@ def _provider_onboarding_fallback(data: dict) -> dict:
 
 
 def _list_items(items: list[str]) -> str:
-    return "".join(f"<li>{html.escape(str(item))}</li>" for item in items)
+    return "".join(f"<li>{html.escape(trust_wording(item))}</li>" for item in items)
 
 
 def _technical_detail_rows(details: dict) -> str:
     return "".join(
-        f"<div><span>{html.escape(friendly_label(str(key)))}</span><strong>{html.escape(str(value if value is not None else 'None'))}</strong></div>"
+        f"<div><span>{html.escape(friendly_label(str(key)))}</span><strong>{html.escape(trust_wording(value if value is not None else 'None'))}</strong></div>"
         for key, value in details.items()
     )
 
@@ -3754,7 +4032,7 @@ def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
     """
 
 
-def _provider_configuration_form_html(data: dict) -> str:
+def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[str, str, str]]] = None) -> str:
     provider_id = str(data.get("provider_id") or "")
     configuration = data.get("configuration") or {}
     credentials = configuration.get("credentials") or []
@@ -3808,6 +4086,19 @@ def _provider_configuration_form_html(data: dict) -> str:
             <div class="provider-form-grid">{''.join(mapping_fields)}</div>
           </div>
         """
+    action_specs = actions or [
+        ("Save", "save", "submit"),
+        ("Test Connection", "test", "button"),
+        ("Reconnect", "reconnect", "button"),
+        ("Reset", "reset", "button"),
+        ("Disable", "disable", "button"),
+        ("Enable", "enable", "button"),
+        ("Remove", "remove", "button"),
+    ]
+    action_buttons = "".join(
+        f'<button type="{html.escape(button_type)}" data-provider-action="{html.escape(action)}">{html.escape(label)}</button>'
+        for label, action, button_type in action_specs
+    )
     return f"""
       <form class="provider-config-form" data-provider-id="{html.escape(provider_id)}">
         <div class="provider-form-section">
@@ -3816,16 +4107,200 @@ def _provider_configuration_form_html(data: dict) -> str:
         </div>
         {mapping_html}
         <div class="provider-action-row">
-          <button type="submit" data-provider-action="save">Save</button>
-          <button type="button" data-provider-action="test">Test Connection</button>
-          <button type="button" data-provider-action="reconnect">Reconnect</button>
-          <button type="button" data-provider-action="reset">Reset</button>
-          <button type="button" data-provider-action="disable">Disable</button>
-          <button type="button" data-provider-action="enable">Enable</button>
-          <button type="button" data-provider-action="remove">Remove</button>
+          {action_buttons}
         </div>
         <div class="provider-action-result" aria-live="polite"></div>
       </form>
+    """
+
+
+def _provider_is_configured_or_available(data: dict, onboarding: dict) -> bool:
+    state = str(data.get("lifecycle_state") or "")
+    return bool(
+        onboarding.get("connected")
+        or onboarding.get("data_available")
+        or state in {"CONFIGURED", "CONNECTED", "SYNCING", "DEGRADED", "ERROR", "DISABLED"}
+    )
+
+
+def _is_future_optional_source(provider_id: str, data: dict, onboarding: dict) -> bool:
+    state = str(data.get("lifecycle_state") or "")
+    return state == "NOT_CONFIGURED" and provider_id in {"tesla", "amber", "fronius", "enphase"}
+
+
+def _should_show_data_source(provider_id: str, data: dict, onboarding: dict) -> bool:
+    if provider_id == "smart_meter_readings":
+        return False
+    if _is_future_optional_source(provider_id, data, onboarding):
+        return False
+    return _provider_is_configured_or_available(data, onboarding)
+
+
+def _source_kind(provider_id: str, data: dict) -> str:
+    provider_type = str(data.get("provider_type") or "")
+    capabilities = set((data.get("capability_summary") or {}).get("capabilities") or [])
+    if provider_type == "retailer" or provider_id == "synergy_tariff_config":
+        return "configuration"
+    if "import_only" in capabilities or provider_id == "ocular_export":
+        return "import"
+    return "live"
+
+
+def _data_source_title(provider_id: str, data: dict) -> str:
+    if provider_id == "solaredge":
+        return "Solar generation"
+    if provider_id == "ocular_export":
+        return "EV charging history"
+    if provider_id == "synergy_tariff_config":
+        return "Electricity tariff"
+    if provider_id == "home_assistant":
+        return "Home energy sensors"
+    if provider_id == "home_assistant_ocpp":
+        return "EV charger"
+    name = str(data.get("name") or provider_id).replace("_", " ").title()
+    return name
+
+
+def _source_display_name(provider_id: str, data: dict) -> str:
+    if provider_id == "solaredge":
+        return "SolarEdge"
+    if provider_id == "ocular_export":
+        return "Ocular"
+    if provider_id == "synergy_tariff_config":
+        return "Synergy"
+    if provider_id in {"home_assistant", "home_assistant_ocpp"}:
+        return "Home Assistant"
+    if provider_id == "fronius":
+        return "Fronius"
+    if provider_id == "enphase":
+        return "Enphase"
+    if provider_id == "tesla":
+        return "Tesla"
+    if provider_id == "amber":
+        return "Amber"
+    return str(data.get("name") or provider_id).replace("_", " ").title()
+
+
+def _data_source_provides(provider_id: str, data: dict) -> list[str]:
+    if provider_id == "solaredge":
+        return ["Solar generation", "Solar export", "Daily production"]
+    if provider_id == "ocular_export":
+        return ["EV charging history", "Charging energy", "Charging costs"]
+    if provider_id == "synergy_tariff_config":
+        return ["Electricity tariff", "Billing cycle", "Plan comparison"]
+    if provider_id in {"home_assistant", "home_assistant_ocpp"}:
+        return ["Local energy sensors", "EV charger status", "Household readings"]
+    provider_type = str(data.get("provider_type") or "")
+    if provider_type == "solar":
+        return ["Solar generation", "Solar export", "Daily production"]
+    if provider_type == "ev_charger":
+        return ["EV charging history", "Charging energy", "Charging costs"]
+    if provider_type == "retailer":
+        return ["Electricity tariff", "Billing details", "Plan comparison"]
+    return ["Household energy information"]
+
+
+def _data_source_status(kind: str, data: dict, onboarding: dict) -> str:
+    state = str(data.get("lifecycle_state") or onboarding.get("state") or "")
+    if kind == "configuration":
+        return "Connected" if state in {"CONFIGURED", "CONNECTED", "SYNCING"} else "Needs attention"
+    if kind == "import":
+        return "Latest upload available" if onboarding.get("data_available") else "Not connected"
+    if onboarding.get("connected"):
+        return "Connected"
+    if state in {"ERROR", "DEGRADED"}:
+        return "Needs attention"
+    return "Not connected"
+
+
+def _data_source_tone(status: str) -> str:
+    if status in {"Connected", "Latest upload available"}:
+        return "good"
+    if status == "Needs attention":
+        return "bad"
+    return "neutral"
+
+
+def _format_source_timestamp(value: Any, fallback: str = "Not available yet") -> str:
+    if not value:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        local = parsed.astimezone(LOCAL_TIMEZONE)
+        return local.strftime("%-d %b, %-I:%M %p")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
+    provider_id = str(data.get("provider_id") or "")
+    if kind == "import":
+        return """
+          <div class="provider-action-row">
+            <a class="button-link" href="#imports">Upload latest file</a>
+            <a class="button-link" href="#imports">Replace upload</a>
+            <a class="button-link muted" href="#imports">Remove imported history</a>
+          </div>
+        """
+    if kind == "configuration":
+        return """
+          <div class="provider-action-row">
+            <a class="button-link" href="#setup-billing">Edit configuration</a>
+          </div>
+        """
+    live_actions = [("Connect", "save", "submit"), ("Test Connection", "test", "button")]
+    if status in {"Connected", "Needs attention"}:
+        live_actions.append(("Disconnect", "disable", "button"))
+    else:
+        live_actions.append(("Disconnect", "disable", "button"))
+    return _provider_configuration_form_html(data, live_actions)
+
+
+def _data_source_card_html(provider, data: dict, onboarding: dict) -> str:
+    provider_id = str(data.get("provider_id") or provider.provider_id)
+    kind = _source_kind(provider_id, data)
+    status = _data_source_status(kind, data, onboarding)
+    provides = "".join(f"<li>{html.escape(item)}</li>" for item in _data_source_provides(provider_id, data))
+    last_updated = _format_source_timestamp(onboarding.get("last_successful_sync"), "Not updated yet")
+    if kind == "configuration":
+        last_updated = "Configured" if status == "Connected" else "Needs setup"
+    elif kind == "import" and status == "Latest upload available":
+        last_updated = _format_source_timestamp(onboarding.get("last_successful_sync"), "Uploaded previously")
+    setup_body = f"""
+      <div class="provider-guidance-grid">
+        <div><span>What this needs</span><strong>{html.escape(', '.join(onboarding.get("required_information") or ["Connection details"]))}</strong></div>
+        <div><span>Why it matters</span><strong>{html.escape(trust_wording(onboarding.get("why_required") or ""))}</strong></div>
+        <div><span>If something looks wrong</span><ul>{_list_items(onboarding.get("recovery_steps") or [])}</ul></div>
+      </div>
+    """
+    mapping_body = _provider_entity_mapping_html((data.get("configuration") or {}).get("entity_mapping") or (data.get("diagnostics") or {}).get("entity_mapping"))
+    technical_body = f"""
+      <div class="config-grid">{_technical_detail_rows(onboarding.get("technical_details") or {})}</div>
+      <div class="config-grid">
+        <div><span>Lifecycle</span><strong>{html.escape(str(data.get("lifecycle_state") or "unknown"))}</strong></div>
+        <div><span>Sync state</span><strong>{html.escape(str(data.get("sync_state") or "unknown"))}</strong></div>
+        <div><span>Runtime state</span><strong>{html.escape(friendly_label(str(onboarding.get("runtime_state") or "Unknown")))}</strong></div>
+        <div><span>Observation count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("observation_count", 0)))}</strong></div>
+        <div><span>Promotion count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("promotion_count", 0)))}</strong></div>
+      </div>
+    """
+    return f"""
+    <div id="system-provider-{html.escape(provider_id)}" class="provider-status-card {_data_source_tone(status)} data-source-card">
+      <div class="provider-status-head">
+        <span>{html.escape(_data_source_title(provider_id, data))}</span>
+        <strong>{html.escape(status)}</strong>
+      </div>
+      <div class="provider-status-grid data-source-grid">
+        <div><span>Source</span><strong>{html.escape(_source_display_name(provider_id, data))}</strong></div>
+        <div><span>Status</span><strong>{html.escape(status)}</strong></div>
+        <div><span>Last updated</span><strong>{html.escape(last_updated)}</strong></div>
+      </div>
+      <div class="source-provides"><span>Provides</span><ul>{provides}</ul></div>
+      {_data_source_actions_html(kind, data, status)}
+      {disclosure_html("Setup help", "What this source needs and why", setup_body, css_class="provider-details")}
+      {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body and kind == "live" else ""}
+      {disclosure_html("Advanced Diagnostics", "Technical source details for troubleshooting", technical_body, css_class="provider-details advanced-diagnostics")}
+    </div>
     """
 
 
@@ -3833,81 +4308,22 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
     if not provider_management:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider connections</h3><span>No connection manager</span></div>
-      <p class="notice">Connection status is unavailable. Existing readings can still be shown, but provider setup guidance may be incomplete.</p>
+      <div class="chart-heading"><h3>Your Data Sources</h3><span>Unavailable</span></div>
+      <p class="notice">PowerMonitor cannot load data source guidance right now. Existing readings can still be shown.</p>
     </div>
     """
     rows = []
     for provider in provider_management.providers():
         data = provider.as_dict()
         onboarding = data.get("onboarding") or _provider_onboarding_fallback(data)
-        capabilities = ", ".join(
-            capability.replace("_", " ").title()
-            for capability in data["capability_summary"].get("capabilities", [])
-        ) or "No capabilities"
-        state = str(onboarding.get("state") or data["lifecycle_state"])
-        tone = "good" if onboarding.get("connected") and onboarding.get("healthy") else "bad" if state in {"ERROR", "WARNING", "NOT_CONFIGURED", "CONFIGURATION_REQUIRED"} else "neutral"
-        last_sync = onboarding.get("last_successful_sync") or "Never synced"
-        data_available = "Yes" if onboarding.get("data_available") else "Not yet"
-        actions = " ".join(
-            f'<span class="chip">{html.escape(friendly_label(action))}</span>'
-            for action in data.get("actions", [])[:4]
-        )
-        setup_body = f"""
-          <div class="provider-guidance-grid">
-            <div><span>Required information</span><strong>{html.escape(', '.join(onboarding.get("required_information") or ["Provider details"]))}</strong></div>
-            <div><span>Why it is required</span><strong>{html.escape(str(onboarding.get("why_required") or ""))}</strong></div>
-            <div><span>Common failures</span><ul>{_list_items(onboarding.get("common_failures") or [])}</ul></div>
-            <div><span>Recovery steps</span><ul>{_list_items(onboarding.get("recovery_steps") or [])}</ul></div>
-          </div>
-        """
-        mapping_body = _provider_entity_mapping_html((data.get("configuration") or {}).get("entity_mapping") or (data.get("diagnostics") or {}).get("entity_mapping"))
-        configuration_body = _provider_configuration_form_html(data)
-        technical_body = f"""
-          <div class="config-grid">{_technical_detail_rows(onboarding.get("technical_details") or {})}</div>
-          <div class="config-grid">
-            <div><span>Lifecycle</span><strong>{html.escape(str(data.get("lifecycle_state") or "unknown"))}</strong></div>
-            <div><span>Sync state</span><strong>{html.escape(str(data.get("sync_state") or "unknown"))}</strong></div>
-            <div><span>Observation count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("observation_count", 0)))}</strong></div>
-            <div><span>Promotion count</span><strong>{html.escape(str((data.get("diagnostics") or {}).get("promotion_count", 0)))}</strong></div>
-          </div>
-        """
-        rows.append(
-            f"""
-            <div id="system-provider-{html.escape(provider.provider_id)}" class="provider-status-card {tone}">
-              <div class="provider-status-head">
-                <span>{html.escape(provider.name)}</span>
-                <strong>{html.escape(str(onboarding.get("state_label") or friendly_label(state)))}</strong>
-              </div>
-              <div class="provider-status-grid">
-                <div><span>Connected?</span><strong>{html.escape('Yes' if onboarding.get('connected') else 'Not yet')}</strong></div>
-                <div><span>Healthy?</span><strong>{html.escape(str(onboarding.get("health_status") or "Unknown"))}</strong></div>
-                <div><span>Last updated</span><strong>{html.escape(str(last_sync))}</strong></div>
-                <div><span>Data available?</span><strong>{html.escape(data_available)}</strong></div>
-                <div><span>Sync frequency</span><strong>{html.escape(str(onboarding.get("sync_frequency") or "Unknown"))}</strong></div>
-                <div><span>Next scheduled sync</span><strong>{html.escape(str(onboarding.get("next_scheduled_sync") or "Unknown"))}</strong></div>
-                <div><span>Connection state</span><strong>{html.escape(friendly_label(str(onboarding.get("runtime_state") or "Unknown")))}</strong></div>
-                <div><span>Last refresh time</span><strong>{html.escape(str(onboarding.get("collector_duration") or "Not recorded"))}</strong></div>
-                <div><span>Consecutive failures</span><strong>{html.escape(str(onboarding.get("consecutive_failures", 0)))}</strong></div>
-                <div><span>Retry countdown</span><strong>{html.escape(str(onboarding.get("retry_countdown") or "No retry scheduled"))}</strong></div>
-                <div><span>Provider health</span><strong>{html.escape(str(onboarding.get("health_score", "Unknown")))}%</strong></div>
-                <div><span>Connection status</span><strong>{html.escape(str(onboarding.get("connection_status") or "Unknown"))}</strong></div>
-                <div><span>What should I do next?</span><strong>{html.escape(str(onboarding.get("next_step") or "Review provider setup."))}</strong></div>
-              </div>
-              <p>Provides: {html.escape(capabilities)}.</p>
-              <small>{actions}</small>
-              {disclosure_html("Configure provider", "Save settings, test, reconnect, reset, enable, disable, or remove", configuration_body, open_by_default=True, css_class="provider-details provider-config-details")}
-              {disclosure_html("Setup and recovery", "What is needed, why, and how to fix common failures", setup_body, css_class="provider-details")}
-              {disclosure_html("Entity mapping", "Selected entities, recommendations, validation, and availability", mapping_body, css_class="provider-details") if mapping_body else ""}
-              {disclosure_html("Technical diagnostics", "Connection lifecycle, sync, source readings, and local data details", technical_body, css_class="provider-details")}
-            </div>
-            """
-        )
+        if not _should_show_data_source(str(data.get("provider_id") or provider.provider_id), data, onboarding):
+            continue
+        rows.append(_data_source_card_html(provider, data, onboarding))
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider connections</h3><span>{len(rows)} providers</span></div>
-      <p class="scenario-note">Select a provider, check what information is required, test the connection, then use the status and sync details to decide what to do next.</p>
-      <div class="completeness-grid">{''.join(rows)}</div>
+      <div class="chart-heading"><h3>Your Data Sources</h3><span>{len(rows)} active</span></div>
+      <p class="scenario-note">These are the household sources PowerMonitor can use today. Optional integrations live in Setup until you connect them.</p>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No household data sources are connected yet.</p>'}</div>
     </div>
     """
 
@@ -3963,6 +4379,97 @@ def provider_observations_html(summary: Optional[dict]) -> str:
     <div class="system-card">
       <div class="chart-heading"><h3>Source readings</h3><span>{int(summary.get("count") or 0)} recent</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before source reading history. New imports and live data refreshes will populate readings as they run.</p>'}</div>
+    </div>
+    """
+
+
+def system_trust_summary_html(provider_management: Optional[ProviderManager], summary: Summary) -> str:
+    checklist = []
+    limitations = []
+    if provider_management:
+        for provider in provider_management.providers():
+            data = provider.as_dict()
+            onboarding = data.get("onboarding") or {}
+            provider_id = str(data.get("provider_id") or provider.provider_id)
+            if provider_id == "smart_meter_readings":
+                continue
+            kind = _source_kind(provider_id, data)
+            status = _data_source_status(kind, data, onboarding)
+            if _should_show_data_source(provider_id, data, onboarding):
+                label = _source_display_name(provider_id, data)
+                detail = "Configured" if kind == "configuration" else _format_source_timestamp(onboarding.get("last_successful_sync"), "Available")
+                prefix = "✓" if status in {"Connected", "Latest upload available"} else "!"
+                checklist.append((prefix, label, detail, status))
+            elif _is_future_optional_source(provider_id, data, onboarding):
+                checklist.append(("○", _source_display_name(provider_id, data), "Not connected (optional)", "Optional"))
+            if kind == "import" and _should_show_data_source(provider_id, data, onboarding) and not onboarding.get("connected"):
+                limitations.append(f"{_source_display_name(provider_id, data)} is historical upload data, not a live service.")
+            elif not _is_future_optional_source(provider_id, data, onboarding) and data.get("lifecycle_state") in {"NOT_CONFIGURED", "ERROR", "DEGRADED"}:
+                limitations.append(f"{_source_display_name(provider_id, data)} needs attention.")
+    if not checklist and int(getattr(summary, "intervals", 0) or 0) > 0:
+        checklist.append(("✓", "Recent household information", "Available", "Connected"))
+    source_rows = "".join(
+        f"""
+        <li><strong>{html.escape(prefix)} {html.escape(label)}</strong><span>{html.escape(detail)}</span></li>
+        """
+        for prefix, label, detail, status in checklist
+    ) or "<li><strong>! No household data</strong><span>Add a data source or upload history.</span></li>"
+    limitation_rows = _list_items(limitations[:3])
+    confidence_label = "High confidence" if checklist and not limitations else "Limited confidence"
+    confidence_copy = (
+        "Today's advice is based on household data that is available and recent enough for practical guidance."
+        if confidence_label == "High confidence"
+        else "Some live readings are missing or need attention, so PowerMonitor is using the best recent household information available."
+    )
+    return f"""
+    <div class="system-card trust-summary-card">
+      <div class="chart-heading"><h3>Today's advice uses</h3><span>{html.escape(confidence_label)}</span></div>
+      <p>{html.escape(confidence_copy)}</p>
+      <div class="provider-guidance-grid trust-checklist">
+        <div><span>Information PowerMonitor can use</span><ul>{source_rows}</ul></div>
+        <div><span>Limits to keep in mind</span>{f'<ul>{limitation_rows}</ul>' if limitation_rows else '<strong>No major source limitations detected.</strong>'}</div>
+      </div>
+    </div>
+    """
+
+
+def system_action_needed_html(setup: Optional[SetupChecklist], provider_management: Optional[ProviderManager]) -> str:
+    actions = []
+    if setup and setup.progress.remaining_tasks:
+        for task in setup.progress.remaining_tasks[:2]:
+            actions.append((task.title, task.rationale, task.action_href, task.action_label))
+    if provider_management:
+        for provider in provider_management.providers():
+            data = provider.as_dict()
+            onboarding = data.get("onboarding") or {}
+            provider_id = str(data.get("provider_id") or provider.provider_id)
+            if provider_id == "smart_meter_readings" or _is_future_optional_source(provider_id, data, onboarding):
+                continue
+            status = _data_source_status(_source_kind(provider_id, data), data, onboarding)
+            if status == "Needs attention":
+                actions.append((_source_display_name(provider_id, data), "This data source needs a quick check before advice can use it confidently.", f"#system-provider-{provider_id}", "Review source"))
+    if not actions:
+        return """
+        <div class="system-card">
+          <div class="chart-heading"><h3>Is there anything I need to do?</h3><span>Nothing urgent</span></div>
+          <p class="scenario-note">No required setup or data-source fixes are active right now.</p>
+        </div>
+        """
+    rows = "".join(
+        f"""
+        <div class="completeness-row bad">
+          <span>{html.escape(title)}</span>
+          <strong>{html.escape(action_label)}</strong>
+          <small>{html.escape(trust_wording(detail))}</small>
+          <a href="{html.escape(href)}">{html.escape(action_label)}</a>
+        </div>
+        """
+        for title, detail, href, action_label in actions[:3]
+    )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Is there anything I need to do?</h3><span>{len(actions)} item{'s' if len(actions) != 1 else ''}</span></div>
+      <div class="completeness-grid">{rows}</div>
     </div>
     """
 
@@ -4363,12 +4870,14 @@ def system_page_html(
         {metric("Last successful refresh", display_timestamp(health.get("last_successful_collection")), "Most recent successful data refresh", "grid")}
         {metric("Last failure", display_timestamp(health.get("last_collection_failure")), str(health.get("collector_message") or health.get("failure_type") or "No recent failure recorded"), "bad" if health.get("status") != "ok" and health.get("last_collection_failure") else "grid")}
         {metric("Report age", f"{float(health.get('report_age_minutes') or 0):.1f} minutes", "Freshness of generated dashboard", "grid")}
-        {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest SolarEdge interval", "grid")}
+        {metric("Latest reading", display_timestamp(health.get("latest_measurement_time")), "Latest household reading", "grid")}
         {metric("Setup completion", f"{setup.progress.completion_pct}%" if setup else "Unavailable", "Setup readiness", "good" if setup and setup.progress.complete else "grid")}
       </div>
     """
     advanced_body = f"""
       {provider_runtime_html(provider_runtime)}
+      {provider_registry_html(provider_registry)}
+      {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
       {household_behaviour_html(household_behaviour)}
       {household_anomalies_html(household_anomalies)}
       {decision_provenance_html(household_decisions, advisor_explanations)}
@@ -4395,16 +4904,16 @@ def system_page_html(
     """
     return f"""
     <section id="system-collector" class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">System</span><h2>Can I trust the data?</h2></div><p>Start with household status. Open deeper checks only when something looks wrong.</p></div>
+      <div class="section-title"><div><span class="eyebrow">System</span><h2>Can I trust today's advice?</h2></div><p>Start with whether the current guidance is based on enough household information.</p></div>
+      {system_trust_summary_html(provider_management, summary)}
+      {system_action_needed_html(setup, provider_management)}
       <div class="system-overview-grid">
-        {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
         {data_completeness_html(summary, settings)}
       </div>
-      {disclosure_html("Providers", "Connection status and next steps", f'''
+      {disclosure_html("Your Data Sources", "What PowerMonitor knows about your household", f'''
         {provider_management_html(provider_management)}
-        {provider_registry_html(provider_registry)}
       ''', open_by_default=True, css_class="system-group")}
-      {disclosure_html("Live Data", "Data recency, failures, and report freshness", f'<div id="system-live-data">{collector_body}</div>', open_by_default=True, css_class="system-group")}
+      {disclosure_html("Data freshness", "Recent updates, failures, and report freshness", f'<div id="system-live-data">{collector_body}</div>', css_class="system-group")}
       {disclosure_html("Recommendations", "Active household recommendations and confidence", f'''
         {household_decisions_html(household_decisions, decision_summary)}
       ''', css_class="system-group")}
@@ -4456,7 +4965,7 @@ def imports_page_html(
         capability_note = f"""
         <div class="config-grid">
           <div><span>Upload can add</span><strong>{html.escape(ev.label if ev else "EV charging")}</strong></div>
-          <div><span>Import framework</span><strong>{html.escape("Available" if imports and imports.available else "Unavailable")}</strong></div>
+          <div><span>Upload support</span><strong>{html.escape("Available" if imports and imports.available else "Unavailable")}</strong></div>
         </div>
         """
     setup_tasks = []
@@ -4492,7 +5001,7 @@ def imports_page_html(
         <div class="completeness-row {'good' if getattr(provider, 'lifecycle_state', None) and provider.lifecycle_state.value != 'NOT_CONFIGURED' else 'bad'}">
           <span>{html.escape(provider.name)}</span>
           <strong>{html.escape(getattr(getattr(provider, 'lifecycle_state', None), 'value', getattr(getattr(provider, 'status', None), 'value', 'unknown')).replace("_", " ").title())}</strong>
-          <small>{html.escape(provider.note or 'Import provider metadata')} <a href="#system-provider-{html.escape(provider.provider_id)}">Open provider setup</a></small>
+          <small>{html.escape(provider.note or 'Import support')} <a href="#system-provider-{html.escape(provider.provider_id)}">Open data source setup</a></small>
         </div>
         """
         for provider in import_providers
@@ -4502,24 +5011,24 @@ def imports_page_html(
         observation_rows = "".join(
             f"""
             <div class="completeness-row neutral">
-              <span>{html.escape(str(item.get("provider_id") or "Unknown provider"))}</span>
-              <strong>{html.escape(str(item.get("observation_type") or "Observation").replace("_", " ").title())}</strong>
+              <span>{html.escape(str(item.get("provider_id") or "Unknown source"))}</span>
+              <strong>{html.escape(str(item.get("observation_type") or "Reading").replace("_", " ").title())}</strong>
               <small>{html.escape(str(item.get("capability") or ""))}</small>
             </div>
             """
             for item in provider_observations.get("latest", [])[:6]
         )
     provider_html = (
-        f'<div class="system-card"><div class="chart-heading"><h3>Supported import providers</h3><span>Provider Management</span></div><div class="completeness-grid">{provider_rows}</div></div>'
+        f'<div class="system-card"><div class="chart-heading"><h3>Supported uploads</h3><span>Import sources</span></div><div class="completeness-grid">{provider_rows}</div></div>'
         if provider_rows else ""
     )
     observation_html = (
-        f'<div class="system-card"><div class="chart-heading"><h3>Observation providers</h3><span>Latest provider-created observations</span></div><div class="completeness-grid">{observation_rows}</div></div>'
+        f'<div class="system-card"><div class="chart-heading"><h3>Recent source readings</h3><span>Latest uploaded or live readings</span></div><div class="completeness-grid">{observation_rows}</div></div>'
         if observation_rows else ""
     )
     import_guidance = """
       <div class="onboarding-steps">
-        <div><span>1</span><strong>Choose provider export</strong><p>PowerMonitor currently supports Ocular EV charging history Excel exports.</p></div>
+        <div><span>1</span><strong>Choose source export</strong><p>PowerMonitor currently supports Ocular EV charging history Excel exports.</p></div>
         <div><span>2</span><strong>Preview before saving</strong><p>The preview checks rows, dates, energy totals, and validation issues before anything is imported.</p></div>
         <div><span>3</span><strong>Import updates the dashboard</strong><p>Accepted sessions are matched to your household and used in bills, EV analytics, and confidence messaging.</p></div>
       </div>
@@ -4551,7 +5060,7 @@ def imports_page_html(
     <section class="report-section import-panel compact-section">
       <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
       <table class="responsive-table">
-        <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th><th>Observations</th></tr></thead>
+        <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th><th>Readings</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </section>
@@ -4971,11 +5480,11 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist)}
+    {home_page_html(briefing, goals, setup_checklist, glance)}
   </section>
   <section id="setup" class="page">
     {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
-    {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict())}
+    {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management)}
   </section>
   <section id="recommendations" class="page">
     {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.")}
@@ -5015,7 +5524,7 @@ def write_html(
     {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
   </section>
   <section id="system" class="page">
-    {page_heading_html("Can I trust the data?", "Connected sources, completeness, confidence, collection health, and privacy-safe status.")}
+    {page_heading_html("Can I trust today's advice?", "Provider status, confidence, household data limits, and privacy-safe diagnostics.")}
     {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
   </section>
 """
@@ -5239,6 +5748,7 @@ def write_html(
     .action-card.green {{ background:#f3fbf7; border-color:#cce9dc; }} .action-card.amber {{ background:#fffaf0; border-color:#eeddb0; }} .action-card.red {{ background:#fff5f3; border-color:#f0cec8; }}
     .briefing-section {{ display:grid; gap:18px; }}
     .briefing-hero {{ display:flex; align-items:flex-start; justify-content:space-between; gap:28px; padding:26px; color:#fff; background:linear-gradient(135deg,#111816,#285140); border-radius:24px; }}
+    .home-assistant-hero {{ min-height:210px; align-items:center; }}
     .briefing-hero h2 {{ max-width:760px; color:#fff; font-size:34px; }}
     .briefing-hero p {{ max-width:700px; margin:8px 0 0; color:rgba(255,255,255,.74); }}
     .briefing-readtime {{ flex:0 0 150px; padding:14px; text-align:right; background:rgba(255,255,255,.1); border-radius:16px; }}
@@ -5246,6 +5756,15 @@ def write_html(
     .briefing-readtime span {{ color:rgba(255,255,255,.64); }}
     .briefing-readtime strong {{ display:block; margin-top:5px; font-size:20px; letter-spacing:-.035em; }}
     .briefing-headline {{ margin:0; color:#2f453e; font-size:20px; font-weight:750; letter-spacing:-.025em; }}
+    .home-status-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
+    .home-status-tile {{ min-height:154px; padding:19px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .home-status-tile span {{ display:block; color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .home-status-tile h3 {{ margin:20px 0 6px; font-size:22px; letter-spacing:-.035em; }}
+    .home-status-tile p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.45; }}
+    .home-status-tile.green {{ background:#f3fbf7; border-color:#cce9dc; }}
+    .home-status-tile.amber {{ background:#fffaf0; border-color:#eeddb0; }}
+    .home-status-tile.red {{ background:#fff5f3; border-color:#f0cec8; }}
+    .home-change-block .notice {{ margin:0; }}
     .energy-score-card {{ display:grid; grid-template-columns:180px 1fr; gap:18px; padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .energy-score-main {{ display:grid; align-content:center; min-height:150px; padding:18px; color:#fff; background:linear-gradient(135deg,#111816,#2d6b52); border-radius:18px; }}
     .energy-score-main span,.energy-score-main small,.energy-score-factors span {{ font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
@@ -5335,12 +5854,18 @@ def write_html(
     .provider-status-grid span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-status-grid strong {{ margin-top:3px; font-size:12px; line-height:1.3; }}
     .provider-status-card p {{ margin:9px 0 0; color:var(--muted); font-size:12px; }}
+    .data-source-grid {{ grid-template-columns:repeat(3,minmax(0,1fr)); }}
+    .source-provides {{ margin-top:10px; padding:10px; background:rgba(255,255,255,.72); border-radius:10px; }}
+    .source-provides span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .source-provides ul {{ margin:6px 0 0; padding-left:17px; color:var(--ink); font-size:12px; line-height:1.45; }}
     .provider-details {{ margin-top:10px; background:rgba(255,255,255,.68); }}
     .provider-guidance-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
     .provider-guidance-grid div {{ padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
     .provider-guidance-grid span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-guidance-grid strong {{ display:block; margin-top:4px; font-size:12px; line-height:1.35; }}
     .provider-guidance-grid ul {{ margin:6px 0 0; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.4; }}
+    .trust-checklist li {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; }}
+    .trust-checklist li span {{ text-align:right; text-transform:none; letter-spacing:0; font-size:11px; font-weight:650; }}
     .provider-config-form {{ display:grid; gap:12px; }}
     .provider-form-section > span {{ display:block; margin:0 0 8px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
@@ -5351,6 +5876,8 @@ def write_html(
     .provider-form-grid input {{ width:100%; min-height:38px; margin-top:5px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; }}
     .provider-action-row {{ display:flex; flex-wrap:wrap; gap:8px; }}
     .provider-action-row button {{ min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
+    .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
+    .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-row button[data-provider-action="remove"],.provider-action-row button[data-provider-action="disable"] {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
     .provider-action-row button[data-provider-action="reset"] {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-result {{ display:none; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
@@ -5479,7 +6006,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
@@ -5500,7 +6027,8 @@ def write_html(
       .hero-alert {{ align-items:flex-start; flex-direction:column; }}
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
       .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}
-      .briefing-hero {{ flex-direction:column; padding:20px; }} .briefing-readtime {{ flex:0 0 auto; width:100%; text-align:left; }}
+      .briefing-hero {{ flex-direction:column; padding:20px; }} .home-assistant-hero {{ min-height:0; }} .briefing-readtime {{ flex:0 0 auto; width:100%; text-align:left; }}
+      .home-status-tile {{ min-height:auto; padding:16px; }} .home-status-tile h3 {{ margin-top:16px; font-size:20px; }}
       .briefing-grid,.briefing-grid.two-up {{ grid-template-columns:1fr; }}
       .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}
       .bar-label {{ min-width:0; }} .bar-label span {{ overflow-wrap:anywhere; }}
@@ -5614,13 +6142,17 @@ def write_html(
         body: JSON.stringify(payload)
       }});
       const data = await response.json();
-      renderResult(result, data.action || {{
+      const action = data.action || {{
         success: false,
         status: "failure",
         user_message: data.error || "Provider action failed.",
         next_step: "Review the provider form and try again.",
         technical_details: data
-      }});
+      }};
+      renderResult(result, action);
+      if (actionName === "reconnect" && action.success) {{
+        window.setTimeout(() => window.location.reload(), 700);
+      }}
     }} catch (error) {{
       renderResult(result, {{
         success: false,

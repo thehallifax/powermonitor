@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
-from engine.models import DecisionTimeline, Goal, GoalProgress, GoalStatus, TimelineEntry
+from engine.models import BriefingPriority, DailyBriefing, DecisionTimeline, FinancialImpact, Goal, GoalProgress, GoalStatus, TimelineEntry
 from engine.provider_framework import ProviderCapability
 from presentation.glance import GlanceState
 
@@ -46,24 +46,26 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertNotIn("<details class=\"disclosure-panel\" open>", closed)
         self.assertIn('<details class="disclosure-panel" open>', opened)
 
-    def test_provider_cards_answer_connection_health_update_and_next_step(self):
+    def test_import_data_source_card_uses_upload_actions(self):
         provider = SimpleNamespace(
             provider_id="ocular_export",
             name="Ocular export",
             as_dict=lambda: {
-                "lifecycle_state": "NOT_CONFIGURED",
-                "capability_summary": {"capabilities": ["ev_sessions"]},
-                "diagnostics": {"last_successful_sync": None},
+                "provider_id": "ocular_export",
+                "provider_type": "ev_charger",
+                "lifecycle_state": "CONFIGURED",
+                "capability_summary": {"capabilities": ["ev_sessions", "import_only"]},
+                "diagnostics": {"last_successful_sync": "2026-07-01T18:20:00+08:00"},
                 "health": {"collector_status": "not_configured"},
-                "sync_state": "NEVER_SYNCED",
+                "sync_state": "SYNCED",
                 "actions": ["configure"],
                 "onboarding": {
-                    "state": "NOT_CONFIGURED",
-                    "state_label": "Not Configured",
+                    "state": "READY_TO_CONNECT",
+                    "state_label": "Historical Data Available",
                     "connected": False,
-                    "healthy": False,
-                    "data_available": False,
-                    "last_successful_sync": None,
+                    "healthy": True,
+                    "data_available": True,
+                    "last_successful_sync": "2026-07-01T18:20:00+08:00",
                     "next_scheduled_sync": "Next manual import",
                     "sync_frequency": "Manual import",
                     "required_information": ["A supported export file when you import history"],
@@ -81,18 +83,134 @@ class MobilePresentationTests(unittest.TestCase):
 
         html = report.provider_management_html(manager)
 
-        self.assertIn("Connected?", html)
-        self.assertIn("Healthy?", html)
-        self.assertIn("Last updated", html)
-        self.assertIn("Data available?", html)
-        self.assertIn("Sync frequency", html)
-        self.assertIn("Next scheduled sync", html)
-        self.assertIn("What should I do next?", html)
-        self.assertIn("Setup and recovery", html)
-        self.assertIn("Technical diagnostics", html)
-        self.assertIn("Not yet", html)
-        self.assertIn("provider-config-details", html)
-        self.assertIn("<details class=\"disclosure-panel provider-details provider-config-details\" open>", html)
+        self.assertIn("Your Data Sources", html)
+        self.assertIn("EV charging history", html)
+        self.assertIn("Status", html)
+        self.assertIn("Latest upload available", html)
+        self.assertIn("Provides", html)
+        self.assertIn("Charging energy", html)
+        self.assertIn("Charging costs", html)
+        self.assertIn("Upload latest file", html)
+        self.assertIn("Replace upload", html)
+        self.assertIn("Remove imported history", html)
+        self.assertIn("Setup help", html)
+        self.assertIn("Advanced Diagnostics", html)
+        self.assertNotIn("Connected?", html)
+        self.assertNotIn("Provider Health", html)
+        self.assertNotIn("Test Connection", html)
+        self.assertNotIn("Reconnect", html)
+        self.assertNotIn("provider-config-details", html)
+
+    def test_live_data_source_card_uses_connection_actions_not_uploads(self):
+        provider = SimpleNamespace(
+            provider_id="solaredge",
+            name="SolarEdge",
+            as_dict=lambda: {
+                "provider_id": "solaredge",
+                "provider_type": "solar",
+                "lifecycle_state": "CONNECTED",
+                "capability_summary": {"capabilities": ["interval_history", "daily_summary"]},
+                "diagnostics": {"last_successful_sync": "2026-07-02T20:35:00+08:00"},
+                "health": {"collector_status": "ok"},
+                "sync_state": "SYNCED",
+                "actions": ["configure"],
+                "configuration": {"credentials": [], "entity_mapping": None},
+                "onboarding": {
+                    "state": "CONNECTED",
+                    "state_label": "Connected",
+                    "connected": True,
+                    "healthy": True,
+                    "data_available": True,
+                    "last_successful_sync": "2026-07-02T20:35:00+08:00",
+                    "required_information": ["SolarEdge session"],
+                    "why_required": "Solar access lets PowerMonitor explain generation.",
+                    "recovery_steps": ["Run Test Connection"],
+                    "technical_details": {},
+                },
+            },
+        )
+
+        html = report.provider_management_html(SimpleNamespace(providers=lambda: [provider]))
+
+        self.assertIn("Solar generation", html)
+        self.assertIn("Source", html)
+        self.assertIn("SolarEdge", html)
+        self.assertIn("Solar export", html)
+        self.assertIn("Daily production", html)
+        self.assertIn("Connect", html)
+        self.assertIn("Test Connection", html)
+        self.assertIn("Disconnect", html)
+        self.assertNotIn("Upload latest file", html)
+        self.assertNotIn("Replace upload", html)
+
+    def test_smart_meter_source_is_not_fabricated(self):
+        provider = SimpleNamespace(
+            provider_id="smart_meter_readings",
+            name="Smart meter readings",
+            as_dict=lambda: {
+                "provider_id": "smart_meter_readings",
+                "provider_type": "smart_meter",
+                "lifecycle_state": "CONFIGURED",
+                "capability_summary": {"capabilities": ["interval_history"]},
+                "diagnostics": {"last_successful_sync": "2026-07-02T20:35:00+08:00"},
+                "health": {"collector_status": "ok"},
+                "sync_state": "SYNCED",
+                "actions": [],
+                "onboarding": {"connected": True, "data_available": True},
+            },
+        )
+
+        html = report.provider_management_html(SimpleNamespace(providers=lambda: [provider]))
+
+        self.assertNotIn("Smart meter", html)
+        self.assertIn("No household data sources are connected yet", html)
+
+    def test_setup_integrations_group_connected_and_optional_sources(self):
+        connected = SimpleNamespace(
+            provider_id="solaredge",
+            name="SolarEdge",
+            as_dict=lambda: {
+                "provider_id": "solaredge",
+                "provider_type": "solar",
+                "lifecycle_state": "CONNECTED",
+                "capability_summary": {"capabilities": ["daily_summary"]},
+                "diagnostics": {},
+                "onboarding": {"connected": True, "data_available": True},
+            },
+        )
+        optional = SimpleNamespace(
+            provider_id="tesla",
+            name="Tesla",
+            as_dict=lambda: {
+                "provider_id": "tesla",
+                "provider_type": "ev_charger",
+                "lifecycle_state": "NOT_CONFIGURED",
+                "capability_summary": {"capabilities": ["ev_sessions"]},
+                "diagnostics": {},
+                "onboarding": {"connected": False, "data_available": False},
+            },
+        )
+        smart_meter = SimpleNamespace(
+            provider_id="smart_meter_readings",
+            name="Smart meter readings",
+            as_dict=lambda: {
+                "provider_id": "smart_meter_readings",
+                "provider_type": "smart_meter",
+                "lifecycle_state": "CONFIGURED",
+                "capability_summary": {"capabilities": ["interval_history"]},
+                "diagnostics": {},
+                "onboarding": {"connected": True, "data_available": True},
+            },
+        )
+
+        html = report.setup_integrations_html(SimpleNamespace(providers=lambda: [connected, optional, smart_meter]))
+
+        self.assertIn("Available integrations", html)
+        self.assertIn("Connected", html)
+        self.assertIn("SolarEdge", html)
+        self.assertIn("Optional", html)
+        self.assertIn("Tesla", html)
+        self.assertNotIn("Smart meter", html)
 
     def test_import_provider_cards_deep_link_to_provider_setup(self):
         provider = SimpleNamespace(
@@ -168,6 +286,67 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Return Home", glance_html)
         self.assertIn('href="#home"', glance_html)
 
+    def test_home_page_prioritises_assistant_summary_and_dedupes_cards(self):
+        priority = BriefingPriority(
+            advisor_id="charging",
+            advisor_type="EV_CHARGING",
+            title="Wait for cheaper charging",
+            summary="Charging is cheaper later tonight.",
+            recommendation="Wait 18 minutes for cheaper charging.",
+            status="WAIT",
+            confidence="Medium",
+            confidence_reason="Some uncertainty remains.",
+            freshness="Current household data",
+            estimated_financial_impact=FinancialImpact(billing_period=4.5),
+            supporting_advisors=["Charging"],
+        )
+        briefing = DailyBriefing(
+            greeting="Good evening.",
+            overall_household_status="Tonight, focus on overnight tariffs.",
+            overall_confidence="Medium",
+            overall_freshness="Current household data",
+            top_priorities=[priority],
+            positive_outcomes=[],
+            items_to_watch=[priority],
+            suggested_next_action="Wait 18 minutes for cheaper charging.",
+            estimated_savings_opportunity=FinancialImpact(billing_period=4.5),
+            advisor_summary=[priority, priority],
+            read_time_minutes=1,
+        )
+        glance = GlanceState(
+            status="WAIT",
+            tone="wait",
+            current_recommendation="Wait 18 minutes, then charge.",
+            reason="Wait 18 minutes for cheaper charging.",
+            current_tariff="Peak",
+            current_tariff_bucket="peak",
+            next_window="9pm",
+            lowest_cost_window="11pm",
+            energy_score=82,
+            energy_score_label="Good",
+            bill_current=120.0,
+            bill_projected=180.0,
+            bill_projection_basis="Current run-rate",
+            solar_status="Solar unavailable",
+            freshness="Fresh",
+            last_updated="2026-06-30T09:15:00+08:00",
+            confidence="Medium",
+            evidence_quality="MEDIUM",
+            evidence_reason="Recent readings available.",
+        )
+
+        html = report.home_page_html(briefing, glance=glance)
+
+        self.assertIn("Can I charge?", html)
+        self.assertIn("Wait if you can.", html)
+        self.assertIn("We found one thing worth checking.", html)
+        self.assertIn("Everything looks good today.", html)
+        self.assertNotIn("Recommendation count", html)
+        self.assertNotIn("advisor signals", html)
+        self.assertEqual(html.count("Wait for cheaper charging"), 1)
+        self.assertEqual(html.count("Primary recommendation"), 1)
+        self.assertLessEqual(html.count("Secondary observation"), 2)
+
     def test_report_shell_reveals_deep_hash_routes(self):
         html = inspect.getsource(report.write_html) + inspect.getsource(report.system_page_html)
 
@@ -178,11 +357,11 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("revealHashTarget", html)
 
     def test_page_heading_includes_home_breadcrumb(self):
-        html = report.page_heading_html("Can I trust the data?", "Connected sources and confidence.")
+        html = report.page_heading_html("Can I trust today's advice?", "Provider status and confidence.")
 
         self.assertIn('class="page-breadcrumb"', html)
         self.assertIn('href="#home"', html)
-        self.assertIn("Can I trust the data?", html)
+        self.assertIn("Can I trust today&#x27;s advice?", html)
 
     def test_timeline_groups_events_with_readable_icons_and_types(self):
         html = report.timeline_html(

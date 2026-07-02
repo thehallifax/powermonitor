@@ -148,6 +148,40 @@ class ReportExplainabilityTests(unittest.TestCase):
         )
         self.assertEqual(payload["explanation"]["financial_impact"], "$4.20 this billing period")
 
+    def test_recommendation_wording_softens_low_confidence_and_missing_live_data(self):
+        decision = explained_decision()
+        decision.confidence = "Low"
+        decision.explanation = DecisionExplanation(
+            why_this_matters="Live solar output cannot be verified.",
+            evidence_used=["Solar interval evidence is unavailable."],
+            financial_impact="Unable to estimate",
+            confidence_reason="Low confidence because solar interval evidence is unavailable.",
+            data_sources_used=["Tariff settings"],
+            freshness_completeness_note="Live readings are missing.",
+        )
+
+        self.assertEqual(
+            report.recommendation_confidence_note(decision),
+            "Low confidence because live solar readings are unavailable.",
+        )
+
+    def test_anomaly_wording_is_presented_as_potential_issue(self):
+        decision = explained_decision(
+            decision_id="anomaly_1",
+            title="Investigate unusual household behaviour",
+            category="monitoring",
+        )
+
+        self.assertEqual(report.recommendation_title(decision), "Potential issue detected")
+
+    def test_recommendation_centre_answers_homeowner_rationale_questions(self):
+        markup = report.recommendation_centre_html([explained_decision()])
+
+        self.assertIn("What happened?", markup)
+        self.assertIn("Why do we think this?", markup)
+        self.assertIn("What should I check?", markup)
+        self.assertIn("What happens if I ignore it?", markup)
+
 
 if __name__ == "__main__":
     unittest.main()

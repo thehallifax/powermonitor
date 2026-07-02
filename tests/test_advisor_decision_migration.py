@@ -74,7 +74,7 @@ class AdvisorDecisionMigrationTests(unittest.TestCase):
         self.assertEqual(payload["decision_reference"]["decision_id"], "hd1")
         self.assertEqual(payload["decision"]["type"], "WAIT_FOR_CHEAPER_WINDOW")
         self.assertEqual(payload["advisor_type"], "EV_CHARGING")
-        self.assertIn("available household data", payload["confidence_reason"])
+        self.assertIn("PowerMonitor can verify", payload["confidence_reason"])
 
     def test_briefing_summarizes_household_decisions(self):
         decision = household_decision("CHARGE_NOW")

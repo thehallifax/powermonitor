@@ -1,5 +1,80 @@
 # Changelog
 
+## SY-001 - Product Coherence: Data Sources
+
+- Reframed the System page around homeowner questions: what information
+  PowerMonitor has, whether today's advice can be trusted, and whether any
+  setup/source action is needed.
+- Replaced primary provider presentation with "Your Data Sources" cards that
+  represent recognizable household sources such as SolarEdge, Ocular, Synergy,
+  and Home Assistant rather than internal connector concepts.
+- Added source-type presentation rules so live services show connection
+  actions, imported data shows upload actions, and household configuration
+  shows edit-configuration actions.
+- Added a "Today's advice uses" trust checklist and a Setup "Available
+  integrations" grouping for connected versus optional integrations.
+- Hid non-user-facing concepts such as smart meter readings, provider registry,
+  household state, and runtime diagnostics from the primary System experience,
+  while leaving them available under Advanced Diagnostics.
+
+## BF-002 - Household Trust
+
+- Tightened Provider Management so `Connected` is only shown after configuration
+  exists, a connection test succeeds, and provider data has been retrieved.
+- Reworded provider cards around homeowner trust: status, last successful
+  update, what the provider contributes, and action required, with technical
+  runtime details behind Advanced Diagnostics.
+- Changed Glance Mode so stale live data uses recent household information
+  instead of showing a blanket unavailable state unless no usable household data
+  exists.
+- Reframed the System page around "Can I trust today's advice?" with plain
+  source and limitation summaries.
+- Added regression coverage for stricter connected-state validation, historical
+  import status, Glance fallback wording, and simplified provider cards.
+
+## BF-001 - Household Intelligence
+
+- Added homeowner-facing recommendation rationale fields so each decision-driven
+  recommendation explains what happened, why PowerMonitor thinks it happened,
+  what to check, and what may happen if ignored.
+- Reworked insufficient-data recommendations to say PowerMonitor does not yet
+  have enough information, instead of presenting generic low-confidence action
+  cards.
+- Suppressed generic `NO_ACTION` decisions from recommendation cards while
+  keeping them available as platform decisions.
+- Tightened Home so it shows at most one primary recommendation and two
+  secondary observations.
+- Added household-specific baseload and billing rationale using existing
+  Household Behaviour, Household State, Context, and Financial metadata without
+  adding new calculations.
+- Added regression tests for recommendation rationale, insufficient data,
+  baseload explanation, recommendation mapping, and Home card limits.
+
+## UX-004 - Home Experience
+
+- Redesigned Home around a homeowner-assistant flow: what to do, charging
+  timing, spending status, data health, good signs, and what changed.
+- Replaced recommendation/advisor counts with meaningful household summaries
+  such as "Everything looks normal" and "We found one thing worth checking."
+- Merged Best Action and Watch items into one deduplicated "What should I do?"
+  section, and moved positive signals into encouraging "Good signs" copy.
+- Moved setup progress below the Home guidance so first-time users see the
+  current household answer before configuration detail.
+- Added Home presentation regression coverage for Glance summary, duplicate
+  card removal, and count-free assistant copy.
+
+## UX-003 - Decision Wording and Trust
+
+- Reworded Glance unavailable and peak-tariff states so missing live data no
+  longer sounds like a charging warning.
+- Softened recommendation, briefing, provider, and system copy around low
+  confidence, missing readings, expired live-data sign-in, and potential
+  issues.
+- Updated anomaly presentation wording to "Potential issue detected" and
+  "Review the supporting data before taking action."
+- Added regression coverage for unavailable live data, low-confidence wording,
+  time-aware briefing copy, and anomaly presentation labels.
+
 ## UX-002 - Navigation and Action Links
 
 - Retargeted setup actions so tariff settings, live data review, goals review,

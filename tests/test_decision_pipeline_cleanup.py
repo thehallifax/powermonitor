@@ -223,7 +223,7 @@ class DecisionPipelineCleanupTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual([item.decision_id for item in output.recommendations], ["critical", "low"])
+        self.assertEqual([item.decision_id for item in output.recommendations], ["critical"])
 
 
 if __name__ == "__main__":

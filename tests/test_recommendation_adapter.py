@@ -110,7 +110,9 @@ class RecommendationAdapterTests(unittest.TestCase):
         )
         recommendation = RecommendationAdapter().adapt_one(decision)
 
-        self.assertEqual(recommendation.category.label, "Anomaly")
+        self.assertEqual(recommendation.category.label, "Monitoring")
+        self.assertEqual(recommendation.title, "Potential issue detected")
+        self.assertEqual(recommendation.recommended_action, "Review the supporting data before taking action.")
         self.assertEqual(recommendation.icon, "search")
         self.assertEqual(recommendation.evidence[0].source, "DecisionEngine")
 
@@ -137,7 +139,7 @@ class RecommendationAdapterTests(unittest.TestCase):
             household_decision(DecisionType.MONITOR_USAGE, decision_id="medium", priority=DecisionPriority.MEDIUM),
         ])
 
-        self.assertEqual([item.decision_id for item in recommendations], ["critical", "medium", "low"])
+        self.assertEqual([item.decision_id for item in recommendations], ["critical", "medium"])
 
     def test_serialization_retains_decision_lineage(self):
         recommendation = RecommendationAdapter().adapt_one(
@@ -155,6 +157,49 @@ class RecommendationAdapterTests(unittest.TestCase):
         self.assertEqual(payload["state_change_ids"], ["state_1"])
         self.assertEqual(payload["household_state"]["household_id"], "household_a")
         self.assertEqual(payload["evidence"][0]["signal"], "decision_type")
+        self.assertIn("what_happened", payload)
+        self.assertIn("why_we_think_this", payload)
+        self.assertIn("what_to_check", payload)
+        self.assertIn("if_ignored", payload)
+
+    def test_insufficient_data_recommendation_explains_no_recommendation(self):
+        recommendation = RecommendationAdapter().adapt_one(
+            household_decision(
+                DecisionType.DATA_INSUFFICIENT,
+                decision_id="data_1",
+                priority=DecisionPriority.MEDIUM,
+                confidence=DecisionConfidence.LOW,
+                effect="We don't yet have enough information to make a recommendation.",
+                impact={"today": None, "billing_period": None, "yearly": None},
+            )
+        )
+
+        self.assertEqual(
+            recommendation.recommended_action,
+            "We don't yet have enough information to make a recommendation.",
+        )
+        self.assertIn("not yet have enough verified household data", recommendation.what_happened)
+        self.assertIn("missing, stale, estimated, or incomplete", recommendation.why_we_think_this)
+        self.assertIn("live data collection", recommendation.what_to_check)
+
+    def test_baseload_anomaly_recommendation_uses_household_behaviour(self):
+        recommendation = RecommendationAdapter().adapt_one(
+            household_decision(
+                DecisionType.INVESTIGATE_ANOMALY,
+                decision_id="baseload_1",
+                effect="Investigate the active anomaly using its evidence trail.",
+            ),
+            behaviour={
+                "baseload": {
+                    "overnight_baseload_watts": 420.0,
+                    "normal_variance_watts": 35.0,
+                }
+            },
+        )
+
+        self.assertIn("420 W", recommendation.what_happened)
+        self.assertIn("learned overnight baseline", recommendation.why_we_think_this)
+        self.assertIn("pool pump", recommendation.what_to_check)
 
 
 if __name__ == "__main__":
