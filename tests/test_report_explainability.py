@@ -11,6 +11,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import report
 from engine.models import Decision, DecisionExplanation, FinancialImpact, Goal, GoalProgress, GoalStatus
+from engine.recommendation_adapter import (
+    RecommendationCategory,
+    RecommendationEvidence,
+    RecommendationPresentation,
+    RecommendationPriority,
+)
 
 
 def explained_decision(
@@ -181,6 +187,43 @@ class ReportExplainabilityTests(unittest.TestCase):
         self.assertIn("Why do we think this?", markup)
         self.assertIn("What should I check?", markup)
         self.assertIn("What happens if I ignore it?", markup)
+
+    def test_recommendation_centre_renders_presentation_rationale_fields(self):
+        recommendation = RecommendationPresentation(
+            recommendation_id="decision:monitor_usage",
+            decision_id="monitor_usage",
+            household_id="default_household",
+            title="Check unusual usage",
+            summary="Usage changed overnight.",
+            recommended_action="Check overnight loads.",
+            rationale="Overnight usage is higher than usual.",
+            what_happened="Your overnight electricity use was higher than usual.",
+            why_we_think_this="This is based on recent household readings.",
+            what_to_check="Check pool pumps, hot water, and appliances left running.",
+            if_ignored="The extra usage may continue into future bills.",
+            confidence="Medium",
+            evidence=[
+                RecommendationEvidence(
+                    source="household_state",
+                    signal="overnight_load",
+                    value="Higher than usual",
+                    quality="MEDIUM",
+                )
+            ],
+            urgency=RecommendationPriority("medium", "Medium", 50),
+            category=RecommendationCategory("behaviour", "Behaviour", "*"),
+            icon="*",
+            display_priority=72,
+            financial_impact=FinancialImpact(billing_period=4.2),
+            decision={"decision_id": "monitor_usage", "type": "MONITOR_USAGE"},
+        )
+
+        markup = report.recommendation_centre_html([recommendation])
+
+        self.assertIn("Your overnight electricity use was higher than usual.", markup)
+        self.assertIn("This is based on recent household readings.", markup)
+        self.assertIn("Check pool pumps, hot water, and appliances left running.", markup)
+        self.assertIn("The extra usage may continue into future bills.", markup)
 
 
 if __name__ == "__main__":

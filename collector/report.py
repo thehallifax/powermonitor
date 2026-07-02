@@ -1469,6 +1469,8 @@ def build_efficiency_advisor(
 
 
 def recommendation_lifecycle_state(decision: Decision) -> str:
+    if is_recommendation_presentation(decision):
+        return str(recommendation_presentation_value(decision, "status") or "active")
     return str(decision.evidence.get("lifecycle_state") or "active")
 
 
@@ -1951,7 +1953,7 @@ def disclosure_html(title: str, summary: str, body: str, *, open_by_default: boo
 def recommendation_confidence_note(decision) -> str:
     confidence = recommendation_confidence(decision)
     if is_recommendation_presentation(decision):
-        rationale = getattr(decision, "rationale", None)
+        rationale = recommendation_presentation_value(decision, "rationale", "why_we_think_this")
         if rationale:
             return trust_wording(rationale)
     explanation = getattr(decision, "explanation", None)
@@ -2437,21 +2439,94 @@ def unable_to_estimate() -> str:
 
 
 def is_recommendation_presentation(item) -> bool:
-    return isinstance(item, RecommendationPresentation)
+    if isinstance(item, RecommendationPresentation):
+        return True
+    if isinstance(item, dict):
+        return bool(item.get("recommendation_id") and item.get("recommended_action"))
+    return bool(
+        hasattr(item, "recommendation_id")
+        and hasattr(item, "recommended_action")
+        and hasattr(item, "rationale")
+    )
+
+
+def has_recommendation_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def recommendation_presentation_value(item, field: str, *fallback_fields: str) -> Optional[Any]:
+    fields = (field, *fallback_fields)
+    for name in fields:
+        if isinstance(item, dict) and has_recommendation_value(item.get(name)):
+            return item.get(name)
+        if hasattr(item, name):
+            value = getattr(item, name)
+            if has_recommendation_value(value):
+                return value
+    if hasattr(item, "as_dict"):
+        try:
+            data = item.as_dict()
+        except (TypeError, ValueError):
+            data = {}
+        if isinstance(data, dict):
+            for name in fields:
+                if has_recommendation_value(data.get(name)):
+                    return data.get(name)
+    containers = []
+    for container_name in ("reason", "rationale", "explanation", "evidence", "decision", "advisor_explanation"):
+        if isinstance(item, dict):
+            container = item.get(container_name)
+        else:
+            container = getattr(item, container_name, None)
+        if isinstance(container, dict):
+            containers.append(container)
+    for container in containers:
+        for name in fields:
+            if has_recommendation_value(container.get(name)):
+                return container.get(name)
+    return None
+
+
+def recommendation_financial_impact_value(impact: Any, field: str) -> Optional[Any]:
+    if not impact:
+        return None
+    if isinstance(impact, dict):
+        return impact.get(field)
+    return getattr(impact, field, None)
+
+
+def recommendation_severity(decision) -> str:
+    if is_recommendation_presentation(decision):
+        urgency = recommendation_presentation_value(decision, "urgency") or {}
+        if isinstance(urgency, dict):
+            value = str(urgency.get("value") or "")
+        else:
+            value = str(getattr(urgency, "value", "") or "")
+        return {
+            "low": "green",
+            "medium": "amber",
+            "high": "red",
+            "critical": "red",
+        }.get(value.lower(), "amber")
+    return decision.severity
 
 
 def recommendation_confidence(decision) -> str:
     if is_recommendation_presentation(decision):
-        return decision.confidence
+        return str(recommendation_presentation_value(decision, "confidence") or "Medium")
     return decision.confidence.title()
 
 
 def recommendation_impact(decision) -> str:
     if is_recommendation_presentation(decision):
-        impact = decision.financial_impact
+        impact = recommendation_presentation_value(decision, "financial_impact")
         if not impact:
             return unable_to_estimate()
-        for value in (impact.today, impact.billing_period, impact.yearly):
+        for value in (
+            recommendation_financial_impact_value(impact, "today"),
+            recommendation_financial_impact_value(impact, "billing_period"),
+            recommendation_financial_impact_value(impact, "yearly"),
+        ):
             if value is not None:
                 return money(float(value))
         return unable_to_estimate()
@@ -2486,9 +2561,10 @@ def recommendation_impact(decision) -> str:
 
 def recommendation_monthly_impact(decision) -> str:
     if is_recommendation_presentation(decision):
-        impact = decision.financial_impact
-        if impact and impact.yearly is not None:
-            return money(float(impact.yearly) / 12)
+        impact = recommendation_presentation_value(decision, "financial_impact")
+        yearly = recommendation_financial_impact_value(impact, "yearly")
+        if yearly is not None:
+            return money(float(yearly) / 12)
         return unable_to_estimate()
     value = decision.evidence.get("estimated_monthly_impact")
     if value is None:
@@ -2501,7 +2577,10 @@ def recommendation_monthly_impact(decision) -> str:
 
 def recommendation_priority_score(decision) -> int:
     if is_recommendation_presentation(decision):
-        return int(decision.display_priority)
+        try:
+            return int(recommendation_presentation_value(decision, "display_priority", "priority_score") or 0)
+        except (TypeError, ValueError):
+            return 0
     try:
         return int(round(float(decision.evidence.get("priority_score", 0))))
     except (TypeError, ValueError):
@@ -2510,28 +2589,45 @@ def recommendation_priority_score(decision) -> int:
 
 def recommendation_category(decision) -> str:
     if is_recommendation_presentation(decision):
-        return decision.category.label
+        category = recommendation_presentation_value(decision, "category") or {}
+        if isinstance(category, dict):
+            return str(category.get("label") or category.get("value") or "Household")
+        return str(getattr(category, "label", None) or getattr(category, "value", None) or "Household")
     return str(decision.evidence.get("recommendation_category") or decision.category).replace("_", " ")
 
 
 def recommendation_difficulty(decision) -> str:
     if is_recommendation_presentation(decision):
-        return f"{decision.urgency.label} urgency"
+        urgency = recommendation_presentation_value(decision, "urgency") or {}
+        if isinstance(urgency, dict):
+            label = str(urgency.get("label") or urgency.get("value") or "Medium")
+        else:
+            label = str(getattr(urgency, "label", None) or getattr(urgency, "value", None) or "Medium")
+        return f"{label} urgency"
     return str(decision.evidence.get("difficulty") or "Medium").title()
 
 
 def recommendation_title(decision) -> str:
+    if is_recommendation_presentation(decision):
+        return trust_wording(recommendation_presentation_value(decision, "title") or "Recommendation")
     return trust_wording(decision.title)
 
 
 def recommendation_action(decision) -> str:
-    action = decision.recommended_action if is_recommendation_presentation(decision) else decision.recommendation
+    action = (
+        recommendation_presentation_value(decision, "recommended_action", "action")
+        if is_recommendation_presentation(decision)
+        else decision.recommendation
+    )
     return trust_wording(action)
 
 
 def recommendation_why(decision) -> str:
     if is_recommendation_presentation(decision):
-        return trust_wording(decision.rationale)
+        return trust_wording(
+            recommendation_presentation_value(decision, "rationale", "why_we_think_this", "summary")
+            or "This recommendation is based on the household information PowerMonitor can verify."
+        )
     return (
         trust_wording(decision.explanation.why_this_matters)
         if decision.explanation
@@ -2541,25 +2637,40 @@ def recommendation_why(decision) -> str:
 
 def recommendation_what_happened(decision) -> str:
     if is_recommendation_presentation(decision):
-        return trust_wording(decision.what_happened)
+        return trust_wording(
+            recommendation_presentation_value(decision, "what_happened", "summary", "finding")
+            or "PowerMonitor found something in the household information it can verify."
+        )
     return trust_wording(decision.summary if hasattr(decision, "summary") else decision.finding)
 
 
 def recommendation_why_we_think_this(decision) -> str:
     if is_recommendation_presentation(decision):
-        return trust_wording(decision.why_we_think_this)
+        return trust_wording(
+            recommendation_presentation_value(decision, "why_we_think_this", "rationale", "summary")
+            or "The available household information supports this recommendation, but detail is limited."
+        )
     return recommendation_why(decision)
 
 
 def recommendation_what_to_check(decision) -> str:
     if is_recommendation_presentation(decision):
-        return trust_wording(decision.what_to_check)
+        return trust_wording(
+            recommendation_presentation_value(decision, "what_to_check", "recommended_action", "action")
+            or "Review the related household data source and recent readings."
+        )
     return trust_wording(recommendation_action(decision))
 
 
 def recommendation_if_ignored(decision) -> str:
     if is_recommendation_presentation(decision):
-        return trust_wording(decision.if_ignored)
+        fallback = recommendation_presentation_value(decision, "if_ignored")
+        if fallback:
+            return trust_wording(fallback)
+        impact = recommendation_impact(decision)
+        if impact != unable_to_estimate():
+            return f"The pattern may continue and could affect costs by around {impact}."
+        return "The pattern may continue, but PowerMonitor cannot estimate the impact yet."
     impact = recommendation_impact(decision)
     if impact != unable_to_estimate():
         return f"The pattern may continue and could affect costs by around {impact}."
@@ -2568,12 +2679,18 @@ def recommendation_if_ignored(decision) -> str:
 
 def recommendation_evidence_html(decision) -> str:
     if is_recommendation_presentation(decision):
-        if not decision.evidence:
+        evidence = recommendation_presentation_value(decision, "evidence") or []
+        if not evidence:
             return '<p class="notice">No supporting evidence is available for this recommendation.</p>'
-        rows = [
-            f"<li><strong>{html.escape(customer_source(item.signal))}</strong><span>{html.escape(trust_wording(item.value))}</span><small>{html.escape(customer_source(item.source))} - {html.escape(customer_label(item.quality).title())}</small></li>"
-            for item in decision.evidence
-        ]
+        rows = []
+        for item in evidence:
+            signal = item.get("signal") if isinstance(item, dict) else getattr(item, "signal", None)
+            value = item.get("value") if isinstance(item, dict) else getattr(item, "value", None)
+            source = item.get("source") if isinstance(item, dict) else getattr(item, "source", None)
+            quality = item.get("quality") if isinstance(item, dict) else getattr(item, "quality", None)
+            rows.append(
+                f"<li><strong>{html.escape(customer_source(signal))}</strong><span>{html.escape(trust_wording(value))}</span><small>{html.escape(customer_source(source))} - {html.escape(customer_label(quality).title())}</small></li>"
+            )
         return f'<ul class="recommendation-evidence">{"".join(rows)}</ul>'
     hidden_keys = {
         "priority_score",
@@ -2614,7 +2731,8 @@ def decision_type_for_recommendation(decision: Decision) -> list[str]:
 
 def matching_household_decision(decision, household_decisions: Optional[list[dict]]) -> Optional[dict]:
     if is_recommendation_presentation(decision):
-        return decision.decision
+        payload = recommendation_presentation_value(decision, "decision")
+        return payload if isinstance(payload, dict) else None
     if not household_decisions:
         return None
     preferred = decision_type_for_recommendation(decision)
@@ -2639,8 +2757,13 @@ def recommendation_decision_provenance_html(decision, household_decisions: Optio
 
 def recommendation_with_decision_dict(decision, household_decisions: Optional[list[dict]]) -> dict:
     if is_recommendation_presentation(decision):
-        data = decision.as_dict()
-        data["household_decision_id"] = decision.decision_id
+        if hasattr(decision, "as_dict"):
+            data = decision.as_dict()
+        elif isinstance(decision, dict):
+            data = dict(decision)
+        else:
+            data = dict(getattr(decision, "__dict__", {}))
+        data["household_decision_id"] = recommendation_presentation_value(decision, "decision_id")
         return data
     data = decision.as_dict()
     household_decision = matching_household_decision(decision, household_decisions)
@@ -2650,7 +2773,7 @@ def recommendation_with_decision_dict(decision, household_decisions: Optional[li
 
 
 def recommendation_controls_html(decision, hidden: bool = False) -> str:
-    stable_id = html.escape(decision.id)
+    stable_id = html.escape(str(recommendation_presentation_value(decision, "id", "recommendation_id") if is_recommendation_presentation(decision) else decision.id))
     if hidden:
         return f"""
         <form class="recommendation-controls" method="post" action="/recommendations/lifecycle">
@@ -2674,6 +2797,10 @@ def recommendation_controls_html(decision, hidden: bool = False) -> str:
     """
 
 
+def recommendation_sort_key(decision) -> tuple[int, str]:
+    return (-recommendation_priority_score(decision), recommendation_title(decision))
+
+
 def recommendation_centre_html(
     recommendations: list[Decision],
     lifecycle_counts: Optional[dict[str, int]] = None,
@@ -2682,8 +2809,8 @@ def recommendation_centre_html(
     goals: Optional[list[GoalProgress]] = None,
     household_decisions: Optional[list[dict]] = None,
 ) -> str:
-    ranked = sorted(recommendations, key=lambda item: (-recommendation_priority_score(item), item.title))
-    hidden = sorted(hidden or [], key=lambda item: (-recommendation_priority_score(item), item.title))
+    ranked = sorted(recommendations, key=recommendation_sort_key)
+    hidden = sorted(hidden or [], key=recommendation_sort_key)
     advisors = advisors or []
     goals = goals or []
     lifecycle_counts = lifecycle_counts or {"dismissed": 0, "snoozed_until": 0}
@@ -2702,7 +2829,7 @@ def recommendation_centre_html(
         goal_links = recommendation_goal_links_html(decision, goals)
         cards.append(
             f"""
-            <article class="recommendation-card recommendation-centre-card {html.escape(decision.severity)}">
+            <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(decision))}">
               <div class="recommendation-centre-heading">
                 <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
                 <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
@@ -2736,11 +2863,12 @@ def recommendation_centre_html(
     hidden_cards = []
     for decision in hidden:
         state = recommendation_lifecycle_state(decision).replace("_", " ")
-        snoozed_until = decision.evidence.get("lifecycle_snoozed_until")
+        evidence = recommendation_presentation_value(decision, "evidence") if is_recommendation_presentation(decision) else decision.evidence
+        snoozed_until = evidence.get("lifecycle_snoozed_until") if isinstance(evidence, dict) else None
         state_text = f"{state}: {snoozed_until}" if snoozed_until else state
         hidden_cards.append(
             f"""
-            <article class="recommendation-card recommendation-centre-card {html.escape(decision.severity)}">
+            <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(decision))}">
               <div class="recommendation-centre-heading">
                 <span class="recommendation-level">{html.escape(state_text.title())}</span>
                 <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
