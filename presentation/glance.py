@@ -53,7 +53,12 @@ def build_glance_state(
         "CHARGE_NOW": "CHARGE NOW",
         "WAIT": "WAIT",
         "AVOID": "AVOID",
-        "UNKNOWN": "DATA UNAVAILABLE",
+        "UNKNOWN": "NO DATA AVAILABLE" if not _has_usable_household_information(
+            billing_summary=billing_summary,
+            energy_score=energy_score,
+            projected_bill=projected_bill,
+            recommendation_presentation=recommendation_presentation,
+        ) else "LIVE DATA UNAVAILABLE",
     }[advisor.status]
     tone = {
         "CHARGE_NOW": "charge",
@@ -108,11 +113,13 @@ def glance_reason(
     if status == "WAIT" and wait_minutes is not None and wait_minutes > 0:
         return f"Wait {wait_minutes} minutes for cheaper charging."
     if status == "AVOID" and wait_minutes is not None and wait_minutes > 0:
-        return f"Avoid charging now. Cheaper charging starts in {wait_minutes} minutes."
+        return f"Peak tariff now. Cheaper charging starts in {wait_minutes} minutes."
     if status == "CHARGE NOW":
         return "Use this window for charging or flexible loads."
-    if status == "DATA UNAVAILABLE":
-        return "Charging advice needs fresher data."
+    if status == "LIVE DATA UNAVAILABLE":
+        return "Live data unavailable. Using recent household information."
+    if status == "NO DATA AVAILABLE":
+        return "No usable household data is available yet."
     return next_window or fallback
 
 
@@ -125,9 +132,29 @@ def glance_recommendation(
     if status == "WAIT" and wait_minutes is not None and wait_minutes > 0:
         return f"Wait {wait_minutes} minutes, then charge."
     if status == "AVOID":
-        return f"Use {next_window} instead." if next_window else "Avoid flexible loads for now."
+        return f"Use {next_window} instead if the load can wait." if next_window else "Use tariff timing before starting flexible loads."
     if status == "CHARGE NOW":
         return "Charge now if the load is flexible."
-    if status == "DATA UNAVAILABLE":
-        return "Check live data before acting."
+    if status == "LIVE DATA UNAVAILABLE":
+        return "Unable to verify live conditions. Use recent household information with caution."
+    if status == "NO DATA AVAILABLE":
+        return "Set up a data source before relying on guidance."
     return fallback
+
+
+def _has_usable_household_information(
+    *,
+    billing_summary: Any,
+    energy_score: Optional[EnergyScore],
+    projected_bill: float,
+    recommendation_presentation: Optional[Any],
+) -> bool:
+    if energy_score is not None:
+        return True
+    if recommendation_presentation is not None:
+        return True
+    if int(getattr(billing_summary, "intervals", 0) or 0) > 0:
+        return True
+    if float(getattr(billing_summary, "net_cost", 0.0) or 0.0) > 0:
+        return True
+    return float(projected_bill or 0.0) > 0

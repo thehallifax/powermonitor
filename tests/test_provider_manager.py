@@ -79,9 +79,9 @@ class ProviderManagerTests(unittest.TestCase):
             manager = ProviderManager(registry(), **manager_paths(directory))
             provider = manager.get("solaredge")
 
-        self.assertEqual(provider.lifecycle_state, ProviderConnectionStatus.CONFIGURED)
-        self.assertIn("Reconnect", provider.actions)
-        self.assertIn("Remove", provider.actions)
+        self.assertEqual(provider.lifecycle_state, ProviderConnectionStatus.NOT_CONFIGURED)
+        self.assertIn("Configure", provider.actions)
+        self.assertIn("Test Connection", provider.actions)
 
     def test_credential_updates_are_redacted(self):
         with TemporaryDirectory() as directory:
@@ -102,13 +102,21 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("REDACTED", serialized)
         self.assertEqual(configuration["lifecycle_state"], "CONFIGURED")
 
-    def test_required_cookie_must_be_present_before_configuration_is_ready(self):
+    def test_username_and_password_are_required_before_configuration_is_ready(self):
         with TemporaryDirectory() as directory:
             manager = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory))
             configuration = manager.configure("solaredge", {"username": "user@example.com"}).as_dict()
 
         self.assertEqual(configuration["lifecycle_state"], "NOT_CONFIGURED")
-        self.assertIn("Cookie", configuration["notes"])
+        self.assertIn("Password", configuration["notes"])
+
+    def test_cookie_remains_advanced_fallback_configuration_path(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory))
+            configuration = manager.configure("solaredge", {"cookie": "redaction-fixture-cookie"}).as_dict()
+
+        self.assertEqual(configuration["lifecycle_state"], "CONFIGURED")
+        self.assertIn("Cookie (advanced fallback)", str(configuration["credentials"]))
 
     def test_diagnostics_serialization_and_capability_detection(self):
         with TemporaryDirectory() as directory:
@@ -125,7 +133,7 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(provider["diagnostics"]["promotion_count"], 1)
         self.assertTrue(provider["capability_summary"]["detected"])
         self.assertIn("daily_summary", provider["capability_summary"]["capabilities"])
-        self.assertEqual(provider["onboarding"]["state"], "CONFIGURATION_REQUIRED")
+        self.assertEqual(provider["onboarding"]["state"], "NOT_CONFIGURED")
         self.assertFalse(provider["onboarding"]["connected"])
         self.assertFalse(provider["onboarding"]["healthy"])
         self.assertEqual(provider["onboarding"]["sync_frequency"], "Refresh schedule")
@@ -163,7 +171,8 @@ class ProviderManagerTests(unittest.TestCase):
 
         self.assertEqual(provider["onboarding"]["state"], "NOT_CONFIGURED")
         self.assertFalse(provider["onboarding"]["connected"])
-        self.assertIn("Cookie", provider["onboarding"]["required_information"])
+        self.assertIn("SolarEdge username/email", provider["onboarding"]["required_information"])
+        self.assertIn("SolarEdge password", provider["onboarding"]["required_information"])
         self.assertIn("Run Test Connection", provider["onboarding"]["recovery_steps"])
 
     def test_connection_testing_reports_success_and_warnings(self):
@@ -175,7 +184,11 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertFalse(missing["success"])
         self.assertIn("Provider is not configured.", missing["warnings"])
         self.assertEqual(connected["status"], "failure")
-        self.assertIn("Unable to connect", connected["user_message"])
+        self.assertTrue(
+            "Login failed" in connected["user_message"]
+            or "Cookie expired" in connected["user_message"]
+            or "Unable to connect" in connected["user_message"]
+        )
 
     def test_connected_state_requires_successful_test_and_data_retrieval(self):
         with TemporaryDirectory() as directory:
@@ -223,8 +236,34 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["status"], "failure")
         self.assertIn("SolarEdge returned HTTP 403", result["user_message"])
-        self.assertIn("Refresh the provider session", result["next_step"])
+        self.assertIn("username/password", result["next_step"])
         self.assertEqual(result["technical_details"]["http_status"], "403")
+
+    def test_failed_login_marks_solaredge_as_needing_attention(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(
+                registry(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": False,
+                        "authentication_status": "not_authenticated",
+                        "available_datasets": [],
+                        "warnings": ["Sign-in failed. Check the saved SolarEdge username/email and password."],
+                    }
+                },
+                **paths,
+            )
+
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            result = manager.action("solaredge", "test").as_dict()
+            refreshed = ProviderManager(registry(), **paths).get("solaredge").as_dict()
+
+            self.assertFalse(result["success"])
+            self.assertEqual(refreshed["lifecycle_state"], "ERROR")
+            self.assertEqual(refreshed["onboarding"]["state"], "ERROR")
+            self.assertFalse(refreshed["onboarding"]["healthy"])
+            self.assertIn("Sign-in failed", refreshed["health"]["last_error"])
 
     def test_runtime_health_is_included_in_onboarding(self):
         manager = ProviderManager(

@@ -82,7 +82,7 @@ class SetupEngineTests(unittest.TestCase):
 
         tasks = {task.task_id: task for task in checklist.tasks}
 
-        self.assertIn("Provider:", tasks["connect_solar_provider"].rationale)
+        self.assertIn("SolarEdge", tasks["connect_solar_provider"].rationale)
         self.assertEqual(tasks["connect_solar_provider"].action_href, "#system-provider-registry-solaredge")
         self.assertIn("Ocular export", tasks["upload_ev_charging_history"].rationale)
 
@@ -121,7 +121,7 @@ class SetupEngineTests(unittest.TestCase):
 
         tasks = {task.task_id: task for task in checklist.tasks}
         self.assertEqual(tasks["configure_billing_cycle"].action_href, "#setup-billing")
-        self.assertEqual(tasks["configure_billing_cycle"].action_label, "Edit Billing Cycle")
+        self.assertEqual(tasks["configure_billing_cycle"].action_label, "Set Billing Cycle")
 
     def test_manual_tariff_selection_completes_tariff_readiness(self):
         manual_settings = settings(billing_configured=True)
@@ -160,11 +160,11 @@ class SetupEngineTests(unittest.TestCase):
         tasks = {task.task_id: task for task in checklist.tasks}
 
         self.assertEqual(tasks["configure_tariff"].action_href, "#setup-tariff")
-        self.assertEqual(tasks["configure_tariff"].action_label, "Go to Tariff Settings")
+        self.assertEqual(tasks["configure_tariff"].action_label, "Choose Plan")
         self.assertEqual(tasks["upload_ev_charging_history"].action_href, "#imports")
-        self.assertEqual(tasks["upload_ev_charging_history"].action_label, "Upload History")
+        self.assertEqual(tasks["upload_ev_charging_history"].action_label, "Add EV History")
         self.assertEqual(tasks["collector_offline"].action_href, "#system-live-data")
-        self.assertEqual(tasks["collector_offline"].action_label, "Why isn't live data working?")
+        self.assertEqual(tasks["collector_offline"].action_label, "Review Live Data")
         self.assertEqual(tasks["data_older_than_24_hours"].action_href, "#system-data-quality")
         self.assertEqual(tasks["data_older_than_24_hours"].action_label, "Can I trust today's advice?")
         self.assertEqual(tasks["review_energy_score"].action_href, "#energy-score-explanation")

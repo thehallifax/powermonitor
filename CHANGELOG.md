@@ -1,5 +1,33 @@
 # Changelog
 
+## TRUST-002 - SolarEdge Credential Recovery
+
+- Made SolarEdge collection recover from missing or expired cookies by
+  attempting saved-credential sign-in, refreshing the local session cookie, and
+  retrying the failed collection once.
+- Changed SolarEdge setup to prefer username/email and password while keeping
+  cookie entry as an advanced manual fallback.
+- Added clearer collector and provider statuses for missing credentials,
+  sign-in failures, expired cookies, and SolarEdge/network unavailability.
+- Updated Home/System recovery wording so stale or failed SolarEdge auth no
+  longer appears healthy and credentials/secrets stay redacted.
+- Added regression tests for automatic recovery orchestration, cookie saving,
+  missing-credential guidance, failed-login provider state, and secret
+  redaction.
+
+## FT-001 - First-Time Experience
+
+- Reworked Setup into a seven-question first-time flow covering location,
+  retailer, electricity plan, billing cycle, solar, EV charging, and battery.
+- Added local, non-secret setup choices for optional solar, EV, and battery
+  services so skipped services still feel usable and can be connected later.
+- Added a finish summary showing what PowerMonitor can explain now, what is
+  optional, and the fastest path to a useful first recommendation.
+- Updated Setup and Home partial-state wording to avoid architecture terms and
+  use homeowner language such as connected services, imported history,
+  electricity plan, and advice confidence.
+- Added setup-flow, web-config, and mobile presentation regression coverage.
+
 ## TRD-001 - Trends & Records
 
 - Added a reusable Trends Engine that compares current household history with

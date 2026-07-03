@@ -26,8 +26,8 @@ For the broader product direction, see `docs/VISION.md`.
 ## Setup
 
 1. Use Python 3.9 or newer.
-2. Put the SolarEdge browser cookie in `collector/solaredge_cookie.txt`, or
-   configure automated refresh as described below.
+2. Configure SolarEdge with username/email and password through Provider
+   Management, or use the manual cookie fallback described below.
 3. Keep cookies and credentials private. They are ignored by `.gitignore` and must not be
    printed or committed.
 4. Ensure the SQLite database is at `data/power.sqlite`.
@@ -49,10 +49,11 @@ from `today - (collection_backfill_days - 1)` through today, one day at a
 time. The value is clamped from 1 to 7 days to stay within SolarEdge's recent
 quarter-hour Power-data window.
 
-This backfill means that if the SolarEdge cookie expires, refreshing it within
-SolarEdge's available Power-data window can recover recent gaps. Each day is
-validated and imported independently with `INSERT OR REPLACE`, so repeat runs
-refresh existing timestamps without creating duplicate readings.
+This backfill means that if the SolarEdge session expires, automatic
+credential recovery or a manual cookie refresh within SolarEdge's available
+Power-data window can recover recent gaps. Each day is validated and imported
+independently with `INSERT OR REPLACE`, so repeat runs refresh existing
+timestamps without creating duplicate readings.
 
 After at least one successful day import, the collector automatically runs
 `collector/report.py` once so the static file served by the local dashboard
@@ -136,11 +137,13 @@ age in minutes.
 ## Refreshing SolarEdge Session Cookie
 
 SolarEdge browser sessions expire periodically. When SolarEdge returns HTTP
-401 or 403, PowerMonitor records the collector status as `SolarEdge session
-expired` and shows a recovery card on the dashboard. The collector first tries
-to refresh the session automatically, then retries the failed collection once.
-If automated refresh is not configured or fails, the existing manual cookie
-flow remains the fallback.
+401 or 403, PowerMonitor records a clear collector status such as `Cookie
+expired`, `Credentials missing`, `Sign-in failed`, or `SolarEdge unavailable`
+and shows recovery guidance on the dashboard. The collector first tries to
+refresh the session automatically with saved SolarEdge username/email and
+password credentials, then retries the failed collection once. If automated
+refresh is not configured or fails, the existing manual cookie flow remains the
+advanced fallback.
 
 ### Automated Refresh
 
@@ -151,7 +154,8 @@ python3 -m pip install playwright
 python3 -m playwright install chromium
 ```
 
-Provide SolarEdge credentials via environment variables:
+Provide SolarEdge credentials through Provider Management, or via environment
+variables:
 
 ```sh
 export SOLAREDGE_USERNAME='you@example.com'
@@ -170,7 +174,8 @@ Alternatively, create ignored `config/secrets.json`:
 The refresh script opens SolarEdge login in headless Chromium, signs in, waits
 for a dashboard Power-data request to return HTTP 200, and writes only the
 required SolarEdge cookies to `collector/solaredge_cookie.txt`. It never prints
-or logs credentials or cookie values.
+or logs usernames, passwords, credentials, cookie values, tokens, or
+authorization headers.
 
 You can test the refresh path manually:
 
@@ -181,7 +186,7 @@ python3 collector/test_cookie.py
 
 ### Manual Fallback
 
-To refresh the session, follow these steps.
+Use this only when automatic SolarEdge sign-in is unavailable.
 
 1. Sign in to the SolarEdge monitoring website in your browser.
 2. Open the browser developer tools and inspect a successful SolarEdge

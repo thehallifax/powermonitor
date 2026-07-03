@@ -13,7 +13,21 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import report
 from engine.insights_engine import HouseholdInsight
-from engine.models import BriefingPriority, DailyBriefing, DecisionTimeline, FinancialImpact, Goal, GoalProgress, GoalStatus, TimelineEntry
+from engine.models import (
+    BriefingPriority,
+    DailyBriefing,
+    DecisionTimeline,
+    FinancialImpact,
+    Goal,
+    GoalProgress,
+    GoalStatus,
+    SetupChecklist,
+    SetupProgress,
+    SetupSection,
+    SetupTask,
+    SetupTaskPriority,
+    TimelineEntry,
+)
 from engine.provider_framework import ProviderCapability
 from engine.trends_engine import HouseholdRecord, HouseholdTrend, HouseholdTrendsReport
 from presentation.glance import GlanceState
@@ -207,7 +221,7 @@ class MobilePresentationTests(unittest.TestCase):
 
         html = report.setup_integrations_html(SimpleNamespace(providers=lambda: [connected, optional, smart_meter]))
 
-        self.assertIn("Available integrations", html)
+        self.assertIn("Connected services", html)
         self.assertIn("Connected", html)
         self.assertIn("SolarEdge", html)
         self.assertIn("Optional", html)
@@ -237,6 +251,9 @@ class MobilePresentationTests(unittest.TestCase):
                 state_or_territory="WA",
                 current_plan="synergy_ev_add_on",
                 tariff_add_on="none",
+                solar_setup_choice="solaredge",
+                ev_setup_choice="ocular_import",
+                battery_setup_choice="none",
             )
         )
 
@@ -247,8 +264,59 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn('data-plan="synergy_ev_add_on"', html)
         self.assertIn("Super off-peak / EV window", html)
         self.assertIn('class="manual-tariff-fields"', html)
+        self.assertIn("Where do you live?", html)
+        self.assertIn("Do you have solar?", html)
+        self.assertIn("Do you have an EV?", html)
+        self.assertIn("Do you have a battery?", html)
         self.assertNotIn("Optional add-on", html)
         self.assertNotIn('name="tariff_add_on"', html)
+
+    def test_first_time_setup_uses_homeowner_language(self):
+        task = SetupTask(
+            task_id="configure_tariff",
+            title="Choose your electricity plan",
+            status="action_needed",
+            priority=SetupTaskPriority("high"),
+            estimated_effort="2 minutes",
+            action_label="Choose Plan",
+            action_href="#setup-tariff",
+            rationale="Choose your retailer and electricity plan so PowerMonitor can explain costs.",
+            source="settings.tariff",
+        )
+        setup = SetupChecklist(
+            household_id="home",
+            generated_at="2026-07-03T09:00:00+08:00",
+            progress=SetupProgress(0, 0, 1, [task]),
+            sections=[SetupSection("household", "Household", [task])],
+        )
+        settings = SimpleNamespace(
+            billing_period_start_day=6,
+            retailer="Synergy",
+            retailer_id="synergy",
+            state_or_territory="WA",
+            current_plan="synergy_ev_add_on",
+            tariff_add_on="none",
+            supply_charge_per_day=1.292269,
+            export_credit_rate=0.02,
+            import_rates={"super_off_peak": 0.08, "overnight": 0.19, "off_peak": 0.23, "peak": 0.53},
+            solar_setup_choice="solaredge",
+            ev_setup_choice="ocular_import",
+            battery_setup_choice="manual_later",
+        )
+
+        html = report.setup_page_html(setup, settings, provider_management=SimpleNamespace(providers=lambda: []))
+
+        self.assertIn("Where do you live?", html)
+        self.assertIn("Who is your electricity retailer?", html)
+        self.assertIn("What electricity plan are you on?", html)
+        self.assertIn("Do you have solar?", html)
+        self.assertIn("Do you have an EV?", html)
+        self.assertIn("Do you have a battery?", html)
+        self.assertIn("What PowerMonitor can do next", html)
+        self.assertIn("Fastest path to a useful first recommendation", html)
+        self.assertIn("Connected services", html)
+        for blocked in ("Provider Runtime", "Collector", "Observation", "Decision Engine", "Household State", "Promotion", "Lifecycle"):
+            self.assertNotIn(blocked, html)
 
     def test_manual_tariff_form_has_manual_plan_without_catalogue_add_on(self):
         html = report.billing_cycle_setup_html(

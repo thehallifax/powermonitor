@@ -58,6 +58,10 @@ class RecommendationPresentation:
     summary: str
     recommended_action: str
     rationale: str
+    what_happened: str
+    why_we_think_this: str
+    what_to_check: str
+    if_ignored: str
     confidence: str
     evidence: list[RecommendationEvidence]
     urgency: RecommendationPriority
@@ -104,6 +108,10 @@ class RecommendationPresentation:
             "recommended_action": self.recommended_action,
             "action": self.recommended_action,
             "rationale": self.rationale,
+            "what_happened": self.what_happened,
+            "why_we_think_this": self.why_we_think_this,
+            "what_to_check": self.what_to_check,
+            "if_ignored": self.if_ignored,
             "confidence": self.confidence,
             "evidence": [item.as_dict() for item in self.evidence],
             "urgency": self.urgency.as_dict(),
@@ -145,6 +153,10 @@ class RecommendationAdapter:
             for advisor in advisor_explanations or []
             if _get(advisor, "decision_id")
         }
+        actionable_decisions = [
+            decision for decision in decisions
+            if str(_get(decision, "decision_type") or _get(decision, "type") or "") != "NO_ACTION"
+        ]
         presentations = [
             self.adapt_one(
                 decision,
@@ -153,7 +165,7 @@ class RecommendationAdapter:
                 context=context,
                 behaviour=behaviour,
             )
-            for decision in decisions
+            for decision in actionable_decisions
         ]
         return sorted(presentations, key=lambda item: (-item.display_priority, item.title))
 
@@ -172,14 +184,18 @@ class RecommendationAdapter:
         evidence = [_evidence(item) for item in list(_get(decision, "evidence") or [])]
         primary_reason = reasons[0].summary if reasons else ""
         outcome = _get(decision, "outcome") or {}
-        action = str(_get(outcome, "expected_effect") or _default_action(decision_type))
+        action = _plain_wording(str(_get(outcome, "expected_effect") or _default_action(decision_type)))
         title = _title(decision_type)
-        summary = primary_reason or action
-        rationale = " ".join(item.summary for item in reasons).strip() or summary
+        summary = _plain_wording(primary_reason or action)
+        rationale = _plain_wording(" ".join(item.summary for item in reasons).strip() or summary)
+        impact = _financial_impact(_get(decision, "financial_impact"))
+        what_happened = _what_happened(decision_type, decision, summary, household_state, behaviour)
+        why_we_think_this = _why_we_think_this(decision_type, evidence, rationale, household_state, context, behaviour)
+        what_to_check = _what_to_check(decision_type, household_state, context, behaviour)
+        if_ignored = _if_ignored(decision_type, impact)
         urgency = _priority(_get(decision, "priority"))
         category = _category(decision_type)
         confidence = _display_confidence(_get(decision, "confidence"))
-        impact = _financial_impact(_get(decision, "financial_impact"))
         decision_payload = decision.as_dict() if hasattr(decision, "as_dict") else dict(decision)
         advisor_payload = advisor_explanation.as_dict() if hasattr(advisor_explanation, "as_dict") else advisor_explanation
         return RecommendationPresentation(
@@ -190,6 +206,10 @@ class RecommendationAdapter:
             summary=summary,
             recommended_action=action,
             rationale=rationale,
+            what_happened=what_happened,
+            why_we_think_this=why_we_think_this,
+            what_to_check=what_to_check,
+            if_ignored=if_ignored,
             confidence=confidence,
             evidence=evidence,
             urgency=urgency,
@@ -258,7 +278,7 @@ def _category(decision_type: str) -> RecommendationCategory:
         "WAIT_FOR_SOLAR": ("solar", "Solar", "sun"),
         "REVIEW_BILLING": ("billing", "Bills", "receipt"),
         "MONITOR_USAGE": ("monitoring", "Monitoring", "activity"),
-        "INVESTIGATE_ANOMALY": ("anomaly", "Anomaly", "search"),
+        "INVESTIGATE_ANOMALY": ("monitoring", "Monitoring", "search"),
         "REVIEW_PROVIDER": ("monitoring", "Monitoring", "wifi-alert"),
         "REVIEW_SETUP": ("setup", "Setup", "settings"),
         "DATA_INSUFFICIENT": ("data_quality", "Data Quality", "database"),
@@ -274,7 +294,7 @@ def _title(decision_type: str) -> str:
         "WAIT_FOR_SOLAR": "Wait for stronger solar evidence",
         "REVIEW_BILLING": "Review current bill trajectory",
         "MONITOR_USAGE": "Monitor household usage",
-        "INVESTIGATE_ANOMALY": "Investigate unusual household behaviour",
+        "INVESTIGATE_ANOMALY": "Potential issue detected",
         "REVIEW_PROVIDER": "Review provider health",
         "REVIEW_SETUP": "Finish required setup",
         "DATA_INSUFFICIENT": "Improve data quality",
@@ -284,10 +304,173 @@ def _title(decision_type: str) -> str:
 
 def _default_action(decision_type: str) -> str:
     return {
+        "DATA_INSUFFICIENT": "We don't yet have enough information to make a recommendation.",
         "NO_ACTION": "Continue monitoring current household state.",
         "MONITOR_USAGE": "Keep monitoring this pattern before taking action.",
-        "INVESTIGATE_ANOMALY": "Investigate the active anomaly using its evidence trail.",
+        "INVESTIGATE_ANOMALY": "Review the supporting data before taking action.",
     }.get(decision_type, "Review this household decision.")
+
+
+def _what_happened(
+    decision_type: str,
+    decision: Any,
+    summary: str,
+    household_state: Optional[Any],
+    behaviour: Optional[Any],
+) -> str:
+    if decision_type == "DATA_INSUFFICIENT":
+        return "PowerMonitor does not yet have enough verified household data to make a useful recommendation."
+    if decision_type == "NO_ACTION":
+        return "Nothing in the current household data needs action right now."
+    if decision_type == "REVIEW_BILLING":
+        projected = _money_value(_get(_get(decision, "financial_impact") or {}, "billing_period"))
+        if projected:
+            return f"Your bill projection is worth checking. Estimated impact: {projected}."
+        return "Your bill trajectory is worth checking against your usual spending pattern."
+    if decision_type == "INVESTIGATE_ANOMALY":
+        baseload = _nested_number(behaviour, "baseload", "overnight_baseload_watts")
+        if baseload:
+            return f"Your overnight electricity use averages about {baseload:.0f} W, and the latest pattern looks different from normal."
+        return "PowerMonitor found a household pattern that looks different from your normal behaviour."
+    if decision_type in {"CHARGE_NOW", "WAIT_FOR_CHEAPER_WINDOW", "WAIT_FOR_SOLAR"}:
+        tariff = _nested_value(household_state, "tariff", "active_label")
+        if tariff:
+            return f"The current tariff window is {tariff}, so charging timing matters."
+        return "The current charging decision depends on tariff timing and available household evidence."
+    if decision_type == "REVIEW_PROVIDER":
+        return "One of the data sources PowerMonitor depends on may need attention."
+    if decision_type == "REVIEW_SETUP":
+        return "Some setup is still missing, so PowerMonitor cannot explain every household pattern yet."
+    return summary
+
+
+def _why_we_think_this(
+    decision_type: str,
+    evidence: list[RecommendationEvidence],
+    rationale: str,
+    household_state: Optional[Any],
+    context: Optional[Any],
+    behaviour: Optional[Any],
+) -> str:
+    if decision_type == "DATA_INSUFFICIENT":
+        return "The available readings are missing, stale, estimated, or incomplete."
+    if decision_type == "INVESTIGATE_ANOMALY":
+        baseline = _nested_number(behaviour, "baseload", "overnight_baseload_watts")
+        variance = _nested_number(behaviour, "baseload", "normal_variance_watts")
+        if baseline and variance:
+            return f"This is being compared with your learned overnight baseline of about {baseline:.0f} W, allowing for normal variation of about {variance:.0f} W."
+    if decision_type == "REVIEW_BILLING":
+        billing = _get(context, "billing")
+        if billing:
+            return f"The billing context is {str(billing).replace('_', ' ').lower()}, based on the current bill period and available readings."
+    if evidence:
+        first = evidence[0]
+        value = first.value if first.value is not None else first.signal
+        return f"PowerMonitor is using {first.source} evidence: {value}."
+    return rationale
+
+
+def _what_to_check(
+    decision_type: str,
+    household_state: Optional[Any],
+    context: Optional[Any],
+    behaviour: Optional[Any],
+) -> str:
+    del household_state, context
+    if decision_type == "DATA_INSUFFICIENT":
+        return "Check live data collection, provider sign-in, and whether enough days of readings have been collected."
+    if decision_type == "INVESTIGATE_ANOMALY":
+        return "Check pool pump schedules, hot water, heating or cooling, fridges/freezers, networking gear, and appliances left running overnight."
+    if decision_type == "REVIEW_BILLING":
+        return "Check recent high-cost days, peak-period use, EV charging sessions, and whether this bill period has unusual usage."
+    if decision_type == "WAIT_FOR_CHEAPER_WINDOW":
+        return "Check whether EV charging, hot water, dishwasher, washing machine, or other flexible loads can wait."
+    if decision_type == "WAIT_FOR_SOLAR":
+        return "Check live solar production before starting flexible daytime loads."
+    if decision_type == "CHARGE_NOW":
+        return "Check whether the EV or another flexible load is ready to use this low-cost window."
+    if decision_type == "REVIEW_PROVIDER":
+        return "Check the provider connection, last successful sync, and whether credentials need refreshing."
+    if decision_type == "REVIEW_SETUP":
+        return "Check the setup tasks PowerMonitor marks as incomplete."
+    if decision_type == "NO_ACTION":
+        return "Nothing specific. Keep collecting data so PowerMonitor can spot changes."
+    preferred = _nested_value(behaviour, "ev", "preferred_charging_window")
+    if preferred:
+        return f"Check whether today's behaviour differs from your usual {preferred} pattern."
+    return "Check the supporting evidence and recent household activity."
+
+
+def _if_ignored(decision_type: str, impact: Optional[FinancialImpact]) -> str:
+    impact_text = _impact_text(impact)
+    if decision_type == "DATA_INSUFFICIENT":
+        return "PowerMonitor may stay cautious and avoid making confident recommendations."
+    if decision_type == "NO_ACTION":
+        return "Nothing needs action now; PowerMonitor will keep watching for changes."
+    if decision_type == "REVIEW_BILLING":
+        return f"The bill may keep tracking above normal{impact_text}." if impact_text else "The bill may keep tracking above normal without an early warning."
+    if decision_type in {"WAIT_FOR_CHEAPER_WINDOW", "CHARGE_NOW", "WAIT_FOR_SOLAR"}:
+        return f"Flexible loads may cost more than necessary{impact_text}." if impact_text else "Flexible loads may cost more than necessary."
+    if decision_type == "INVESTIGATE_ANOMALY":
+        return f"An unusual load could keep adding cost{impact_text}." if impact_text else "An unusual load could keep adding cost or hide a device problem."
+    if decision_type in {"REVIEW_PROVIDER", "REVIEW_SETUP"}:
+        return "Future recommendations may be delayed, less specific, or suppressed until the data improves."
+    return f"The pattern may continue{impact_text}." if impact_text else "The pattern may continue."
+
+
+def _plain_wording(value: str) -> str:
+    replacements = {
+        "Investigate the active anomaly using its evidence trail.": "Review the supporting data before taking action.",
+        "Investigate the active anomaly": "Review the potential issue",
+        "evidence trail": "supporting data",
+        "anomaly": "potential issue",
+        "Anomaly": "Potential issue",
+    }
+    text = str(value or "")
+    for technical, plain in replacements.items():
+        text = text.replace(technical, plain)
+    return text
+
+
+def _impact_text(impact: Optional[FinancialImpact]) -> str:
+    if not impact:
+        return ""
+    for value, suffix in (
+        (impact.today, " today"),
+        (impact.billing_period, " this billing period"),
+        (impact.yearly, " per year"),
+    ):
+        if value is not None:
+            return f" (around ${float(value):,.2f}{suffix})"
+    return ""
+
+
+def _money_value(value: Any) -> Optional[str]:
+    try:
+        if value is None:
+            return None
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _nested_value(source: Any, *keys: str) -> Any:
+    current = source
+    for key in keys:
+        current = _get(current, key)
+        if current is None:
+            return None
+    return current
+
+
+def _nested_number(source: Any, *keys: str) -> Optional[float]:
+    value = _nested_value(source, *keys)
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _display_priority(decision_type: str, urgency: RecommendationPriority, confidence: str, impact: Optional[FinancialImpact]) -> int:

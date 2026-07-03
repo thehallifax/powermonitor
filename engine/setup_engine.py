@@ -112,13 +112,13 @@ class SetupEngine:
         ready = bool(tariff and tariff.usable) or bool(saved and setup_mode in {"catalog", "manual"} and plan)
         return task(
             "configure_tariff",
-            "Configure electricity tariff",
+            "Choose your electricity plan",
             ready,
             "high",
             "2 minutes",
-            "Go to Tariff Settings",
+            "Choose Plan",
             "#setup-tariff",
-            tariff.reason if tariff else "Tariff selection is saved." if ready else "Tariff capability is unavailable.",
+            "Your electricity plan is saved." if ready else "Choose your retailer and electricity plan so PowerMonitor can explain costs.",
             "settings.tariff" if ready and not (tariff and tariff.usable) else "HouseholdCapabilitySummary.tariff",
         )
 
@@ -131,13 +131,13 @@ class SetupEngine:
         )
         return task(
             "configure_billing_cycle",
-            "Configure billing cycle",
+            "Set your billing cycle",
             ready,
             "medium",
             "2 minutes",
-            "Edit Billing Cycle",
+            "Set Billing Cycle",
             "#setup-billing",
-            "Billing cycle is configured." if ready else "Set the billing cycle start day used for reports and projections.",
+            "Your billing cycle is saved." if ready else "Set the day your bill usually starts so projections line up with your bill.",
             "settings.billing_cycle",
         )
 
@@ -145,13 +145,13 @@ class SetupEngine:
         ready = bool(goals)
         return task(
             "configure_household_goals",
-            "Configure household goals",
+            "Choose household goals",
             ready,
             "medium",
             "3 minutes",
             "Review Goals",
             "#home-goals",
-            "Goal Engine has active household goals." if ready else "Goal Engine has no active household goals to evaluate.",
+            "Household goals are ready." if ready else "Optional: add goals later if you want PowerMonitor to track a target.",
             "GoalsEngine",
         )
 
@@ -176,23 +176,23 @@ class SetupEngine:
                     and managed_provider.lifecycle_state in {ProviderConnectionStatus.CONNECTED, ProviderConnectionStatus.CONFIGURED, ProviderConnectionStatus.SYNCING}
                     and managed_provider.sync_state in {ProviderSyncState.SYNCED, ProviderSyncState.UNKNOWN}
                 )
-                rationale = f"{rationale} Provider: {managed_provider.name} ({managed_provider.lifecycle_state.value})."
+                rationale = f"{managed_provider.name} is selected for solar data."
                 source = "ProviderManagement.solar"
                 action_href = f"#system-provider-{managed_provider.provider_id}"
             elif solar_provider:
-                rationale = f"{rationale} Provider: {solar_provider.name} ({solar_provider.status.value})."
+                rationale = f"{solar_provider.name} can add solar production and export history."
                 source = "ProviderRegistry.solar"
                 action_href = f"#system-provider-registry-{solar_provider.provider_id}"
             tasks.append(
                 task(
                     "connect_solar_provider",
-                    "Connect solar provider",
+                    "Add solar data",
                     provider_ready,
                     "high",
                     "5 minutes",
-                    "Manage Provider",
+                    "Add Solar",
                     action_href,
-                    rationale,
+                    rationale if solar_provider or managed_provider else "Add solar data now, or skip it and add it later.",
                     source,
                 )
             )
@@ -213,7 +213,7 @@ class SetupEngine:
             )
             detail = ev.reason if ev else "EV charging capability is unavailable."
             if supported:
-                detail = f"{detail} Supported upload paths: {supported}."
+                detail = f"{detail} Supported files: {supported}."
             import_provider_names = [
                 provider.name
                 for provider in (provider_registry.providers_with_capability(ProviderCapability.IMPORT_ONLY) if provider_registry else [])
@@ -225,17 +225,17 @@ class SetupEngine:
             if managed_imports:
                 import_provider_names = [provider.name for provider in managed_imports]
             if import_provider_names:
-                detail = f"{detail} Import providers: {', '.join(import_provider_names)}."
+                detail = f"{detail} Available upload option: {', '.join(import_provider_names)}."
             tasks.append(
                 task(
                     "upload_ev_charging_history",
-                    "Upload EV charging history",
+                    "Add EV charging history",
                     bool(ev and ev.usable),
                     "high",
                     "4 minutes",
-                    "Upload History",
+                    "Add EV History",
                     "#imports",
-                    detail,
+                    detail if supported or import_provider_names or (ev and ev.usable) else "Import EV charging history now, or skip it and add it later.",
                     "ProviderManagement.imports" if managed_imports else "Import Framework",
                 )
             )
@@ -246,13 +246,13 @@ class SetupEngine:
         ready = status == "ok"
         return task(
             "collector_offline",
-            "Live data unavailable",
+            "Live updates unavailable",
             ready,
             "high",
             "3 minutes",
-            "Why isn't live data working?",
+            "Review Live Data",
             "#system-live-data",
-            str(collector_health.get("collector_message") or collector_health.get("message") or status),
+            "Live updates are working." if ready else "PowerMonitor can still use saved readings and imports, but right-now checks are limited.",
             "Data connection",
         )
 
@@ -267,13 +267,13 @@ class SetupEngine:
         ready = bool(latest and now - latest <= timedelta(hours=24))
         return task(
             "data_older_than_24_hours",
-            "Data older than 24 hours",
+            "Refresh household data",
             ready,
             "high",
             "2 minutes",
             "Can I trust today's advice?",
             "#system-data-quality",
-            data_freshness.reason if data_freshness else "No data freshness capability is available.",
+            "Household data is recent." if ready else "Recent household data helps PowerMonitor give confident advice.",
             "DataEngine.freshness",
         )
 

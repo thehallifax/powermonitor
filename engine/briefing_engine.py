@@ -74,7 +74,7 @@ class BriefingEngine:
             BriefingSection("Watch This", "items_to_watch", watch_items),
         ]
         return DailyBriefing(
-            greeting=_greeting(briefing_date or date.today()),
+            greeting=_greeting(briefing_date or date.today(), context),
             overall_household_status=_overall_status(ordered, context),
             overall_confidence=_overall_confidence(ordered),
             overall_freshness=_overall_freshness(ordered),
@@ -106,7 +106,7 @@ def _presentation_briefing(
         BriefingSection("Watch This", "items_to_watch", watch_items),
     ]
     return DailyBriefing(
-        greeting=_greeting(briefing_date),
+        greeting=_greeting(briefing_date, context),
         overall_household_status=_presentation_overall_status(presentations, context),
         overall_confidence=_presentation_overall_confidence(presentations),
         overall_freshness="Current household data",
@@ -307,13 +307,22 @@ def _briefing_priority_from_presentation(presentation, advisors: AdvisorCollecti
         recommendation=presentation.recommended_action,
         status=_decision_status(decision_type),
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from available household data.",
+        confidence_reason=_confidence_reason_from_presentation(presentation),
         freshness="Current household data",
         estimated_financial_impact=presentation.financial_impact,
         supporting_advisors=supporting or ["Household data"],
         decision_id=presentation.decision_id,
         decision_type=decision_type,
     )
+
+
+def _confidence_reason_from_presentation(presentation) -> str:
+    confidence = str(presentation.confidence or "Low")
+    if confidence.lower() == "high":
+        return "High confidence from the household data PowerMonitor can verify."
+    if confidence.lower() == "medium":
+        return "Some uncertainty remains; this is based on available readings and tariff timing."
+    return "Low confidence: PowerMonitor cannot verify enough live household data yet."
 
 
 def _supporting_ids(items: list[BriefingPriority]) -> set[str]:
@@ -393,14 +402,14 @@ def _overall_status(advisors: list[Advisor], context: Optional[CurrentHouseholdC
     if not advisors:
         return "No active recommendations are available today."
     if context and context.time == TimeContext.NIGHT:
-        return "Night context is active, so the briefing focuses on overnight cost, baseload, and tomorrow's solar window."
+        return "Tonight, focus on overnight tariffs. Solar-dependent suggestions can wait until daylight."
     if context and context.time == TimeContext.EARLY_MORNING:
-        return "Morning context is active, so the briefing focuses on today's outlook and early flexible-load choices."
+        return "This morning, PowerMonitor is checking today's outlook and early flexible-load choices."
     if context and context.time in {TimeContext.MORNING, TimeContext.MIDDAY, TimeContext.AFTERNOON}:
         if context.solar != SolarContext.SOLAR_IMPOSSIBLE:
-            return "Daylight context is active, so the briefing focuses on solar utilisation, exports, and flexible loads."
+            return "Today, focus on solar use, exports, and flexible loads while daylight is available."
     if context and context.time == TimeContext.EVENING:
-        return "Evening context is active, so the briefing focuses on tonight's charging and avoiding expensive usage."
+        return "This evening, focus on tonight's charging window and higher-cost usage."
     statuses = {item.status for item in advisors}
     if statuses & {"AVOID", "HIGH", "INEFFICIENT"}:
         return "There is one household item worth acting on first."
@@ -408,7 +417,7 @@ def _overall_status(advisors: list[Advisor], context: Optional[CurrentHouseholdC
         return "There is a timely opportunity to review today."
     if statuses & {"IMPROVING", "ON_TRACK", "EXCELLENT", "GOOD"}:
         return "The household is broadly on track today."
-    return "PowerMonitor needs fresher data for a confident briefing."
+    return "PowerMonitor needs fresher data before giving confident guidance."
 
 
 def _overall_confidence(advisors: list[Advisor]) -> str:
@@ -449,7 +458,7 @@ def _suggested_action(
         return watch_items[0].recommendation
     if positives:
         return positives[0].recommendation
-    return "No action is needed until more advisor data is available."
+    return "No action is needed until more household data is available."
 
 
 def _estimated_savings(advisors: list[Advisor]) -> Optional[FinancialImpact]:
@@ -483,8 +492,13 @@ def _read_time_minutes(
     return max(1, min(3, 1 + item_count // 4))
 
 
-def _greeting(briefing_date: date) -> str:
-    return f"Good morning. Here is your {briefing_date.strftime('%A')} PowerMonitor briefing."
+def _greeting(briefing_date: date, context: Optional[CurrentHouseholdContext] = None) -> str:
+    greeting = "Good morning"
+    if context and context.time in {TimeContext.MIDDAY, TimeContext.AFTERNOON}:
+        greeting = "Good afternoon"
+    elif context and context.time in {TimeContext.EVENING, TimeContext.NIGHT}:
+        greeting = "Good evening"
+    return f"{greeting}. Here is your {briefing_date.strftime('%A')} PowerMonitor briefing."
 
 
 def _impact_value(impact: Optional[FinancialImpact]) -> float:
@@ -524,7 +538,7 @@ def _decision_title(decision_type: str) -> str:
         "REVIEW_SETUP": "Finish setup",
         "REVIEW_BILLING": "Review bill trajectory",
         "MONITOR_USAGE": "Monitor usage",
-        "INVESTIGATE_ANOMALY": "Investigate unusual behaviour",
+        "INVESTIGATE_ANOMALY": "Potential issue detected",
         "DATA_INSUFFICIENT": "Evidence is insufficient",
         "NO_ACTION": "No immediate action",
     }.get(decision_type, decision_type.replace("_", " ").title())
@@ -552,14 +566,14 @@ def _financial_impact_from_decision(decision) -> Optional[FinancialImpact]:
 
 def _presentation_overall_status(presentations: list, context: Optional[CurrentHouseholdContext]) -> str:
     if context and context.time == TimeContext.NIGHT:
-        return "Night context is active, and the briefing is summarising current Household Decisions."
+        return "Tonight, PowerMonitor is summarising current household decisions with tariff timing first."
     if not presentations:
-        return "No active Household Decisions are available."
+        return "No active household decisions are available."
     top = presentations[0]
     top_type = str((top.decision or {}).get("decision_type") or (top.decision or {}).get("type") or "")
     if top_type == "NO_ACTION":
         return "PowerMonitor does not see an immediate household action."
-    return "PowerMonitor has identified the most relevant household action."
+    return "PowerMonitor has identified the most relevant household action from the data it can verify."
 
 
 def _presentation_overall_confidence(presentations: list) -> str:

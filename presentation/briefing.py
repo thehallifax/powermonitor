@@ -249,12 +249,20 @@ def _fallback_decision_explanation(decision: Decision) -> DecisionExplanation:
             for key, value in decision.evidence.items()
         ] or [decision.finding],
         financial_impact=_financial_impact_text(decision),
-        confidence_reason=f"{decision.confidence} confidence from available household data.",
+        confidence_reason=_confidence_reason(decision.confidence),
         data_sources_used=list(decision.data_sources_used),
         freshness_completeness_note=(
             f"Decision expires at {decision.expires_at}." if decision.expires_at else None
         ),
     )
+
+
+def _confidence_reason(confidence: str) -> str:
+    if str(confidence).lower() == "high":
+        return "High confidence from the household data PowerMonitor can verify."
+    if str(confidence).lower() == "medium":
+        return "Some uncertainty remains; this is based on available readings and tariff timing."
+    return "Low confidence: PowerMonitor cannot verify enough live household data yet."
 
 
 def _overall_confidence(decisions: list[Decision]) -> str:

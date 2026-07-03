@@ -115,6 +115,9 @@ def update_billing_cycle_settings(
     current_plan: str = DEFAULT_PLAN,
     tariff_add_on: str = "none",
     manual_rates: Optional[dict] = None,
+    solar_setup_choice: str = "none",
+    ev_setup_choice: str = "none",
+    battery_setup_choice: str = "none",
 ) -> dict:
     try:
         start_day = int(billing_period_start_day)
@@ -145,6 +148,9 @@ def update_billing_cycle_settings(
             "retailer_id": retailer_id,
             "current_plan": plan,
             "tariff_add_on": add_on,
+            "solar_setup_choice": _setup_choice(solar_setup_choice, {"none", "solaredge", "home_assistant", "manual_later"}),
+            "ev_setup_choice": _setup_choice(ev_setup_choice, {"none", "ocular_import", "home_assistant", "manual_later"}),
+            "battery_setup_choice": _setup_choice(battery_setup_choice, {"none", "home_assistant", "manual_later"}),
         }
     )
     if plan == MANUAL_TARIFF_ID or retailer_id == MANUAL_TARIFF_ID:
@@ -161,6 +167,11 @@ def update_billing_cycle_settings(
     temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(settings_path)
     return raw
+
+
+def _setup_choice(value: str, allowed: set[str]) -> str:
+    choice = str(value or "none")
+    return choice if choice in allowed else "none"
 
 
 def _manual_tariff_settings(values: dict) -> dict:
@@ -413,6 +424,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             retailer=self.param(params, "retailer", ""),
             current_plan=self.param(params, "current_plan", ""),
             tariff_add_on=self.param(params, "tariff_add_on", "none"),
+            solar_setup_choice=self.param(params, "solar_setup_choice", "none"),
+            ev_setup_choice=self.param(params, "ev_setup_choice", "none"),
+            battery_setup_choice=self.param(params, "battery_setup_choice", "none"),
             manual_rates={
                 "supply_charge_per_day": self.param(params, "manual_supply_charge_per_day"),
                 "export_credit_rate": self.param(params, "manual_export_credit_rate"),

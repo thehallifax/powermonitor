@@ -53,6 +53,27 @@ class SessionRefreshFailure(RuntimeError):
     pass
 
 
+class CredentialsMissing(SessionRefreshFailure):
+    pass
+
+
+class SignInFailed(SessionRefreshFailure):
+    pass
+
+
+class SolarEdgeUnavailable(SessionRefreshFailure):
+    pass
+
+
+SECRET_PATTERNS = (
+    (re.compile(r"(Cookie:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
+    (re.compile(r"(Authorization:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
+    (re.compile(r"[A-Za-z0-9_.%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "REDACTED_EMAIL"),
+    (re.compile(r"(password\s*[=:]\s*)\S+", re.IGNORECASE), r"\1REDACTED"),
+    (re.compile(r"(token\s*[=:]\s*)\S+", re.IGNORECASE), r"\1REDACTED"),
+)
+
+
 class SolarEdgeAdapter:
     """Reference provider adapter for the existing SolarEdge collector."""
 
@@ -62,7 +83,7 @@ class SolarEdgeAdapter:
     def authenticate(self) -> ProviderAuthentication:
         try:
             read_session_header()
-        except (FileNotFoundError, ValueError) as exc:
+        except AuthenticationFailure as exc:
             return ProviderAuthentication(
                 authenticated=False,
                 refresh_required=True,
@@ -75,7 +96,7 @@ class SolarEdgeAdapter:
         try:
             refresh_solaredge_session()
             read_session_header()
-        except (SessionRefreshFailure, FileNotFoundError, ValueError) as exc:
+        except (SessionRefreshFailure, AuthenticationFailure) as exc:
             return ProviderAuthentication(
                 authenticated=False,
                 refresh_required=True,
@@ -89,7 +110,11 @@ class SolarEdgeAdapter:
         output_path.unlink(missing_ok=True)
         started = datetime.now().astimezone()
         try:
-            status = fetch_solaredge(read_session_header(), date.today(), output_path)
+            try:
+                status = fetch_solaredge(read_session_header(), date.today(), output_path)
+            except AuthenticationFailure:
+                refresh_solaredge_session()
+                status = fetch_solaredge(read_session_header(), date.today(), output_path)
             measurements = validate_response(output_path, date.today())
             success = True
             warning = None
@@ -153,7 +178,14 @@ def safe_error_message(exc: BaseException) -> str:
         return f"command failed with exit code {exc.returncode}"
     if isinstance(exc, subprocess.TimeoutExpired):
         return "command timed out"
-    return str(exc)
+    return redact_sensitive(str(exc))
+
+
+def redact_sensitive(message: str) -> str:
+    redacted = str(message or "")
+    for pattern, replacement in SECRET_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
 
 
 def setup_logging() -> None:
@@ -318,11 +350,11 @@ def generate_report() -> None:
 
 def read_session_header() -> str:
     if not COOKIE_PATH.exists():
-        raise FileNotFoundError(f"SolarEdge cookie file not found: {COOKIE_PATH}")
+        raise AuthenticationFailure("SolarEdge cookie is missing")
 
     session_header = COOKIE_PATH.read_text(encoding="utf-8").strip()
     if not session_header:
-        raise ValueError(f"SolarEdge cookie file is empty: {COOKIE_PATH}")
+        raise AuthenticationFailure("SolarEdge cookie is empty")
     return session_header
 
 
@@ -340,11 +372,21 @@ def refresh_solaredge_session() -> None:
         )
     except subprocess.TimeoutExpired as exc:
         logging.error("Automated SolarEdge session refresh timed out")
-        raise SessionRefreshFailure("Automated SolarEdge session refresh timed out") from exc
+        raise SolarEdgeUnavailable("Network unavailable. SolarEdge sign-in timed out.") from exc
     except subprocess.SubprocessError as exc:
-        logging.error("Automated SolarEdge session refresh failed")
+        output = redact_sensitive(" ".join([str(getattr(exc, "stdout", "") or ""), str(getattr(exc, "stderr", "") or "")]).strip())
+        lowered = output.lower()
+        logging.error("Automated SolarEdge session refresh failed: %s", output or "no output")
+        if "credentials are not configured" in lowered or "credentials missing" in lowered or "not configured" in lowered:
+            raise CredentialsMissing(
+                "Credentials missing. Add SolarEdge username/email and password, or refresh the cookie manually."
+            ) from exc
+        if any(marker in lowered for marker in ("login failed", "sign-in failed", "login fields", "no solaredge cookies", "authentication")):
+            raise SignInFailed("Sign-in failed. Check the saved SolarEdge username/email and password.") from exc
+        if any(marker in lowered for marker in ("network", "timeout", "unavailable", "dns", "connection")):
+            raise SolarEdgeUnavailable("SolarEdge unavailable. Check the network and try again.") from exc
         raise SessionRefreshFailure("Automated SolarEdge session refresh failed") from exc
-    safe_output = " ".join(refreshed.stdout.split())
+    safe_output = redact_sensitive(" ".join(refreshed.stdout.split()))
     if safe_output:
         logging.info("Automated SolarEdge session refresh result: %s", safe_output)
 
@@ -448,8 +490,9 @@ def main() -> None:
 
 
 def handle_failure(failure_type: str, message: str) -> None:
-    state = record_failure(failure_type, message)
-    logging.error("Collection failed [%s]: %s", failure_type, message)
+    safe_message = redact_sensitive(message)
+    state = record_failure(failure_type, safe_message)
+    logging.error("Collection failed [%s]: %s", failure_type, safe_message)
     try:
         if maybe_send_failure_notification(state):
             logging.info("Sent collector failure notification")
@@ -461,11 +504,20 @@ def handle_failure(failure_type: str, message: str) -> None:
 if __name__ == "__main__":
     try:
         main()
+    except CredentialsMissing as exc:
+        handle_failure("Credentials missing", str(exc))
+        raise SystemExit(1) from None
+    except SignInFailed as exc:
+        handle_failure("Sign-in failed", str(exc))
+        raise SystemExit(1) from None
+    except SolarEdgeUnavailable as exc:
+        handle_failure("SolarEdge unavailable", str(exc))
+        raise SystemExit(1) from None
     except AuthenticationFailure as exc:
-        handle_failure("SolarEdge session expired", str(exc))
+        handle_failure("Cookie expired", str(exc))
         raise SystemExit(1) from None
     except SessionRefreshFailure as exc:
-        handle_failure("SolarEdge session expired", str(exc))
+        handle_failure("SolarEdge unavailable", str(exc))
         raise SystemExit(1) from None
     except ReportGenerationFailure as exc:
         print(f"{exc}; see {LOG_PATH}", file=sys.stderr)

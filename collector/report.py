@@ -196,6 +196,9 @@ DEFAULT_SETTINGS = {
     "ev_baseline_watts": 250.0,
     "ev_data_source": "estimated",
     "home_assistant_url": "http://192.168.4.96:8123",
+    "solar_setup_choice": "none",
+    "ev_setup_choice": "none",
+    "battery_setup_choice": "none",
     "billing_period_start_day": 1,
     "current_billing_period_start": None,
     "current_billing_period_end": None,
@@ -240,6 +243,9 @@ class Settings:
     ev_baseline_watts: float
     ev_data_source: str
     home_assistant_url: str
+    solar_setup_choice: str
+    ev_setup_choice: str
+    battery_setup_choice: str
     billing_period_start_day: int
     current_billing_period_start: Optional[date]
     current_billing_period_end: Optional[date]
@@ -804,6 +810,9 @@ def load_settings() -> Settings:
         ev_baseline_watts=float(raw["ev_baseline_watts"]),
         ev_data_source=str(raw["ev_data_source"]),
         home_assistant_url=str(raw["home_assistant_url"]),
+        solar_setup_choice=str(raw.get("solar_setup_choice") or "none"),
+        ev_setup_choice=str(raw.get("ev_setup_choice") or "none"),
+        battery_setup_choice=str(raw.get("battery_setup_choice") or "none"),
         billing_period_start_day=int(raw["billing_period_start_day"]),
         current_billing_period_start=optional_date("current_billing_period_start"),
         current_billing_period_end=optional_date("current_billing_period_end"),
@@ -2078,11 +2087,7 @@ def hero_html(
     period_label: str = "Current billing period",
 ) -> str:
     status_class = "healthy" if health["status"] == "ok" else "warning"
-    status_text = (
-        "Live data sign-in needs attention"
-        if health["status"] == "SolarEdge session expired"
-        else health["status"].title()
-    )
+    status_text = collector_status_text(health)
     days_since_success = health.get("days_since_last_successful_collection")
     days_since_text = (
         f"{days_since_success:.2f} days" if days_since_success is not None else "Unavailable"
@@ -2267,21 +2272,27 @@ def ev_accuracy_html(settings: Settings) -> str:
 def authentication_alert_html(health: dict) -> str:
     status = str(health.get("status") or "").lower()
     failure_type = str(health.get("failure_type") or "").lower()
-    if "session expired" not in status and failure_type != "authentication failure":
+    auth_markers = ("session expired", "cookie expired", "credentials missing", "sign-in failed")
+    if not any(marker in status for marker in auth_markers) and failure_type != "authentication failure":
         return ""
     last_success = display_timestamp(health.get("last_successful_collection"))
+    title = "SolarEdge sign-in needs attention"
+    if "credentials missing" in status:
+        title = "SolarEdge credentials are missing"
+    elif "session expired" in status or "cookie expired" in status:
+        title = "SolarEdge session expired"
     return f"""
     <section class="auth-alert" role="alert">
       <div class="auth-alert-heading">
-        <div><span>Live data needs attention</span><h2>SolarEdge login expired</h2></div>
+        <div><span>Live data needs attention</span><h2>{html.escape(title)}</h2></div>
         <strong>Last successful update: {html.escape(last_success)}</strong>
       </div>
       <ol>
-        <li>Sign in to the SolarEdge monitoring website in your browser.</li>
-        <li>Copy the fresh request cookie into <code>collector/solaredge_cookie.txt</code>.</li>
-        <li>Run <code>python3 collector/test_cookie.py</code>, then <code>python3 collector/collect_today.py</code>.</li>
+        <li>Open Provider Management and update the SolarEdge username/email and password.</li>
+        <li>Run Test Connection, then run <code>python3 collector/collect_today.py</code>.</li>
+        <li>Use the manual cookie fallback only if automatic sign-in is unavailable.</li>
       </ol>
-      <p>Keep the cookie private. PowerMonitor never displays or logs its value.</p>
+      <p>PowerMonitor never displays or logs SolarEdge usernames, passwords, cookies, tokens, or authorization headers.</p>
     </section>
     """
 
@@ -2421,11 +2432,28 @@ def confidence_label(summary: Summary) -> tuple[str, str]:
 
 
 def collector_status_text(health: dict) -> str:
-    return (
-        "Live data sign-in needs attention"
-        if health.get("status") == "SolarEdge session expired"
-        else str(health.get("status") or "unknown").title()
-    )
+    status = str(health.get("status") or "unknown")
+    if status in {"SolarEdge session expired", "Cookie expired", "Sign-in failed"}:
+        return "Live data sign-in needs attention"
+    if status == "Credentials missing":
+        return "SolarEdge credentials missing"
+    if status == "SolarEdge unavailable":
+        return "SolarEdge unavailable"
+    return status.title()
+
+
+def collector_status_explanation(health: dict) -> str:
+    status = str(health.get("status") or "").lower()
+    message = str(health.get("collector_message") or health.get("failure_type") or "")
+    if "credentials missing" in status:
+        return "SolarEdge needs saved username/email and password before live solar updates can recover automatically."
+    if "sign-in failed" in status:
+        return "SolarEdge sign-in failed. Update the saved credentials, then test the connection."
+    if "cookie expired" in status or "session expired" in status:
+        return "SolarEdge live updates need a fresh sign-in. PowerMonitor can still use recent household history cautiously."
+    if "unavailable" in status:
+        return "SolarEdge could not be reached. Recent household history may still be used while live solar is unavailable."
+    return trust_wording(message or "Live updates could not be verified.")
 
 
 def customer_label(value: Any) -> str:
@@ -3274,6 +3302,7 @@ def daily_briefing_html(
     glance: Optional[GlanceState] = None,
     insights: Optional[list[HouseholdInsight]] = None,
     trends_report: Optional[HouseholdTrendsReport] = None,
+    health: Optional[dict] = None,
 ) -> str:
     action_items = dedupe_briefing_items([*briefing.top_priorities, *briefing.items_to_watch])
     positive_items = dedupe_briefing_items(briefing.positive_outcomes)
@@ -3286,7 +3315,7 @@ def daily_briefing_html(
     return f"""
     <section class="report-section briefing-section">
       {home_assistant_hero_html(briefing)}
-      {home_status_strip_html(briefing, glance)}
+      {home_status_strip_html(briefing, glance, health)}
       {actions}
       {secondary}
       {household_insights_html(insights or [])}
@@ -3417,10 +3446,10 @@ def home_assistant_hero_html(briefing: DailyBriefing) -> str:
     """
 
 
-def home_status_strip_html(briefing: DailyBriefing, glance: Optional[GlanceState]) -> str:
+def home_status_strip_html(briefing: DailyBriefing, glance: Optional[GlanceState], health: Optional[dict] = None) -> str:
     charge_title, charge_body, charge_tone = home_charge_summary(glance)
     spend_title, spend_body, spend_tone = home_spending_summary(briefing)
-    health_title, health_body, health_tone = home_health_summary(briefing, glance)
+    health_title, health_body, health_tone = home_health_summary(briefing, glance, health)
     return f"""
       <div class="home-status-grid">
         {home_status_tile_html("Can I charge?", charge_title, charge_body, charge_tone)}
@@ -3464,7 +3493,9 @@ def home_spending_summary(briefing: DailyBriefing) -> tuple[str, str, str]:
     return "Spending looks normal.", "No unusual bill pressure is showing in the current briefing.", "green"
 
 
-def home_health_summary(briefing: DailyBriefing, glance: Optional[GlanceState]) -> tuple[str, str, str]:
+def home_health_summary(briefing: DailyBriefing, glance: Optional[GlanceState], health: Optional[dict] = None) -> tuple[str, str, str]:
+    if health and str(health.get("status") or "").lower() not in {"", "ok"}:
+        return "Live data needs attention.", collector_status_explanation(health), "amber"
     if glance and glance.status in {"LIVE DATA UNAVAILABLE", "UNABLE TO VERIFY LIVE CONDITIONS"}:
         return "Live data needs attention.", trust_wording(glance.reason), "amber"
     if glance and glance.status == "NO DATA AVAILABLE":
@@ -3746,20 +3777,24 @@ def setup_progress_card_html(setup: Optional[SetupChecklist]) -> str:
     if progress.complete:
         return """
         <section class="setup-progress-card complete">
-          <div><span>Setup</span><h3>Your household is fully configured.</h3></div>
+          <div><span>First-time setup</span><h3>PowerMonitor is ready to help.</h3><p>You can add optional services later for more detailed advice.</p></div>
+          <a href="#setup">Review setup</a>
         </section>
         """
     remaining = "".join(
         f"<li>{html.escape(task.title)}</li>"
         for task in progress.remaining_tasks[:3]
     )
+    fastest = first_time_task_phrase(progress.remaining_tasks[0].title) if progress.remaining_tasks else "add recent readings or import history"
     return f"""
     <section class="setup-progress-card">
       <div>
-        <span>Setup</span>
-        <h3>{progress.completion_pct}% complete</h3>
-        <p>Remaining:</p>
+        <span>First-time setup</span>
+        <h3>PowerMonitor can start, but advice will improve with one more step.</h3>
+        <p>Can explain now: electricity plan, tariff timing, and bill estimates when data is available.</p>
+        <p>Needs next:</p>
         <ul>{remaining}</ul>
+        <p>Fastest path to a useful first recommendation: {html.escape(fastest)}.</p>
       </div>
       <a href="#setup">Continue setup</a>
     </section>
@@ -3787,15 +3822,39 @@ def setup_task_html(task: SetupTask) -> str:
 
 def setup_section_html(section: SetupSection) -> str:
     tasks = "".join(setup_task_html(task) for task in section.tasks) or '<p class="notice">No setup tasks for this section.</p>'
+    title = setup_section_title(section)
     return f"""
     <section class="report-section setup-section">
       <div class="section-title">
-        <div><span class="eyebrow">{html.escape(section.title)}</span><h2>{section.completion_pct}% ready</h2></div>
-        <p>{section.completed_tasks} of {section.total_tasks} active tasks complete</p>
+        <div><span class="eyebrow">{html.escape(title)}</span><h2>{html.escape(setup_section_summary(section))}</h2></div>
+        <p>{html.escape(setup_section_note(section))}</p>
       </div>
       <div class="setup-task-list">{tasks}</div>
     </section>
     """
+
+
+def setup_section_title(section: SetupSection) -> str:
+    return {
+        "household": "Your household",
+        "energy_providers": "Connected services",
+        "imports": "Imported history",
+        "data_quality": "Advice confidence",
+    }.get(section.section_id, section.title)
+
+
+def setup_section_summary(section: SetupSection) -> str:
+    if section.completion_pct == 100:
+        return "Ready"
+    if section.section_id == "data_quality":
+        return "Confidence checks"
+    return "Still useful"
+
+
+def setup_section_note(section: SetupSection) -> str:
+    if section.completion_pct == 100:
+        return "This part is ready."
+    return "You can keep using PowerMonitor while this improves."
 
 
 def setup_integrations_html(provider_management: Optional[ProviderManager]) -> str:
@@ -3821,8 +3880,8 @@ def setup_integrations_html(provider_management: Optional[ProviderManager]) -> s
     return f"""
     <section class="report-section compact-section">
       <div class="section-title">
-        <div><span class="eyebrow">Available integrations</span><h2>Connect only what your household uses</h2></div>
-        <p>PowerMonitor can work with imports, live services, and local configuration without showing internal plumbing.</p>
+        <div><span class="eyebrow">Connected services</span><h2>Connect only what your household uses</h2></div>
+        <p>PowerMonitor can work with imports, live services, and local setup choices.</p>
       </div>
       <div class="provider-guidance-grid integration-summary-grid">
         <div><span>Connected</span><ul>{connected_rows}</ul></div>
@@ -3862,25 +3921,41 @@ def setup_page_html(
     return f"""
     {conflict_notice}
     {notification_notice}
-    <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Guided setup</span><h2>Start with these basics</h2></div><p>Most households only need billing, tariff, and one data source to begin.</p></div>
-      <div class="onboarding-steps">
-        <div><span>1</span><strong>Set billing and tariff</strong><p>Use the Billing Cycle panel below for the start day, retailer, and plan.</p></div>
-        <div><span>2</span><strong>Add household data</strong><p>Use Imports for Ocular EV history, or connect a live service such as SolarEdge or Home Assistant.</p></div>
-        <div><span>3</span><strong>Review confidence</strong><p>Only visit System when Setup points to a source or data freshness issue.</p></div>
-      </div>
-    </section>
-    {setup_integrations_html(provider_management)}
+    {first_time_intro_html(setup)}
     {billing_cycle_setup_html(settings)}
+    {first_time_finish_html(setup, settings)}
+    {setup_integrations_html(provider_management)}
     <section class="report-section compact-section">
       <div class="section-title">
         <div><span class="eyebrow">Setup</span><h2>{setup.progress.completion_pct}% complete</h2></div>
-        <p>{setup.progress.completed_tasks} of {setup.progress.total_tasks} active tasks complete</p>
+        <p>{first_time_progress_summary(setup)}</p>
       </div>
       <div class="setup-meter"><span style="width:{setup.progress.completion_pct}%"></span></div>
     </section>
     {sections}
     """
+
+
+def first_time_intro_html(setup: SetupChecklist) -> str:
+    return f"""
+    <section class="report-section compact-section first-time-intro">
+      <div class="section-title"><div><span class="eyebrow">First-time setup</span><h2>Start with the few answers PowerMonitor needs.</h2></div><p>{html.escape(first_time_progress_summary(setup))}</p></div>
+      <div class="onboarding-steps first-time-path">
+        <div><span>1</span><strong>Location</strong><p>Country and state decide which retailers and plans are shown.</p></div>
+        <div><span>2</span><strong>Electricity plan</strong><p>Choose your retailer and plan, or use manual tariff rates.</p></div>
+        <div><span>3</span><strong>Optional services</strong><p>Add solar, EV charging, or battery history now, or connect them later.</p></div>
+      </div>
+    </section>
+    """
+
+
+def first_time_progress_summary(setup: SetupChecklist) -> str:
+    if setup.progress.complete:
+        return "PowerMonitor has enough setup to start explaining your household."
+    remaining = [task.title for task in setup.progress.remaining_tasks[:2]]
+    if not remaining:
+        return "PowerMonitor can start now. Optional details can improve advice later."
+    return f"Next: {', '.join(remaining)}."
 
 
 def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
@@ -3891,6 +3966,7 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     current_plan = getattr(settings, "current_plan", DEFAULT_PLAN)
     supply_charge = getattr(settings, "supply_charge_per_day", DEFAULT_SETTINGS["supply_charge_per_day"])
     export_credit_rate = getattr(settings, "export_credit_rate", DEFAULT_SETTINGS["export_credit_rate"])
+    country_options = '<option value="AU" selected>Australia</option>'
     state_options = "".join(
         f'<option value="{html.escape(value)}"{" selected" if state_or_territory == value else ""}>{html.escape(label)}</option>'
         for value, label in STATE_OPTIONS
@@ -3906,18 +3982,70 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
         for value, label in supported_plan_options()
     ) + f'<option value="{MANUAL_TARIFF_ID}"{" selected" if current_plan == MANUAL_TARIFF_ID else ""}>{MANUAL_TARIFF_LABEL}</option>'
     rates = getattr(settings, "import_rates", DEFAULT_SETTINGS["import_rates"])
+    solar_choice = getattr(settings, "solar_setup_choice", "none")
+    ev_choice = getattr(settings, "ev_setup_choice", "none")
+    battery_choice = getattr(settings, "battery_setup_choice", "none")
     previews = tariff_catalog_previews_html()
     return f"""
     <section id="setup-billing" class="report-section setup-section">
       <div class="section-title">
-        <div><span class="eyebrow">Setup</span><h2>Billing and Tariff</h2></div>
-        <p>Used by bills, projections, comparisons, and setup readiness</p>
+        <div><span class="eyebrow">First-time setup</span><h2>Tell PowerMonitor about your household</h2></div>
+        <p>Answer what you know now. Anything optional can be added later.</p>
       </div>
       <form class="setup-config-form" method="post" action="/setup/billing-cycle">
-        <label><span>State / territory</span><select name="state_or_territory">{state_options}</select></label>
-        <label><span>Retailer</span><select name="retailer">{retailer_options}</select></label>
-        <label id="setup-tariff"><span>Plan</span><select name="current_plan">{plan_options}</select></label>
-        <label id="setup-billing-cycle"><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
+        <div class="first-time-question">
+          <span>1</span>
+          <div>
+            <h3>Where do you live?</h3>
+            <div class="setup-form-row">
+              <label><span>Country</span><select name="country">{country_options}</select></label>
+              <label><span>State / territory</span><select name="state_or_territory">{state_options}</select></label>
+            </div>
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>2</span>
+          <div>
+            <h3>Who is your electricity retailer?</h3>
+            <label><span>Retailer</span><select name="retailer">{retailer_options}</select></label>
+            <p>Choose Manual tariff if your retailer is not listed yet.</p>
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>3</span>
+          <div>
+            <h3>What electricity plan are you on?</h3>
+            <label id="setup-tariff"><span>Electricity plan</span><select name="current_plan">{plan_options}</select></label>
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>4</span>
+          <div>
+            <h3>When does your bill usually start?</h3>
+            <label id="setup-billing-cycle"><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>5</span>
+          <div>
+            <h3>Do you have solar?</h3>
+            {setup_choice_select("solar_setup_choice", solar_choice, (("none", "No"), ("solaredge", "SolarEdge"), ("home_assistant", "Home Assistant"), ("manual_later", "Other / manual later")))}
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>6</span>
+          <div>
+            <h3>Do you have an EV?</h3>
+            {setup_choice_select("ev_setup_choice", ev_choice, (("none", "No"), ("ocular_import", "Ocular import"), ("home_assistant", "Home Assistant"), ("manual_later", "Other / manual later")))}
+          </div>
+        </div>
+        <div class="first-time-question">
+          <span>7</span>
+          <div>
+            <h3>Do you have a battery?</h3>
+            {setup_choice_select("battery_setup_choice", battery_choice, (("none", "No"), ("home_assistant", "Home Assistant"), ("manual_later", "Other / manual later")))}
+          </div>
+        </div>
         <div class="catalogue-tariff-previews">
           {previews}
         </div>
@@ -3931,11 +4059,88 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
           <label><span>Off peak import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_off_peak" value="{rates.get("off_peak", 0):.6f}"></label>
           <label><span>Peak import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_peak" value="{rates.get("peak", 0):.6f}"></label>
         </fieldset>
-        <button type="submit">Save Billing Cycle</button>
+        <button type="submit">Finish setup</button>
       </form>
-      <p class="notice">Saving this completes the Billing Cycle setup task immediately. Current billing-period date overrides can still be kept in <code>config/settings.json</code> for exact bill matching.</p>
+      <p class="notice">Saving this gives PowerMonitor enough local setup to explain bills and tariff timing. Optional services can be connected later.</p>
     </section>
     """
+
+
+def setup_choice_select(name: str, selected: str, options: tuple[tuple[str, str], ...]) -> str:
+    choices = "".join(
+        f'<option value="{html.escape(value)}"{" selected" if selected == value else ""}>{html.escape(label)}</option>'
+        for value, label in options
+    )
+    return f'<label><span>Your answer</span><select name="{html.escape(name)}">{choices}</select></label>'
+
+
+def first_time_finish_html(setup: SetupChecklist, settings: Optional[Settings]) -> str:
+    can_explain, optional, later = first_time_finish_lists(setup, settings)
+    return f"""
+    <section class="report-section compact-section first-time-finish">
+      <div class="section-title"><div><span class="eyebrow">Finish setup</span><h2>What PowerMonitor can do next</h2></div><p>Useful now, better as you add history.</p></div>
+      <div class="provider-guidance-grid first-time-finish-grid">
+        <div><span>Can explain now</span><ul>{list_items_plain(can_explain)}</ul></div>
+        <div><span>Optional</span><ul>{list_items_plain(optional)}</ul></div>
+        <div><span>Connect later</span><ul>{list_items_plain(later)}</ul></div>
+      </div>
+      <p class="notice">{html.escape(first_recommendation_next_step(setup, settings))}</p>
+    </section>
+    """
+
+
+def first_time_finish_lists(setup: SetupChecklist, settings: Optional[Settings]) -> tuple[list[str], list[str], list[str]]:
+    can_explain = ["Your electricity plan and tariff timing", "Projected bill once readings or imports are available"]
+    optional = ["Solar details", "EV charging history", "Battery behaviour"]
+    later = []
+    if settings:
+        if settings.solar_setup_choice in {"solaredge", "home_assistant"}:
+            can_explain.append("Solar production after the service is connected")
+            optional.remove("Solar details")
+        elif settings.solar_setup_choice == "manual_later":
+            optional.remove("Solar details")
+            later.append("Solar details")
+        if settings.ev_setup_choice in {"ocular_import", "home_assistant"}:
+            can_explain.append("EV charging once history is imported or connected")
+            optional.remove("EV charging history")
+        elif settings.ev_setup_choice == "manual_later":
+            optional.remove("EV charging history")
+            later.append("EV charging history")
+        if settings.battery_setup_choice == "home_assistant":
+            can_explain.append("Battery behaviour once connected")
+            optional.remove("Battery behaviour")
+        elif settings.battery_setup_choice == "manual_later":
+            optional.remove("Battery behaviour")
+            later.append("Battery behaviour")
+    if not later:
+        later.append("Extra services only if you want more detail")
+    return can_explain, optional or ["Nothing required right now"], later
+
+
+def list_items_plain(items: list[str]) -> str:
+    return "".join(f"<li>{html.escape(item)}</li>" for item in items)
+
+
+def first_recommendation_next_step(setup: SetupChecklist, settings: Optional[Settings]) -> str:
+    if settings and settings.ev_setup_choice == "ocular_import":
+        return "Fastest path to a useful first recommendation: upload an Ocular charging export on the Imports page."
+    if settings and settings.solar_setup_choice in {"solaredge", "home_assistant"}:
+        return "Fastest path to a useful first recommendation: connect your solar service or add recent readings."
+    if setup.progress.remaining_tasks:
+        return f"Fastest path to a useful first recommendation: {first_time_task_phrase(setup.progress.remaining_tasks[0].title)}."
+    return "PowerMonitor can start with tariff timing now. Add readings or imports when you want more confident advice."
+
+
+def first_time_task_phrase(title: str) -> str:
+    replacements = {
+        "Add EV charging history": "add EV charging history",
+        "Choose your electricity plan": "choose your electricity plan",
+        "Set your billing cycle": "set your billing cycle",
+        "Add solar data": "add solar data",
+        "Refresh household data": "refresh household data",
+        "Live updates unavailable": "review live data",
+    }
+    return replacements.get(str(title), str(title).lower())
 
 
 def tariff_catalog_previews_html() -> str:
@@ -3973,9 +4178,10 @@ def home_page_html(
     bill_change: Optional[dict] = None,
     insights: Optional[list[HouseholdInsight]] = None,
     trends_report: Optional[HouseholdTrendsReport] = None,
+    health: Optional[dict] = None,
 ) -> str:
     return (
-        daily_briefing_html(briefing, goals or [], glance, insights, trends_report)
+        daily_briefing_html(briefing, goals or [], glance, insights, trends_report, health)
         + bill_change_explanation_html(bill_change, compact=True)
         + setup_progress_card_html(setup)
     )
@@ -5500,7 +5706,7 @@ def live_data_help_html(health: dict, summary: Summary) -> str:
     why = (
         "The latest live refresh completed successfully."
         if live_ok
-        else trust_wording(str(health.get("collector_message") or health.get("failure_type") or "The last live refresh did not complete."))
+        else collector_status_explanation(health)
     )
     if summary.intervals:
         effect = "Recent household information is still available, so PowerMonitor can provide cautious guidance instead of treating everything as unavailable."
@@ -6217,7 +6423,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health)}
   </section>
   <section id="setup" class="page">
     {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
@@ -6745,6 +6951,11 @@ def write_html(
     .setup-task-meta div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:11px; }}
     .setup-task-meta strong {{ display:block; margin-top:3px; font-size:13px; }}
     .setup-config-form {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:end; }}
+    .first-time-question {{ grid-column:1/-1; display:grid; grid-template-columns:44px 1fr; gap:14px; align-items:start; padding:16px; background:#fff; border:1px solid var(--line); border-radius:14px; }}
+    .first-time-question > span {{ display:grid; place-items:center; width:32px; height:32px; color:#fff; background:var(--deep-2); border-radius:50%; font-size:13px; font-weight:900; }}
+    .first-time-question h3 {{ margin:0 0 10px; font-size:18px; letter-spacing:-.025em; }}
+    .first-time-question p {{ margin:8px 0 0; color:var(--muted); font-size:12px; }}
+    .setup-form-row {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
     .setup-config-form label span {{ display:block; margin-bottom:5px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .setup-config-form input,.setup-config-form select,.setup-config-form button {{ width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
     .setup-config-form button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
@@ -6789,7 +7000,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
@@ -6803,6 +7014,7 @@ def write_html(
       .metric {{ min-height:auto; padding:16px; }} .metric span {{ max-width:none; }} .metric strong,.metric.primary strong {{ margin-top:16px; font-size:26px; letter-spacing:-.03em; }}
       .status-strip {{ grid-template-columns:1fr; }}
       .period-controls {{ padding:14px; }} .period-controls form {{ grid-template-columns:1fr; }} .period-controls button,.setup-config-form button,.import-form button {{ min-height:46px; }}
+      .first-time-question {{ grid-template-columns:1fr; gap:10px; padding:14px; }}
       .disclosure-panel summary {{ align-items:flex-start; flex-direction:column; }} .disclosure-panel summary small {{ text-align:left; }} .disclosure-panel summary::after {{ position:absolute; right:17px; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}

@@ -93,7 +93,7 @@ def _advisor_from_presentation(presentation: RecommendationPresentation) -> Advi
         recommendation=presentation.recommended_action,
         estimated_financial_impact=presentation.financial_impact,
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from available household data.",
+        confidence_reason=_confidence_reason(presentation.confidence),
         evidence_trail=EvidenceTrail([
             EvidenceItem(
                 source=item.source,
@@ -123,7 +123,7 @@ def _copy_advisor_with_presentation(advisor: Advisor, presentation: Recommendati
         recommendation=presentation.recommended_action,
         estimated_financial_impact=advisor.estimated_financial_impact,
         confidence=presentation.confidence,
-        confidence_reason=f"{presentation.confidence} confidence from available household data.",
+        confidence_reason=_confidence_reason(presentation.confidence),
         evidence_trail=advisor.evidence_trail,
         freshness=advisor.freshness,
         supporting_data_sources=advisor.supporting_data_sources,
@@ -155,3 +155,11 @@ def _copy_advisor_without_action(advisor: Advisor) -> Advisor:
         decision_type=advisor.decision_type,
         decision=advisor.decision,
     )
+
+
+def _confidence_reason(confidence: str) -> str:
+    if str(confidence).lower() == "high":
+        return "High confidence from the household data PowerMonitor can verify."
+    if str(confidence).lower() == "medium":
+        return "Some uncertainty remains; this is based on available readings and tariff timing."
+    return "Low confidence: PowerMonitor cannot verify enough live household data yet."

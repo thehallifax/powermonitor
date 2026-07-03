@@ -108,6 +108,29 @@ class WebConfigTests(unittest.TestCase):
         self.assertEqual(saved["import_rates"]["peak"], 0.327582)
         self.assertEqual(updated["comparison_plan_rates"]["flat_import_rate"], 0.30)
 
+    def test_first_time_setup_choices_are_saved_as_local_non_secret_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+
+            updated = web.update_billing_cycle_settings(
+                settings,
+                billing_period_start_day="6",
+                state_or_territory="WA",
+                retailer="synergy",
+                current_plan="synergy_ev_add_on",
+                solar_setup_choice="solaredge",
+                ev_setup_choice="ocular_import",
+                battery_setup_choice="manual_later",
+            )
+            saved = json.loads(settings.read_text(encoding="utf-8"))
+
+        self.assertEqual(updated["solar_setup_choice"], "solaredge")
+        self.assertEqual(updated["ev_setup_choice"], "ocular_import")
+        self.assertEqual(updated["battery_setup_choice"], "manual_later")
+        self.assertEqual(saved["current_plan"], "synergy_ev_add_on")
+        self.assertNotIn("password", json.dumps(saved).lower())
+        self.assertNotIn("token", json.dumps(saved).lower())
+
     def test_wa_synergy_ev_add_on_selection_applies_catalog_rates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Path(temp_dir) / "settings.json"

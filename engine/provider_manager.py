@@ -59,6 +59,8 @@ class ProviderSyncState(str, Enum):
 
 
 SENSITIVE_FIELDS = {"password", "cookie", "api_key", "token", "secret"}
+SOLAREDGE_PRIMARY_FIELDS = {"username", "password"}
+SOLAREDGE_COOKIE_FALLBACK_FIELDS = {"cookie"}
 
 
 @dataclass(frozen=True)
@@ -375,11 +377,12 @@ class ProviderManager:
             raise ValueError(f"Unknown provider: {provider_id}")
         tester = self.connection_testers.get(provider_id)
         if tester:
-            return self._adapter_test_connection(provider, tester)
+            result = self._adapter_test_connection(provider, tester)
+            self._record_connection_test(provider_id, result)
+            return result
         success = provider.lifecycle_state in {
             ProviderConnectionStatus.CONNECTED,
             ProviderConnectionStatus.SYNCING,
-            ProviderConnectionStatus.CONFIGURED,
         }
         warnings = list(provider.diagnostics.warnings)
         if provider.lifecycle_state == ProviderConnectionStatus.NOT_CONFIGURED:
@@ -431,6 +434,24 @@ class ProviderManager:
             },
         )
 
+    def _record_connection_test(self, provider_id: str, result: ProviderTestResult) -> None:
+        record = dict(self.provider_state.get(provider_id, {}))
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        record["last_tested_at"] = now
+        record["last_test_status"] = result.status
+        if result.success:
+            record["last_successful_test_at"] = now
+            record.pop("last_connection_error", None)
+            data_returned = bool(result.available_datasets) or bool(result.technical_details.get("measurements"))
+            if data_returned:
+                record["last_successful_data_at"] = now
+                record["last_successful_sync_at"] = now
+        else:
+            record["last_failed_test_at"] = now
+            record["last_connection_error"] = result.user_message
+        self.provider_state[provider_id] = record
+        _save_json(self.provider_state_path, self.provider_state)
+
     def configure(self, provider_id: str, values: dict[str, Any]) -> ProviderConfiguration:
         provider = self.get(provider_id)
         if provider is None:
@@ -459,17 +480,14 @@ class ProviderManager:
             credentials.append(
                 ProviderCredential(
                     field=field_name,
-                    label=field_name.replace("_", " ").title(),
+                    label=_credential_label(provider.provider_type, provider.provider_id, field_name),
                     required=field_name in _required_fields(provider.provider_type, provider.provider_id),
                     sensitive=field_name in SENSITIVE_FIELDS,
                     configured=configured,
                     value=str(value) if value is not None else None,
                 )
             )
-        missing_required = [
-            credential.label for credential in credentials
-            if credential.required and not credential.configured
-        ]
+        missing_required = _missing_required_labels(provider.provider_type, provider.provider_id, stored)
         lifecycle = ProviderConnectionStatus.CONFIGURED if not missing_required else ProviderConnectionStatus.NOT_CONFIGURED
         notes = (
             "Configuration accepted by Provider Management. Sensitive values are redacted from API responses. Run Test Connection before relying on this provider."
@@ -501,7 +519,11 @@ class ProviderManager:
                 action=normalized,
                 success=configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED,
                 status="success" if configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED else "warning",
-                user_message=configuration.notes or "Provider configuration saved.",
+                user_message=(
+                    "Settings saved successfully."
+                    if configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED
+                    else configuration.notes or "Unable to save settings because required information is missing."
+                ),
                 next_step="Run Test Connection before relying on this provider.",
                 configuration=configuration.as_dict(),
                 provider=provider.as_dict() if provider else None,
@@ -509,6 +531,7 @@ class ProviderManager:
             )
         if normalized == "test":
             result = self.test_connection(provider_id)
+            refreshed = self.get(provider_id)
             return ProviderActionResult(
                 provider_id=provider_id,
                 action=normalized,
@@ -517,6 +540,7 @@ class ProviderManager:
                 user_message=result.user_message,
                 next_step=result.next_step,
                 test=result.as_dict(),
+                provider=refreshed.as_dict() if refreshed else None,
                 technical_details=result.technical_details,
             )
         if normalized == "reset":
@@ -534,6 +558,7 @@ class ProviderManager:
         if normalized == "reconnect":
             test_result = self.test_connection(provider_id)
             status = "success" if test_result.success else test_result.status
+            refreshed = self.get(provider_id)
             return ProviderActionResult(
                 provider_id=provider_id,
                 action=normalized,
@@ -542,6 +567,7 @@ class ProviderManager:
                 user_message=test_result.user_message,
                 next_step=test_result.next_step,
                 test=test_result.as_dict(),
+                provider=refreshed.as_dict() if refreshed else None,
                 technical_details={"reconnect": "test_connection", **test_result.technical_details},
             )
         if normalized == "disable":
@@ -706,6 +732,7 @@ class ProviderManager:
         )
 
     def _diagnostics(self, provider: Provider, lifecycle: ProviderConnectionStatus) -> ProviderDiagnostics:
+        state_record = self.provider_state.get(provider.provider_id, {})
         freshness = provider.freshness.as_dict() if provider.freshness else None
         observation_count = _observation_count(self.provider_observations, provider.provider_id)
         live_observation_types = _live_observation_types(self.provider_observations, provider.provider_id)
@@ -713,7 +740,7 @@ class ProviderManager:
         last_error = None
         warnings = []
         if lifecycle in {ProviderConnectionStatus.DEGRADED, ProviderConnectionStatus.ERROR}:
-            last_error = str(self.health.get("collector_message") or self.health.get("failure_type") or provider.note or "Provider unavailable")
+            last_error = str(state_record.get("last_connection_error") or self.health.get("collector_message") or self.health.get("failure_type") or provider.note or "Provider unavailable")
             warnings.append(last_error)
         if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
             warnings.append("Provider configuration is missing.")
@@ -792,15 +819,44 @@ def _lifecycle_from_provider(provider: Provider, health: dict[str, Any], state_r
         return ProviderConnectionStatus.DISABLED
     if provider.status == ProviderStatus.MISSING:
         return ProviderConnectionStatus.NOT_CONFIGURED
+    if _is_non_live_provider(provider):
+        return ProviderConnectionStatus.CONFIGURED
     if provider.status == ProviderStatus.DEGRADED:
         return ProviderConnectionStatus.DEGRADED
-    if provider.status == ProviderStatus.CONFIGURED:
-        return ProviderConnectionStatus.CONFIGURED
-    if provider.status in {ProviderStatus.AVAILABLE, ProviderStatus.SUPPORTED}:
+    if state_record.get("last_connection_error"):
+        return ProviderConnectionStatus.ERROR
+    configured = _provider_has_configuration(provider, state_record)
+    validated = bool(state_record.get("last_successful_test_at"))
+    data_retrieved = bool(state_record.get("last_successful_data_at") or state_record.get("last_successful_sync_at"))
+    if configured and validated and data_retrieved:
+        if str(health.get("status") or "").lower() not in {"", "ok"}:
+            return ProviderConnectionStatus.DEGRADED
         return ProviderConnectionStatus.CONNECTED
+    if configured:
+        return ProviderConnectionStatus.CONFIGURED
     if str(health.get("status") or "").lower() not in {"", "ok"}:
         return ProviderConnectionStatus.ERROR
     return ProviderConnectionStatus.NOT_CONFIGURED
+
+
+def _is_non_live_provider(provider: Provider) -> bool:
+    return (
+        provider.provider_type in {ProviderType.RETAILER, ProviderType.GENERIC_IMPORT}
+        or ProviderCapability.IMPORT_ONLY in provider.capabilities
+        or provider.provider_id == "ocular_export"
+    )
+
+
+def _provider_has_configuration(provider: Provider, state_record: dict[str, Any]) -> bool:
+    configured_fields = set(state_record.get("configured_fields") or [])
+    if provider.provider_id == "solaredge":
+        return _solaredge_configuration_ready(configured_fields)
+    required = _required_fields(provider.provider_type, provider.provider_id)
+    if required and required.issubset(configured_fields):
+        return True
+    if not required and provider.status in {ProviderStatus.CONFIGURED, ProviderStatus.AVAILABLE, ProviderStatus.SUPPORTED}:
+        return True
+    return bool(state_record.get("updated_at") and not required)
 
 
 def _sync_state(lifecycle: ProviderConnectionStatus, diagnostics: ProviderDiagnostics) -> ProviderSyncState:
@@ -851,12 +907,21 @@ def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
 
 def _test_user_message(status: str, warnings: list[str]) -> str:
     if status == "success":
-        return "Connection test succeeded. Provider data can be used for PowerMonitor analysis."
+        return "Connected successfully."
     if status == "warning":
         detail = warnings[0] if warnings else "The provider responded, but some checks need attention."
-        return f"Connection test completed with a warning: {detail}"
+        return f"Connected with a warning: {detail}"
     detail = warnings[0] if warnings else "PowerMonitor could not connect to the provider."
-    return f"Connection test failed: {detail}"
+    lowered = detail.lower()
+    if "credential" in lowered and any(word in lowered for word in ("missing", "not configured", "unavailable")):
+        return f"Credentials missing. {detail}"
+    if "cookie" in lowered and any(word in lowered for word in ("expired", "403", "unauthor", "forbidden")):
+        return f"Cookie expired. {detail}"
+    if any(word in lowered for word in ("login", "password", "credential", "unauthor", "403", "forbidden")):
+        return f"Login failed. {detail}"
+    if any(word in lowered for word in ("network", "timeout", "unreachable", "connection refused", "dns")):
+        return f"Network unavailable. {detail}"
+    return f"Unable to connect. {detail}"
 
 
 def _test_next_step(status: str) -> str:
@@ -864,7 +929,7 @@ def _test_next_step(status: str) -> str:
         return "Keep this provider connected and watch the next scheduled sync."
     if status == "warning":
         return "Review the warning, then run Test Connection again after fixing it."
-    return "Refresh the provider session or update the required credential, then run Test Connection again."
+    return "Update the saved username/password or refresh the provider session, then run Test Connection again."
 
 
 def _duration_label(value: Any) -> str:
@@ -937,7 +1002,7 @@ def _onboarding_guide(
     return ProviderOnboardingGuide(
         provider_id=provider.provider_id,
         state=state,
-        state_label=state.value.replace("_", " ").title(),
+        state_label=_state_label(provider, state, data_available),
         connected=connected,
         healthy=healthy,
         data_available=data_available,
@@ -952,7 +1017,7 @@ def _onboarding_guide(
         health_factors=health_factors,
         required_information=required,
         why_required=_why_required(provider.provider_type),
-        connection_status=_connection_status(state),
+        connection_status=_connection_status(provider, state, data_available),
         health_status=_health_status(state, health, diagnostics),
         next_step=_next_step(state, provider.name),
         common_failures=_common_failures(provider.provider_type),
@@ -991,6 +1056,8 @@ def _onboarding_state(
         credential for credential in configuration.credentials
         if credential.required and not credential.configured
     ]
+    if configuration.provider_id == "solaredge" and configuration.lifecycle_state == ProviderConnectionStatus.CONFIGURED:
+        missing_required = []
     if missing_required:
         return ProviderOnboardingState.CONFIGURATION_REQUIRED
     if configuration.lifecycle_state == ProviderConnectionStatus.CONFIGURED and not diagnostics.last_successful_sync:
@@ -999,6 +1066,11 @@ def _onboarding_state(
 
 
 def _required_information(configuration: ProviderConfiguration) -> list[str]:
+    if configuration.provider_id == "solaredge":
+        configured = {credential.field for credential in configuration.credentials if credential.configured}
+        if _solaredge_configuration_ready(configured):
+            return ["SolarEdge username/email and password", "Cookie only if you use the advanced fallback"]
+        return ["SolarEdge username/email", "SolarEdge password"]
     required = [credential.label for credential in configuration.credentials if credential.required]
     if required:
         return required
@@ -1021,16 +1093,40 @@ def _why_required(provider_type: ProviderType) -> str:
     return reasons.get(provider_type, "Provider details let PowerMonitor test access and explain which data is safe to use.")
 
 
-def _connection_status(state: ProviderOnboardingState) -> str:
+def _state_label(provider: Provider, state: ProviderOnboardingState, data_available: bool) -> str:
+    if _is_non_live_provider(provider) and data_available:
+        return "Historical Data Available"
+    if _is_non_live_provider(provider) and state == ProviderOnboardingState.READY_TO_CONNECT:
+        return "Configured"
     return {
-        ProviderOnboardingState.NOT_CONFIGURED: "Not configured yet.",
+        ProviderOnboardingState.NOT_CONFIGURED: "Not Configured",
+        ProviderOnboardingState.CONFIGURATION_REQUIRED: "Waiting For Setup",
+        ProviderOnboardingState.READY_TO_CONNECT: "Waiting For Setup",
+        ProviderOnboardingState.CONNECTING: "Checking Connection",
+        ProviderOnboardingState.CONNECTED: "Connected",
+        ProviderOnboardingState.SYNCING: "Updating",
+        ProviderOnboardingState.WARNING: "Needs Attention",
+        ProviderOnboardingState.ERROR: "Unable To Connect",
+        ProviderOnboardingState.DISABLED: "Disabled",
+    }[state]
+
+
+def _connection_status(provider: Provider, state: ProviderOnboardingState, data_available: bool) -> str:
+    if _is_non_live_provider(provider):
+        if data_available:
+            return "Historical data available. Live updates unavailable."
+        if state == ProviderOnboardingState.NOT_CONFIGURED:
+            return "Waiting for setup."
+        return "Configured. This source does not provide live updates."
+    return {
+        ProviderOnboardingState.NOT_CONFIGURED: "Not configured.",
         ProviderOnboardingState.CONFIGURATION_REQUIRED: "Configuration is missing required information.",
-        ProviderOnboardingState.READY_TO_CONNECT: "Ready to test before the first sync.",
-        ProviderOnboardingState.CONNECTING: "Connection test is running.",
-        ProviderOnboardingState.CONNECTED: "Connected and available for analysis.",
-        ProviderOnboardingState.SYNCING: "Connected and syncing now.",
-        ProviderOnboardingState.WARNING: "Connected, but recent sync health needs review.",
-        ProviderOnboardingState.ERROR: "Connection is failing.",
+        ProviderOnboardingState.READY_TO_CONNECT: "Waiting for setup. Run Test Connection before relying on this provider.",
+        ProviderOnboardingState.CONNECTING: "Checking connection.",
+        ProviderOnboardingState.CONNECTED: "Connected. Live updates are available.",
+        ProviderOnboardingState.SYNCING: "Connected and updating now.",
+        ProviderOnboardingState.WARNING: "Needs attention. Recent updates could not be verified.",
+        ProviderOnboardingState.ERROR: "Unable to connect.",
         ProviderOnboardingState.DISABLED: "Provider is disabled.",
     }[state]
 
@@ -1079,6 +1175,8 @@ def _recovery_steps(provider_type: ProviderType) -> list[str]:
         return ["Export the file again from the provider", "Preview the upload before saving", "Check validation messages for missing columns or dates"]
     if provider_type == ProviderType.RETAILER:
         return ["Confirm tariff rates and billing dates", "Update changed plan details", "Run the report again after saving"]
+    if provider_type == ProviderType.SOLAR:
+        return ["Update the SolarEdge username/email and password", "Run Test Connection", "Use the manual cookie fallback only if automatic sign-in is unavailable", "Review technical diagnostics only if the simple steps do not resolve it"]
     return ["Check the required information", "Reconnect or refresh the provider session", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
 
 
@@ -1120,7 +1218,7 @@ def _required_fields(provider_type: ProviderType, provider_id: Optional[str] = N
     if provider_type == ProviderType.GENERIC_IMPORT:
         return set()
     if provider_type == ProviderType.SOLAR:
-        return {"cookie"}
+        return {"username", "password"}
     if provider_type == ProviderType.RETAILER:
         return set()
     if provider_type == ProviderType.HOME_AUTOMATION:
@@ -1134,21 +1232,57 @@ def _credential_templates(
     state_record: Optional[dict[str, Any]] = None,
     provider_id: Optional[str] = None,
 ) -> list[ProviderCredential]:
-    configured = lifecycle != ProviderConnectionStatus.NOT_CONFIGURED
     state_record = state_record or {}
     configured_fields = set(state_record.get("configured_fields") or [])
     public_values = state_record.get("public_values") if isinstance(state_record.get("public_values"), dict) else {}
     return [
         ProviderCredential(
             field=field_name,
-            label=field_name.replace("_", " ").title(),
+            label=_credential_label(provider_type, provider_id, field_name),
             required=field_name in _required_fields(provider_type, provider_id),
             sensitive=field_name in SENSITIVE_FIELDS,
-            configured=field_name in configured_fields or (configured and field_name not in SENSITIVE_FIELDS),
+            configured=field_name in configured_fields,
             value=public_values.get(field_name) if field_name not in SENSITIVE_FIELDS else None,
         )
         for field_name in _editable_fields(provider_type, provider_id)
     ]
+
+
+def _credential_label(provider_type: ProviderType, provider_id: Optional[str], field_name: str) -> str:
+    if provider_id == "solaredge":
+        labels = {
+            "username": "Username/Email",
+            "password": "Password",
+            "cookie": "Cookie (advanced fallback)",
+            "endpoint": "Endpoint",
+        }
+        return labels.get(field_name, field_name.replace("_", " ").title())
+    return field_name.replace("_", " ").title()
+
+
+def _missing_required_labels(provider_type: ProviderType, provider_id: Optional[str], state_record: dict[str, Any]) -> list[str]:
+    configured_fields = set(state_record.get("configured_fields") or [])
+    if provider_id == "solaredge":
+        if _solaredge_configuration_ready(configured_fields):
+            return []
+        labels = []
+        if "username" not in configured_fields:
+            labels.append("Username/Email")
+        if "password" not in configured_fields:
+            labels.append("Password")
+        return labels
+    return [
+        _credential_label(provider_type, provider_id, field_name)
+        for field_name in _required_fields(provider_type, provider_id)
+        if field_name not in configured_fields
+    ]
+
+
+def _solaredge_configuration_ready(configured_fields: set[str]) -> bool:
+    return (
+        SOLAREDGE_PRIMARY_FIELDS.issubset(configured_fields)
+        or SOLAREDGE_COOKIE_FALLBACK_FIELDS.issubset(configured_fields)
+    )
 
 
 def _future_provider_catalog() -> list[Provider]:
