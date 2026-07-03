@@ -368,6 +368,22 @@ def login_failure_message(
     )
 
 
+def sign_in_submit_failure_message(page, metadata: dict) -> str:
+    debug_path = save_login_debug(page, "sign-in did not continue", allow_screenshot=True, extra=metadata)
+    return (
+        "SolarEdge sign-in failed or did not continue after credentials were submitted. "
+        f"title={safe_page_title(page)!r}; "
+        f"hostname={page_hostname(page)!r}; "
+        f"password_form_found={bool(metadata.get('password_form_found'))}; "
+        f"account_sign_in_button_found={bool(metadata.get('account_sign_in_button_found'))}; "
+        f"account_sign_in_button_clicked={bool(metadata.get('account_sign_in_button_clicked'))}; "
+        f"enter_submit_used={bool(metadata.get('enter_submit_used'))}; "
+        f"url_before_submit={metadata.get('url_before_submit') or ''}; "
+        f"url_after_submit={metadata.get('url_after_submit') or ''}; "
+        f"debug={debug_path}"
+    )
+
+
 def wait_for_login_fields(page, attempts: int = 6) -> tuple[object, object, int]:
     username_field = None
     password_field = None
@@ -502,6 +518,124 @@ def find_sign_in_button(page):
     return find_first(page, SIGN_IN_SELECTORS)
 
 
+def first_visible_enabled(locator):
+    try:
+        count = int(locator.count())
+    except Exception:
+        return None, 0
+    for index in range(count):
+        try:
+            candidate = locator_item(locator, index)
+        except Exception:
+            continue
+        if element_visible(candidate) and element_enabled(candidate):
+            return candidate, count
+    return None, count
+
+
+def click_button_inside(scope, selector: str):
+    try:
+        locator = scope.locator(selector)
+    except Exception:
+        return None, 0
+    button, count = first_visible_enabled(locator)
+    if button is not None:
+        button.click()
+    return button, count
+
+
+def password_form(password_field):
+    try:
+        form = password_field.locator("xpath=ancestor::form[1]")
+        if int(form.count()):
+            return form
+    except Exception:
+        return None
+    return None
+
+
+def password_container(password_field):
+    for selector in (
+        "xpath=ancestor::*[self::div or self::section or self::main][1]",
+        "xpath=ancestor::div[1]",
+    ):
+        try:
+            container = password_field.locator(selector)
+            if int(container.count()):
+                return container
+        except Exception:
+            continue
+    return None
+
+
+def submit_account_sign_in(page, password_field, metadata: dict) -> None:
+    metadata["password_form_found"] = False
+    metadata["account_sign_in_button_found"] = False
+    metadata["account_sign_in_button_clicked"] = False
+    metadata["enter_submit_used"] = False
+    metadata["url_before_submit"] = str(getattr(page, "url", "") or "")
+    metadata["url_after_submit"] = metadata["url_before_submit"]
+
+    form = password_form(password_field)
+    if form is not None:
+        metadata["password_form_found"] = True
+        button, count = click_button_inside(form, "button, input[type='submit'], [role='button']")
+        metadata["sign_in_button_count"] = count
+        if button is not None:
+            metadata["account_sign_in_button_found"] = True
+            metadata["account_sign_in_button_clicked"] = True
+            metadata["clicked_sign_in_selector"] = "password_form button"
+            wait_after_sign_in_submit(page)
+            metadata["url_after_submit"] = str(getattr(page, "url", "") or "")
+            return
+
+    container = password_container(password_field)
+    if container is not None:
+        button, count = click_button_inside(
+            container,
+            "button:has-text('Sign in'), button:has-text('Sign In'), [role='button']:has-text('Sign in')",
+        )
+        metadata["sign_in_button_count"] = max(int(metadata.get("sign_in_button_count") or 0), count)
+        if button is not None:
+            metadata["account_sign_in_button_found"] = True
+            metadata["account_sign_in_button_clicked"] = True
+            metadata["clicked_sign_in_selector"] = "password_container Sign in"
+            wait_after_sign_in_submit(page)
+            metadata["url_after_submit"] = str(getattr(page, "url", "") or "")
+            return
+
+    try:
+        password_field.press("Enter")
+        metadata["enter_submit_used"] = True
+        metadata["clicked_sign_in_selector"] = "password_field Enter"
+        wait_after_sign_in_submit(page)
+        metadata["url_after_submit"] = str(getattr(page, "url", "") or "")
+        if not is_solaredge_login_host(page):
+            return
+    except Exception:
+        pass
+
+    try:
+        page.keyboard.press("Enter")
+        metadata["enter_submit_used"] = True
+        metadata["clicked_sign_in_selector"] = "page.keyboard Enter"
+        wait_after_sign_in_submit(page)
+        metadata["url_after_submit"] = str(getattr(page, "url", "") or "")
+    except Exception:
+        pass
+
+
+def wait_after_sign_in_submit(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_function("window.location.hostname !== 'login.solaredge.com'", timeout=15000)
+    except Exception:
+        wait_for_page_settle(page)
+
+
 def click_existing_account_sign_in(page) -> tuple[object, str]:
     for selector in LOGIN_SOLAREDGE_SIGN_IN_SELECTORS:
         try:
@@ -530,6 +664,12 @@ def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, 
         "visible_password_input_count": 0,
         "sign_in_button_count": 0,
         "clicked_sign_in_selector": "",
+        "password_form_found": False,
+        "account_sign_in_button_found": False,
+        "account_sign_in_button_clicked": False,
+        "enter_submit_used": False,
+        "url_before_submit": "",
+        "url_after_submit": "",
     }
     if not metadata["explicit_login_host_path_used"]:
         return False, metadata
@@ -558,12 +698,9 @@ def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, 
 
     username_field.fill(username)
     password_field.fill(password)
-    metadata["sign_in_button_count"] = selector_count(page, LOGIN_SOLAREDGE_SIGN_IN_SELECTORS)
-    submit, clicked_selector = click_existing_account_sign_in(page)
-    metadata["clicked_sign_in_selector"] = clicked_selector
-    if submit is None:
-        password_field.press("Enter")
-    wait_for_page_settle(page)
+    submit_account_sign_in(page, password_field, metadata)
+    if is_solaredge_login_host(page):
+        raise RefreshError(sign_in_submit_failure_message(page, metadata))
     return True, metadata
 
 

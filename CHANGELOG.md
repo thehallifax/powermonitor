@@ -1,5 +1,20 @@
 # Changelog
 
+## Bugfix - SolarEdge Account Sign In Button
+
+- Changed `login.solaredge.com` submission to locate the Sign in button
+  relative to the password field/form instead of using a global selector.
+- Added fallbacks from password form, to nearest password container, to
+  password-field Enter, then page keyboard Enter without selecting the
+  corporate/SSO Sign in button.
+- Added clear failure wording when credentials are submitted but SolarEdge
+  remains on the login page.
+- Extended safe debug metadata with password form detection, account Sign in
+  button detection/click state, Enter fallback usage, and submit URL before
+  and after.
+- Added regression coverage for account-form submission metadata and
+  stuck-login failure handling.
+
 ## Bugfix - SolarEdge Login Explicit Wait Path
 
 - Added an explicit `login.solaredge.com` credential-entry path before generic

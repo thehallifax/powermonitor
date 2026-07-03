@@ -94,6 +94,9 @@ class FakeLoginPage:
     def wait_for_timeout(self, timeout):
         return None
 
+    def wait_for_function(self, expression, timeout=None):
+        return None
+
     def locator(self, selector):
         return FakeLoginLocator(self, selector)
 
@@ -169,13 +172,14 @@ FakeHiddenInitialLoginPage.locator = lambda self, selector: FakeHiddenInitialLog
 
 
 class FakeSolarEdgeLoginPage(FakeLoginPage):
-    def __init__(self):
+    def __init__(self, continue_after_submit=True):
         super().__init__(selectors=set())
         self.url = "https://login.solaredge.com/login"
         self.corporate_email_filled = False
         self.existing_account_sign_in_clicked = False
         self.corporate_sign_in_clicked = False
         self.waited_selectors = []
+        self.continue_after_submit = continue_after_submit
 
     def title(self):
         return "Sign-in"
@@ -215,19 +219,53 @@ class FakeSolarEdgeLoginElement(FakeLoginElement):
 
     def click(self):
         self.page.clicks.append(self.selector)
-        if self.selector in refresh_solaredge_session.LOGIN_SOLAREDGE_SIGN_IN_SELECTORS:
+        if self.selector in refresh_solaredge_session.LOGIN_SOLAREDGE_SIGN_IN_SELECTORS or self.selector == "account-form-button":
             self.page.existing_account_sign_in_clicked = True
             self.page.submitted = True
+            if self.page.continue_after_submit:
+                self.page.url = "https://monitoring.solaredge.com/solaredge-web/p/sites"
             return
         if self.selector in {"button:has-text('Sign in')", 'button:has-text("Sign in")'}:
             self.page.corporate_sign_in_clicked = True
             return
         super().click()
 
+    def locator(self, selector):
+        if selector == "xpath=ancestor::form[1]":
+            return FakeAccountFormLocator(self.page, selector)
+        if selector.startswith("xpath=ancestor::"):
+            return FakeAccountContainerLocator(self.page, selector)
+        return FakeSolarEdgeLoginLocator(self.page, selector)
+
 
 class FakeSolarEdgeLoginLocator(FakeLoginLocator):
     def first(self):
         return FakeSolarEdgeLoginElement(self.page, self.selector)
+
+    def nth(self, index):
+        return self.first()
+
+
+class FakeAccountFormLocator(FakeSolarEdgeLoginLocator):
+    def count(self):
+        return 1
+
+    def locator(self, selector):
+        if selector == "button, input[type='submit'], [role='button']":
+            return FakeAccountButtonLocator(self.page, selector)
+        return FakeSolarEdgeLoginLocator(self.page, selector)
+
+
+class FakeAccountContainerLocator(FakeAccountFormLocator):
+    pass
+
+
+class FakeAccountButtonLocator(FakeSolarEdgeLoginLocator):
+    def count(self):
+        return 1
+
+    def first(self):
+        return FakeSolarEdgeLoginElement(self.page, "account-form-button")
 
     def nth(self, index):
         return self.first()
@@ -392,6 +430,44 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(page.existing_account_sign_in_clicked)
         self.assertFalse(page.corporate_sign_in_clicked)
         self.assertTrue(page.submitted)
+
+    def test_solaredge_login_dot_solaredge_submit_metadata_uses_password_form(self):
+        page = FakeSolarEdgeLoginPage()
+
+        success, metadata = refresh_solaredge_session.explicit_login_solaredge(
+            page,
+            "user@example.com",
+            "redaction-fixture-password",
+        )
+
+        self.assertTrue(success)
+        self.assertTrue(metadata["password_form_found"])
+        self.assertTrue(metadata["account_sign_in_button_found"])
+        self.assertTrue(metadata["account_sign_in_button_clicked"])
+        self.assertFalse(metadata["enter_submit_used"])
+        self.assertEqual(metadata["url_before_submit"], "https://login.solaredge.com/login")
+        self.assertEqual(metadata["url_after_submit"], "https://monitoring.solaredge.com/solaredge-web/p/sites")
+
+    def test_solaredge_login_dot_solaredge_staying_on_page_reports_sign_in_failure(self):
+        with TemporaryDirectory() as directory:
+            debug_dir = Path(directory) / "debug"
+            page = FakeSolarEdgeLoginPage(continue_after_submit=False)
+            with patch.object(refresh_solaredge_session, "DEBUG_DIR", debug_dir):
+                with self.assertRaises(refresh_solaredge_session.RefreshError) as context:
+                    refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+            message = str(context.exception)
+            debug_files = list(debug_dir.glob("solaredge-login-*.json"))
+            metadata = json.loads(debug_files[0].read_text(encoding="utf-8"))
+
+        self.assertIn("SolarEdge sign-in failed or did not continue", message)
+        self.assertIn("password_form_found=True", message)
+        self.assertIn("account_sign_in_button_clicked=True", message)
+        self.assertTrue(metadata["password_form_found"])
+        self.assertTrue(metadata["account_sign_in_button_found"])
+        self.assertTrue(metadata["account_sign_in_button_clicked"])
+        self.assertEqual(metadata["url_before_submit"], "https://login.solaredge.com/login")
+        self.assertEqual(metadata["url_after_submit"], "https://login.solaredge.com/login")
 
     def test_solaredge_login_dot_solaredge_explicit_path_does_not_require_generic_discovery(self):
         page = FakeSolarEdgeLoginPage()
