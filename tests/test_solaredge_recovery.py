@@ -168,6 +168,64 @@ class FakeHiddenInitialLoginPage(FakeInitialLoginPage):
 FakeHiddenInitialLoginPage.locator = lambda self, selector: FakeHiddenInitialLoginLocator(self, selector)
 
 
+class FakeSolarEdgeLoginPage(FakeLoginPage):
+    def __init__(self):
+        super().__init__(selectors=set())
+        self.url = "https://login.solaredge.com/login"
+        self.corporate_email_filled = False
+        self.existing_account_sign_in_clicked = False
+        self.corporate_sign_in_clicked = False
+
+    def title(self):
+        return "Sign-in"
+
+    def goto(self, url, wait_until=None):
+        self.url = "https://login.solaredge.com/login"
+
+    def selector_count(self, selector):
+        if selector in refresh_solaredge_session.LOGIN_SOLAREDGE_USERNAME_SELECTORS:
+            return 1
+        if selector in refresh_solaredge_session.LOGIN_SOLAREDGE_PASSWORD_SELECTORS:
+            return 1
+        if selector in refresh_solaredge_session.LOGIN_SOLAREDGE_SIGN_IN_SELECTORS:
+            return 1
+        if selector in {"input[name='idpEmail']", 'input[name="idpEmail"]'}:
+            return 1
+        if selector in {"button:has-text('Sign in')", 'button:has-text("Sign in")'}:
+            return 2
+        return 0
+
+
+class FakeSolarEdgeLoginElement(FakeLoginElement):
+    def fill(self, value):
+        if "idpEmail" in self.selector:
+            self.page.corporate_email_filled = True
+            return
+        super().fill(value)
+
+    def click(self):
+        self.page.clicks.append(self.selector)
+        if self.selector in refresh_solaredge_session.LOGIN_SOLAREDGE_SIGN_IN_SELECTORS:
+            self.page.existing_account_sign_in_clicked = True
+            self.page.submitted = True
+            return
+        if self.selector in {"button:has-text('Sign in')", 'button:has-text("Sign in")'}:
+            self.page.corporate_sign_in_clicked = True
+            return
+        super().click()
+
+
+class FakeSolarEdgeLoginLocator(FakeLoginLocator):
+    def first(self):
+        return FakeSolarEdgeLoginElement(self.page, self.selector)
+
+    def nth(self, index):
+        return self.first()
+
+
+FakeSolarEdgeLoginPage.locator = lambda self, selector: FakeSolarEdgeLoginLocator(self, selector)
+
+
 class FakeSitePage(FakeLoginPage):
     def __init__(self, site_id="4457399", direct_navigation=True, has_site_row=True):
         super().__init__(selectors={"text=/\\bSites\\b/i", "text=/Site ID/i"})
@@ -310,6 +368,37 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(page.password_filled)
         self.assertTrue(page.submitted)
         self.assertEqual(page.url, "https://monitoring.solaredge.com/solaredge-web/p/login")
+
+    def test_solaredge_login_dot_solaredge_uses_account_email_password_fields(self):
+        page = FakeSolarEdgeLoginPage()
+
+        refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+        self.assertTrue(page.username_filled)
+        self.assertTrue(page.password_filled)
+        self.assertFalse(page.corporate_email_filled)
+        self.assertTrue(page.existing_account_sign_in_clicked)
+        self.assertFalse(page.corporate_sign_in_clicked)
+        self.assertTrue(page.submitted)
+
+    def test_solaredge_login_dot_solaredge_does_not_use_idp_email_selector(self):
+        page = FakeSolarEdgeLoginPage()
+
+        username_field, password_field, _attempts = refresh_solaredge_session.wait_for_login_fields(page)
+
+        self.assertIsNotNone(username_field)
+        self.assertIsNotNone(password_field)
+        self.assertNotIn("idpEmail", username_field.selector)
+
+    def test_solaredge_login_dot_solaredge_chooses_existing_account_sign_in(self):
+        page = FakeSolarEdgeLoginPage()
+
+        sign_in = refresh_solaredge_session.find_sign_in_button(page)
+        sign_in.click()
+
+        self.assertIn(sign_in.selector, refresh_solaredge_session.LOGIN_SOLAREDGE_SIGN_IN_SELECTORS)
+        self.assertTrue(page.existing_account_sign_in_clicked)
+        self.assertFalse(page.corporate_sign_in_clicked)
 
     def test_solaredge_login_candidate_buttons_explain_skip_when_not_clicked(self):
         with TemporaryDirectory() as directory:

@@ -15,6 +15,8 @@ SITE_ID = os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID", "4457399")
 LOGIN_URL = "https://monitoring.solaredge.com/mfe/auth/"
 
 USERNAME_SELECTORS = (
+    "input[name='username'][type='email']",
+    'input[name="username"][type="email"]',
     "input[type='email']",
     "input[name='username']",
     "input[name='j_username']",
@@ -33,6 +35,8 @@ USERNAME_SELECTORS = (
 )
 
 PASSWORD_SELECTORS = (
+    "input[name='password'][type='password']",
+    'input[name="password"][type="password"]',
     "input[type='password']",
     "input[name='password']",
     "input[name='j_password']",
@@ -52,6 +56,10 @@ CONTINUE_SELECTORS = (
 )
 
 SIGN_IN_SELECTORS = (
+    "form:has(input[name='password']) button:has-text('Sign in')",
+    'form:has(input[name="password"]) button:has-text("Sign in")',
+    "form:has(input[type='password']) button:has-text('Sign in')",
+    'form:has(input[type="password"]) button:has-text("Sign in")',
     "button[type='submit']",
     "input[type='submit']",
     "button:has-text('Login')",
@@ -62,6 +70,31 @@ SIGN_IN_SELECTORS = (
     "input[value*='Login' i]",
     "input[value*='Log in' i]",
     "input[value*='Sign in' i]",
+)
+
+LOGIN_SOLAREDGE_USERNAME_SELECTORS = (
+    "input[name='username'][type='email']",
+    'input[name="username"][type="email"]',
+    "input[type='email'][name='username']",
+    'input[type="email"][name="username"]',
+    "input[type='email'][placeholder='name@host.com']",
+    'input[type="email"][placeholder="name@host.com"]',
+)
+
+LOGIN_SOLAREDGE_PASSWORD_SELECTORS = (
+    "input[name='password'][type='password']",
+    'input[name="password"][type="password"]',
+    "input[type='password'][name='password']",
+    'input[type="password"][name="password"]',
+    "input[type='password'][placeholder='Enter password']",
+    'input[type="password"][placeholder="Enter password"]',
+)
+
+LOGIN_SOLAREDGE_SIGN_IN_SELECTORS = (
+    "form:has(input[name='password'][type='password']) button:has-text('Sign in')",
+    'form:has(input[name="password"][type="password"]) button:has-text("Sign in")',
+    "form:has(input[name='password']) button:has-text('Sign in')",
+    'form:has(input[name="password"]) button:has-text("Sign in")',
 )
 
 INITIAL_LOGIN_SELECTORS = (
@@ -203,6 +236,22 @@ def page_hostname(page) -> str:
     return hostname or "unknown"
 
 
+def is_solaredge_login_host(page) -> bool:
+    return page_hostname(page).lower() == "login.solaredge.com"
+
+
+def username_selectors_for_page(page) -> tuple[str, ...]:
+    if is_solaredge_login_host(page):
+        return LOGIN_SOLAREDGE_USERNAME_SELECTORS
+    return USERNAME_SELECTORS
+
+
+def password_selectors_for_page(page) -> tuple[str, ...]:
+    if is_solaredge_login_host(page):
+        return LOGIN_SOLAREDGE_PASSWORD_SELECTORS
+    return PASSWORD_SELECTORS
+
+
 def safe_page_title(page) -> str:
     try:
         title = str(page.title() or "").strip()
@@ -244,8 +293,8 @@ def save_login_debug(page, reason: str, allow_screenshot: bool, extra: Optional[
         "url": str(getattr(page, "url", "") or ""),
         "hostname": page_hostname(page),
         "route_path": route_path(page),
-        "username_field_found": selector_found(page, USERNAME_SELECTORS),
-        "password_field_found": selector_found(page, PASSWORD_SELECTORS),
+        "username_field_found": selector_found(page, username_selectors_for_page(page)),
+        "password_field_found": selector_found(page, password_selectors_for_page(page)),
         "challenge_or_sso_likely": challenge_likely(page),
     }
     if extra:
@@ -299,8 +348,8 @@ def wait_for_login_fields(page, attempts: int = 6) -> tuple[object, object, int]
     username_field = None
     password_field = None
     for attempt in range(1, max(1, attempts) + 1):
-        username_field = find_first(page, USERNAME_SELECTORS)
-        password_field = find_first(page, PASSWORD_SELECTORS)
+        username_field = find_first(page, username_selectors_for_page(page))
+        password_field = find_first(page, password_selectors_for_page(page))
         if username_field is not None or password_field is not None:
             return username_field, password_field, attempt
         try:
@@ -414,11 +463,19 @@ def wait_after_initial_login_click(page) -> None:
         pass
     try:
         page.wait_for_selector(
-            ", ".join(USERNAME_SELECTORS + PASSWORD_SELECTORS),
+            ", ".join(LOGIN_SOLAREDGE_USERNAME_SELECTORS + LOGIN_SOLAREDGE_PASSWORD_SELECTORS + USERNAME_SELECTORS + PASSWORD_SELECTORS),
             timeout=15000,
         )
     except Exception:
         wait_for_page_settle(page)
+
+
+def find_sign_in_button(page):
+    if is_solaredge_login_host(page):
+        scoped = find_first(page, LOGIN_SOLAREDGE_SIGN_IN_SELECTORS)
+        if scoped is not None:
+            return scoped
+    return find_first(page, SIGN_IN_SELECTORS)
 
 
 def sites_list_detected(page) -> bool:
@@ -586,7 +643,7 @@ def login(page, username: str, password: str) -> None:
     username_field.fill(username)
     if password_field is None:
         click_first(page, CONTINUE_SELECTORS)
-        password_field = find_first(page, PASSWORD_SELECTORS)
+        password_field = find_first(page, password_selectors_for_page(page))
     if password_field is None:
         raise RefreshError(
             login_failure_message(
@@ -601,7 +658,7 @@ def login(page, username: str, password: str) -> None:
 
     password_field.fill(password)
 
-    submit = find_first(page, SIGN_IN_SELECTORS)
+    submit = find_sign_in_button(page)
     if submit is None:
         password_field.press("Enter")
     else:

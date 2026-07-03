@@ -1,5 +1,17 @@
 # Changelog
 
+## Bugfix - SolarEdge Login Form Selectors
+
+- Added `login.solaredge.com`-specific account login selectors for
+  `input[name="username"][type="email"]` and
+  `input[name="password"][type="password"]`.
+- Avoided the corporate/SSO `idpEmail` field when filling saved SolarEdge
+  credentials.
+- Scoped the Sign in click to the existing account password form so the
+  corporate email Sign in button is not selected.
+- Added regression coverage for the login.solaredge.com email/password form,
+  corporate field avoidance, and existing-account Sign in selection.
+
 ## Bugfix - SolarEdge Log In Candidate Click
 
 - Removed the requirement for `div#se-signing-mfe` to exist before attempting
