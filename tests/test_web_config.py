@@ -92,6 +92,7 @@ class WebConfigTests(unittest.TestCase):
             updated = web.update_billing_cycle_settings(
                 settings,
                 billing_period_start_day="12",
+                state_or_territory="WA",
                 retailer="Synergy",
                 current_plan="synergy_home_plan",
             )
@@ -100,8 +101,58 @@ class WebConfigTests(unittest.TestCase):
         self.assertEqual(updated["billing_period_start_day"], 12)
         self.assertTrue(saved["billing_cycle_configured"])
         self.assertEqual(saved["retailer"], "Synergy")
+        self.assertEqual(saved["state_or_territory"], "WA")
+        self.assertEqual(saved["tariff_setup_mode"], "catalog")
         self.assertEqual(saved["current_plan"], "synergy_home_plan")
-        self.assertEqual(saved["import_rates"], {"peak": 0.54})
+        self.assertEqual(saved["import_rates"]["peak"], 0.30)
+        self.assertEqual(updated["comparison_plan_rates"]["flat_import_rate"], 0.30)
+
+    def test_wa_synergy_ev_add_on_selection_applies_catalog_rates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+
+            updated = web.update_billing_cycle_settings(
+                settings,
+                billing_period_start_day="6",
+                state_or_territory="WA",
+                retailer="synergy",
+                current_plan="synergy_home_plan",
+                tariff_add_on="ev_add_on",
+            )
+
+        self.assertEqual(updated["retailer"], "Synergy")
+        self.assertEqual(updated["retailer_id"], "synergy")
+        self.assertEqual(updated["current_plan"], "synergy_ev_add_on")
+        self.assertEqual(updated["tariff_add_on"], "ev_add_on")
+        self.assertAlmostEqual(updated["import_rates"]["peak"], 0.538446)
+        self.assertAlmostEqual(updated["import_rates"]["super_off_peak"], 0.086151)
+
+    def test_manual_tariff_fallback_saves_manual_rates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+
+            updated = web.update_billing_cycle_settings(
+                settings,
+                billing_period_start_day="15",
+                state_or_territory="WA",
+                retailer="manual_tariff",
+                current_plan="manual_tariff",
+                manual_rates={
+                    "supply_charge_per_day": "1.10",
+                    "export_credit_rate": "0.03",
+                    "super_off_peak": "0.11",
+                    "overnight": "0.22",
+                    "off_peak": "0.33",
+                    "peak": "0.44",
+                },
+            )
+
+        self.assertEqual(updated["tariff_setup_mode"], "manual")
+        self.assertEqual(updated["retailer"], "Manual tariff")
+        self.assertEqual(updated["current_plan"], "manual_tariff")
+        self.assertAlmostEqual(updated["supply_charge_per_day"], 1.10)
+        self.assertAlmostEqual(updated["export_credit_rate"], 0.03)
+        self.assertEqual(updated["import_rates"]["peak"], 0.44)
 
     def test_billing_cycle_start_day_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -110,6 +161,7 @@ class WebConfigTests(unittest.TestCase):
                 web.update_billing_cycle_settings(
                     settings,
                     billing_period_start_day="31",
+                    state_or_territory="WA",
                     retailer="",
                     current_plan="synergy_ev_add_on",
                 )

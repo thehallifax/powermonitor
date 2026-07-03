@@ -1,5 +1,26 @@
 # Changelog
 
+## UX-005 - Trust & Confidence Experience
+
+- Renamed the primary trust view to "Can I trust today's advice?" and made it start with a homeowner confidence summary, available information, missing information, and the effect on advice.
+- Replaced "Source readings" with "Recent household updates" using friendly provider names, descriptions, and relative dates while keeping raw timestamps in Advanced Diagnostics.
+- Reworked Setup review actions so live-data, advice-trust, and Energy Score links land directly on pages that answer the implied homeowner question.
+- Removed the Recommendation Centre setup task and moved Energy Score review into advice readiness.
+- Added a direct Energy Score explanation anchor with cost, solar, peak usage, overnight usage, and household behaviour breakdowns.
+
+## FIN-001 - Australia Tariff Setup
+
+- Added a static Australia-first tariff catalog for WA/Synergy setup, including
+  Synergy Home Plan, Synergy EV Add On, and Previous Flat/Home Plan.
+- Replaced free-text retailer setup with structured state/territory, retailer,
+  plan, optional add-on, and billing cycle start-day fields.
+- Added Manual tariff fallback with explicit import, supply, and export rate
+  entry for unsupported retailers or plans.
+- Wired tariff selection through saved settings so billing, recommendations,
+  and setup readiness use the selected catalog/manual rates.
+- Added tests for WA/Synergy plan selection, EV add-on normalization, manual
+  tariff fallback, and setup readiness.
+
 ## SY-001 - Product Coherence: Data Sources
 
 - Reframed the System page around homeowner questions: what information

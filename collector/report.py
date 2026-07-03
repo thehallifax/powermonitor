@@ -60,6 +60,23 @@ from engine.provider_runtime import ProviderRuntime
 from engine.recommendation_adapter import RecommendationPresentation
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
+from engine.tariff_catalog import (
+    ADD_ON_OPTIONS,
+    DEFAULT_EXPORT_CREDIT_RATE,
+    DEFAULT_PLAN,
+    DEFAULT_RETAILER,
+    DEFAULT_STATE_OR_TERRITORY,
+    DEFAULT_SUPPLY_CHARGE_PER_DAY,
+    EV_ADD_ON,
+    MANUAL_TARIFF_ID,
+    MANUAL_TARIFF_LABEL,
+    NO_ADD_ON,
+    STATE_OPTIONS,
+    apply_structured_tariff,
+    comparison_rates_for_plan,
+    plan_label,
+    supported_plan_options,
+)
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -164,14 +181,17 @@ EV_BUCKET_LABELS = {
     "peak": "peak",
 }
 DEFAULT_SETTINGS = {
-    "supply_charge_per_day": 1.292269,
+    "state_or_territory": DEFAULT_STATE_OR_TERRITORY,
+    "tariff_setup_mode": "catalog",
+    "tariff_add_on": EV_ADD_ON,
+    "supply_charge_per_day": DEFAULT_SUPPLY_CHARGE_PER_DAY,
     "import_rates": {
         "super_off_peak": 0.086151,
         "overnight": 0.193841,
         "off_peak": 0.236916,
         "peak": 0.538446,
     },
-    "export_credit_rate": 0.02,
+    "export_credit_rate": DEFAULT_EXPORT_CREDIT_RATE,
     "ev_baseline_watts": 250.0,
     "ev_data_source": "estimated",
     "home_assistant_url": "http://192.168.4.96:8123",
@@ -181,13 +201,14 @@ DEFAULT_SETTINGS = {
     "previous_billing_period_start": None,
     "previous_billing_period_end": None,
     "billing_cycle_configured": False,
-    "retailer": "",
-    "current_plan": "synergy_ev_add_on",
+    "retailer": "Synergy",
+    "retailer_id": DEFAULT_RETAILER,
+    "current_plan": DEFAULT_PLAN,
     "comparison_plan": "previous_flat_or_home_plan",
     "comparison_plan_rates": {
         "flat_import_rate": 0.30,
-        "supply_charge_per_day": 1.292269,
-        "export_credit_rate": 0.02,
+        "supply_charge_per_day": DEFAULT_SUPPLY_CHARGE_PER_DAY,
+        "export_credit_rate": DEFAULT_EXPORT_CREDIT_RATE,
     },
     "petrol_price_per_litre": 1.80,
     "previous_car_l_per_100km": 8.0,
@@ -209,6 +230,9 @@ DEFAULT_SETTINGS = {
 
 @dataclass
 class Settings:
+    state_or_territory: str
+    tariff_setup_mode: str
+    tariff_add_on: str
     supply_charge_per_day: float
     import_rates: dict
     export_credit_rate: float
@@ -222,6 +246,7 @@ class Settings:
     previous_billing_period_end: Optional[date]
     billing_cycle_configured: bool
     retailer: str
+    retailer_id: str
     current_plan: str
     comparison_plan: str
     comparison_plan_rates: dict
@@ -712,6 +737,12 @@ def load_settings() -> Settings:
             **DEFAULT_SETTINGS["comparison_plan_rates"],
             **loaded.get("comparison_plan_rates", {}),
         }
+    raw = apply_structured_tariff(raw)
+    if raw.get("current_plan") == "synergy_ev_add_on":
+        raw["comparison_plan_rates"] = {
+            **raw.get("comparison_plan_rates", {}),
+            **comparison_rates_for_plan("previous_flat_or_home_plan"),
+        }
 
     rates = {bucket: float(raw["import_rates"][bucket]) for bucket in BUCKET_ORDER}
 
@@ -727,6 +758,9 @@ def load_settings() -> Settings:
             raise ValueError(f"{name} must be an ISO date in YYYY-MM-DD format") from exc
 
     settings = Settings(
+        state_or_territory=str(raw.get("state_or_territory") or DEFAULT_STATE_OR_TERRITORY),
+        tariff_setup_mode=str(raw.get("tariff_setup_mode") or "catalog"),
+        tariff_add_on=str(raw.get("tariff_add_on") or NO_ADD_ON),
         supply_charge_per_day=float(raw["supply_charge_per_day"]),
         import_rates=rates,
         export_credit_rate=float(raw["export_credit_rate"]),
@@ -740,6 +774,7 @@ def load_settings() -> Settings:
         previous_billing_period_end=optional_date("previous_billing_period_end"),
         billing_cycle_configured=bool(raw.get("billing_cycle_configured")),
         retailer=str(raw.get("retailer") or ""),
+        retailer_id=str(raw.get("retailer_id") or raw.get("retailer") or ""),
         current_plan=str(raw["current_plan"]),
         comparison_plan=str(raw["comparison_plan"]),
         comparison_plan_rates={
@@ -1110,6 +1145,8 @@ def plan_comparison(summary: Summary, settings: Settings) -> dict:
                 settings.export_credit_rate,
             ),
         },
+        current_display_name=plan_label(settings.current_plan),
+        comparison_display_name=plan_label(settings.comparison_plan),
     )
 
 
@@ -2199,8 +2236,8 @@ def authentication_alert_html(health: dict) -> str:
     return f"""
     <section class="auth-alert" role="alert">
       <div class="auth-alert-heading">
-        <div><span>Collector action required</span><h2>SolarEdge login expired</h2></div>
-        <strong>Last successful collection: {html.escape(last_success)}</strong>
+        <div><span>Live data needs attention</span><h2>SolarEdge login expired</h2></div>
+        <strong>Last successful update: {html.escape(last_success)}</strong>
       </div>
       <ol>
         <li>Sign in to the SolarEdge monitoring website in your browser.</li>
@@ -2424,6 +2461,17 @@ def trust_wording(value: Any) -> str:
 
 def customer_source(value: Any) -> str:
     text = customer_label(value)
+    source_replacements = {
+        "Data completeness summary": "Available household information",
+        "Data source coverage": "Connected household sources",
+        "Decision Engine": "PowerMonitor",
+        "Recommendation Engine": "PowerMonitor",
+        "Household State": "Household information",
+        "Provider Observation": "Household update",
+        "Provider Observations": "Household updates",
+    }
+    for internal, friendly in source_replacements.items():
+        text = text.replace(internal, friendly)
     raw = text.strip()
     text = raw.replace("_", " ").strip()
     if not text:
@@ -3503,8 +3551,9 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
     negatives = "".join(
         f"<li>{html.escape(item)}</li>" for item in score.top_negative_factors
     ) or "<li>No major negative factors are active.</li>"
+    breakdown = energy_score_breakdown_html(score)
     return f"""
-    <article class="energy-score-card">
+    <article id="energy-score-explanation" class="energy-score-card">
       <div class="energy-score-main">
         <span>Energy Score</span>
         <strong>{score.score}</strong>
@@ -3513,6 +3562,11 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
       <div class="energy-score-detail">
         <h3>{html.escape(score.summary)}</h3>
         <p>Potential score: <strong>{score.potential_score}</strong></p>
+        <section class="energy-score-explain">
+          <h4>Why is my score what it is?</h4>
+          <p>{html.escape(trust_wording(score.explanation.why_this_matters) if score.explanation else "PowerMonitor uses the household information it already has to explain what is helping and what is holding the score back.")}</p>
+          {breakdown}
+        </section>
         <div class="energy-score-factors">
           <div><span>Positive factors</span><ul>{positives}</ul></div>
           <div><span>Negative factors</span><ul>{negatives}</ul></div>
@@ -3521,6 +3575,29 @@ def energy_score_html(score: Optional[EnergyScore]) -> str:
       </div>
     </article>
     """
+
+
+def energy_score_breakdown_html(score: EnergyScore) -> str:
+    factors = [*score.top_positive_factors, *score.top_negative_factors]
+    lower_factors = [item.lower() for item in factors]
+
+    def factor_for(keywords: tuple[str, ...], fallback: str) -> str:
+        for original, lowered in zip(factors, lower_factors):
+            if any(keyword in lowered for keyword in keywords):
+                return trust_wording(original)
+        return fallback
+
+    rows = [
+        ("Cost", factor_for(("cost", "bill", "tariff", "plan"), "Cost impact is based on the current tariff and bill signals PowerMonitor can verify.")),
+        ("Solar", factor_for(("solar", "export", "self-consumption", "self consumption"), "Solar impact depends on production and how much of it is used at home.")),
+        ("Peak usage", factor_for(("peak", "high cost"), "Peak usage affects the score when household electricity is used during expensive windows.")),
+        ("Overnight usage", factor_for(("overnight", "baseload", "night"), "Overnight usage affects the score when the home draws more power than its usual idle pattern.")),
+        ("Household behaviour", factor_for(("behaviour", "behavior", "charging", "ev", "trend"), "Household behaviour reflects recurring charging, usage, and data patterns already visible to PowerMonitor.")),
+    ]
+    return "<div class=\"energy-score-breakdown\">" + "".join(
+        f"<div><span>{html.escape(label)}</span><p>{html.escape(detail)}</p></div>"
+        for label, detail in rows
+    ) + "</div>"
 
 
 def setup_progress_card_html(setup: Optional[SetupChecklist]) -> str:
@@ -3670,26 +3747,53 @@ def setup_page_html(
 def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     if not settings:
         return ""
-    plan_options = (
-        ("synergy_ev_add_on", "Synergy EV Add On"),
-        ("synergy_home_plan", "Synergy Home Plan"),
-        ("previous_flat_or_home_plan", "Previous Flat/Home Plan"),
+    state_or_territory = getattr(settings, "state_or_territory", DEFAULT_STATE_OR_TERRITORY)
+    retailer_id = getattr(settings, "retailer_id", DEFAULT_RETAILER)
+    current_plan = getattr(settings, "current_plan", DEFAULT_PLAN)
+    tariff_add_on = getattr(settings, "tariff_add_on", NO_ADD_ON)
+    supply_charge = getattr(settings, "supply_charge_per_day", DEFAULT_SETTINGS["supply_charge_per_day"])
+    export_credit_rate = getattr(settings, "export_credit_rate", DEFAULT_SETTINGS["export_credit_rate"])
+    state_options = "".join(
+        f'<option value="{html.escape(value)}"{" selected" if state_or_territory == value else ""}>{html.escape(label)}</option>'
+        for value, label in STATE_OPTIONS
     )
-    options = "".join(
-        f'<option value="{html.escape(value)}"{" selected" if settings.current_plan == value else ""}>{html.escape(label)}</option>'
-        for value, label in plan_options
+    retailer_options = "".join(
+        [
+            f'<option value="{DEFAULT_RETAILER}"{" selected" if retailer_id == DEFAULT_RETAILER or getattr(settings, "retailer", "") == "Synergy" else ""}>Synergy</option>',
+            f'<option value="{MANUAL_TARIFF_ID}"{" selected" if current_plan == MANUAL_TARIFF_ID else ""}>{MANUAL_TARIFF_LABEL}</option>',
+        ]
     )
-    retailer = html.escape(settings.retailer)
+    plan_options = "".join(
+        f'<option value="{html.escape(value)}"{" selected" if current_plan == value else ""}>{html.escape(label)}</option>'
+        for value, label in supported_plan_options()
+    ) + f'<option value="{MANUAL_TARIFF_ID}"{" selected" if current_plan == MANUAL_TARIFF_ID else ""}>{MANUAL_TARIFF_LABEL}</option>'
+    add_on_options = "".join(
+        f'<option value="{html.escape(value)}"{" selected" if tariff_add_on == value else ""}>{html.escape(label)}</option>'
+        for value, label in ADD_ON_OPTIONS
+    )
+    rates = getattr(settings, "import_rates", DEFAULT_SETTINGS["import_rates"])
     return f"""
     <section id="setup-billing" class="report-section setup-section">
       <div class="section-title">
-        <div><span class="eyebrow">Setup</span><h2>Billing Cycle</h2></div>
+        <div><span class="eyebrow">Setup</span><h2>Billing and Tariff</h2></div>
         <p>Used by bills, projections, comparisons, and setup readiness</p>
       </div>
       <form class="setup-config-form" method="post" action="/setup/billing-cycle">
+        <label><span>State / territory</span><select name="state_or_territory">{state_options}</select></label>
+        <label><span>Retailer</span><select name="retailer">{retailer_options}</select></label>
+        <label id="setup-tariff"><span>Plan</span><select name="current_plan">{plan_options}</select></label>
+        <label><span>Optional add-on</span><select name="tariff_add_on">{add_on_options}</select></label>
         <label id="setup-billing-cycle"><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
-        <label><span>Retailer</span><input type="text" name="retailer" value="{retailer}" placeholder="Optional"></label>
-        <label id="setup-tariff"><span>Tariff plan</span><select name="current_plan">{options}</select></label>
+        <fieldset>
+          <legend>Manual tariff</legend>
+          <p class="notice">If your retailer or plan is not listed, choose Manual tariff.</p>
+          <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="manual_supply_charge_per_day" value="{supply_charge:.6f}"></label>
+          <label><span>Export credit rate</span><input type="number" step="0.000001" min="0" name="manual_export_credit_rate" value="{export_credit_rate:.6f}"></label>
+          <label><span>Super off peak import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_super_off_peak" value="{rates.get("super_off_peak", 0):.6f}"></label>
+          <label><span>Overnight import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_overnight" value="{rates.get("overnight", 0):.6f}"></label>
+          <label><span>Off peak import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_off_peak" value="{rates.get("off_peak", 0):.6f}"></label>
+          <label><span>Peak import rate</span><input type="number" step="0.000001" min="0" name="manual_import_rate_peak" value="{rates.get("peak", 0):.6f}"></label>
+        </fieldset>
         <button type="submit">Save Billing Cycle</button>
       </form>
       <p class="notice">Saving this completes the Billing Cycle setup task immediately. Current billing-period date overrides can still be kept in <code>config/settings.json</code> for exact bill matching.</p>
@@ -3994,28 +4098,89 @@ def data_completeness(summary: Summary, settings: Settings) -> dict:
     }
 
 
+def current_knowledge_items(summary: Summary, settings: Settings) -> list[dict[str, str]]:
+    completeness = data_completeness(summary, settings)
+    by_name = {str(item["name"]): item for item in completeness["items"]}
+    solar_known = by_name.get("Solar data", {}).get("status") == "present"
+    grid_known = by_name.get("Grid data", {}).get("status") == "present"
+    ev_known = by_name.get("EV actual sessions", {}).get("status") == "present"
+    billing_known = by_name.get("Billing period", {}).get("status") == "configured"
+    tariff_known = bool(getattr(settings, "import_rates", None) or getattr(settings, "current_plan", None))
+    return [
+        {
+            "name": "Solar generation",
+            "known": "yes" if solar_known else "no",
+            "effect": "Helps explain solar use, exports, and whether daytime advice can be trusted.",
+        },
+        {
+            "name": "Grid usage",
+            "known": "yes" if grid_known else "no",
+            "effect": "Helps explain household consumption, peak exposure, and bill movement.",
+        },
+        {
+            "name": "EV charging",
+            "known": "yes" if ev_known else "no",
+            "effect": "Helps separate car charging from normal household usage and estimate charging costs.",
+        },
+        {
+            "name": "Billing cycle",
+            "known": "yes" if billing_known else "no",
+            "effect": "Helps compare today against the right point in the current bill.",
+        },
+        {
+            "name": "Tariff",
+            "known": "yes" if tariff_known else "no",
+            "effect": "Helps identify expensive and cheaper electricity windows.",
+        },
+        {
+            "name": "Weather",
+            "known": "no",
+            "effect": "Would help explain unusual solar production on cloudy or sunny days.",
+        },
+        {
+            "name": "Battery",
+            "known": "no",
+            "effect": "Would help explain stored energy, discharge, and backup behaviour.",
+        },
+        {
+            "name": "Live inverter telemetry",
+            "known": "no",
+            "effect": "Would help verify right-now solar surplus instead of relying on recent history.",
+        },
+    ]
+
+
 def data_completeness_html(summary: Summary, settings: Settings) -> str:
     completeness = data_completeness(summary, settings)
     rows = []
-    for item in completeness["items"]:
-        status = item["status"]
-        tone = "good" if status in {"present", "configured"} else "bad"
+    for item in current_knowledge_items(summary, settings):
+        known = item["known"] == "yes"
+        tone = "good" if known else "neutral"
+        status = "Known" if known else "Not set up"
         rows.append(
             f"""
             <div class="completeness-row {tone}">
-              <span>{html.escape(item["name"])}</span>
-              <strong>{html.escape(status.title())}</strong>
-              <small>{html.escape(item["detail"])}</small>
+              <span>{'✔' if known else '○'} {html.escape(item["name"])}</span>
+              <strong>{html.escape(status)}</strong>
+              <small>{html.escape(item["effect"])}</small>
             </div>
             """
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Data completeness</h3><span>{html.escape(completeness["confidence"])} confidence</span></div>
+      <div class="chart-heading"><h3>What PowerMonitor currently knows</h3><span>{html.escape(homeowner_confidence_label(completeness["confidence"]))}</span></div>
       <p class="scenario-note">{html.escape(completeness["confidence_note"])}</p>
       <div class="completeness-grid">{''.join(rows)}</div>
     </div>
     """
+
+
+def homeowner_confidence_label(confidence: str) -> str:
+    if str(confidence).lower() == "high":
+        return "High confidence"
+    if str(confidence).lower() == "medium":
+        return "Medium confidence"
+    return "Limited confidence"
 
 
 def capability_summary_html(capability_summary) -> str:
@@ -4488,8 +4653,38 @@ def provider_observations_html(summary: Optional[dict]) -> str:
     if not summary:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Source readings</h3><span>Not available yet</span></div>
-      <p class="notice">Older readings may exist before source reading history was introduced. New imports and live data refreshes will fill this in as they run.</p>
+      <div class="chart-heading"><h3>Recent household updates</h3><span>Not available yet</span></div>
+      <p class="notice">No recent update history is available yet. Existing bill, tariff, or import information can still support cautious guidance.</p>
+    </div>
+    """
+    rows = []
+    for observation in summary.get("latest", [])[:8]:
+        provider = friendly_update_provider(observation)
+        description = friendly_update_description(observation)
+        relative_time = relative_update_time(str(observation.get("observed_at") or observation.get("received_at") or ""))
+        rows.append(
+            f"""
+            <div class="completeness-row {'good' if observation.get('quality') == 'high' else 'neutral'}">
+              <span>{html.escape(relative_time)}</span>
+              <strong>{html.escape(provider)}</strong>
+              <small>{html.escape(description)}</small>
+            </div>
+            """
+        )
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Recent household updates</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before source reading history. New imports and live data refreshes will populate readings as they run.</p>'}</div>
+    </div>
+    """
+
+
+def provider_observations_diagnostics_html(summary: Optional[dict]) -> str:
+    if not summary:
+        return """
+    <div class="system-card">
+      <div class="chart-heading"><h3>Provider observations</h3><span>Not available yet</span></div>
+      <p class="notice">No provider observation summary is available for diagnostics.</p>
     </div>
     """
     rows = []
@@ -4505,10 +4700,61 @@ def provider_observations_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Source readings</h3><span>{int(summary.get("count") or 0)} recent</span></div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">Legacy readings or EV sessions may exist before source reading history. New imports and live data refreshes will populate readings as they run.</p>'}</div>
+      <div class="chart-heading"><h3>Provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations recorded yet.</p>'}</div>
     </div>
     """
+
+
+def friendly_update_provider(observation: dict) -> str:
+    provider_id = str(observation.get("provider_id") or "").lower()
+    provider_names = {
+        "solaredge": "SolarEdge",
+        "ocular_export": "Ocular",
+        "home_assistant_ocpp": "Home Assistant",
+        "home_assistant": "Home Assistant",
+        "synergy_tariff_config": "Electricity tariff",
+        "smart_meter_readings": "Smart Meter",
+    }
+    return provider_names.get(provider_id, customer_source(provider_id) if provider_id else "Household data")
+
+
+def friendly_update_description(observation: dict) -> str:
+    text = " ".join(
+        str(observation.get(key) or "")
+        for key in ("observation_type", "capability")
+    ).lower()
+    if "solar" in text:
+        return "Solar production updated"
+    if "grid" in text or "interval" in text or "import" in text:
+        return "Electricity usage updated"
+    if "ev" in text or "session" in text or "charging" in text:
+        return "EV charging imported"
+    if "tariff" in text:
+        return "Tariff information updated"
+    if "billing" in text:
+        return "Billing cycle updated"
+    if "collector" in text or "health" in text:
+        return "Live data status updated"
+    return "Household information updated"
+
+
+def relative_update_time(value: str) -> str:
+    if not value:
+        return "Recently"
+    try:
+        observed = datetime.fromisoformat(value.replace(",", ".")).astimezone(LOCAL_TIMEZONE)
+    except ValueError:
+        return display_timestamp(value)
+    today = datetime.now(LOCAL_TIMEZONE).date()
+    days = (today - observed.date()).days
+    if days == 0:
+        return "Today"
+    if days == 1:
+        return "Yesterday"
+    if 1 < days < 7:
+        return f"{days} days ago"
+    return observed.strftime("%d %b")
 
 
 def system_trust_summary_html(provider_management: Optional[ProviderManager], summary: Summary) -> str:
@@ -4953,6 +5199,77 @@ def notification_history_html(summary: Optional[dict]) -> str:
     """
 
 
+def confidence_section_html(
+    summary: Summary,
+    settings: Settings,
+    provider_observations: Optional[dict],
+) -> str:
+    confidence, confidence_note = confidence_label(summary)
+    missing = [item for item in current_knowledge_items(summary, settings) if item["known"] != "yes"]
+    missing_rows = "".join(
+        f"""
+        <div class="completeness-row neutral">
+          <span>{html.escape(item["name"])}</span>
+          <strong>Not available</strong>
+          <small>{html.escape(item["effect"])}</small>
+        </div>
+        """
+        for item in missing[:5]
+    )
+    missing_html = missing_rows or '<p class="notice">Nothing important is missing for today&apos;s advice.</p>'
+    effect = (
+        "PowerMonitor can make reliable recommendations today using the available household information."
+        if str(confidence).lower() == "high"
+        else "PowerMonitor can still provide guidance, but it will avoid strong recommendations where live or recent information is missing."
+    )
+    return f"""
+    <div id="system-data-quality" class="trust-answer-card">
+      <div class="chart-heading"><h3>Can I trust today's advice?</h3><span>{html.escape(homeowner_confidence_label(confidence))}</span></div>
+      <p class="system-answer-lede">Today's advice is: <strong>{html.escape(homeowner_confidence_label(confidence))}</strong>.</p>
+      <p>{html.escape(trust_wording(confidence_note))} {html.escape(effect)}</p>
+      <div class="system-overview-grid">
+        {data_completeness_html(summary, settings)}
+        <div class="system-card">
+          <div class="chart-heading"><h3>What information is missing?</h3><span>Effect on advice</span></div>
+          <div class="completeness-grid">{missing_html}</div>
+        </div>
+      </div>
+      {provider_observations_html(provider_observations)}
+    </div>
+    """
+
+
+def live_data_help_html(health: dict, summary: Summary) -> str:
+    status = str(health.get("status") or "unknown")
+    live_ok = status == "ok"
+    latest = health.get("last_successful_collection") or health.get("latest_measurement_time")
+    live_title = "Live data is working." if live_ok else "Live updates are not available right now."
+    unavailable = "Nothing important is unavailable right now." if live_ok else "Right-now readings from live data sources cannot be verified."
+    why = (
+        "The latest live refresh completed successfully."
+        if live_ok
+        else trust_wording(str(health.get("collector_message") or health.get("failure_type") or "The last live refresh did not complete."))
+    )
+    if summary.intervals:
+        effect = "Recent household information is still available, so PowerMonitor can provide cautious guidance instead of treating everything as unavailable."
+    else:
+        effect = "PowerMonitor has too little usable household information, so recommendations will be limited until data is refreshed or imported."
+    action = "No action is needed right now." if live_ok else "Reconnect the affected live service, then run Test Connection or refresh the report."
+    return f"""
+    <div id="system-live-data" class="trust-answer-card">
+      <div class="chart-heading"><h3>Why isn't live data working?</h3><span>{html.escape("Working" if live_ok else "Needs attention")}</span></div>
+      <p class="system-answer-lede">{html.escape(live_title)}</p>
+      <div class="provider-guidance-grid">
+        <div><span>What is unavailable?</span><strong>{html.escape(unavailable)}</strong></div>
+        <div><span>Why?</span><strong>{html.escape(why)}</strong></div>
+        <div><span>How does it affect advice?</span><strong>{html.escape(effect)}</strong></div>
+        <div><span>Suggested action</span><strong>{html.escape(action)}</strong></div>
+      </div>
+      <p class="scenario-note">Last successful update: {html.escape(display_timestamp(latest))}.</p>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -5003,6 +5320,11 @@ def system_page_html(
       </div>
     """
     advanced_body = f"""
+      <div class="system-card">
+        <div class="chart-heading"><h3>Live data diagnostics</h3><span>Raw status</span></div>
+        {collector_body}
+      </div>
+      {provider_observations_diagnostics_html(provider_observations)}
       {provider_runtime_html(provider_runtime)}
       {provider_registry_html(provider_registry)}
       {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
@@ -5035,21 +5357,13 @@ def system_page_html(
       <div class="section-title"><div><span class="eyebrow">System</span><h2>Can I trust today's advice?</h2></div><p>Start with whether the current guidance is based on enough household information.</p></div>
       {system_trust_summary_html(provider_management, summary)}
       {system_action_needed_html(setup, provider_management)}
-      <div class="system-overview-grid">
-        {data_completeness_html(summary, settings)}
-      </div>
+      {confidence_section_html(summary, settings, provider_observations)}
       {disclosure_html("Your Data Sources", "What PowerMonitor knows about your household", f'''
         {provider_management_html(provider_management)}
       ''', open_by_default=True, css_class="system-group")}
-      {disclosure_html("Data freshness", "Recent updates, failures, and report freshness", f'<div id="system-live-data">{collector_body}</div>', css_class="system-group")}
+      {disclosure_html("Live data help", "What is unavailable, why, and what to do next", live_data_help_html(health, summary), css_class="system-group")}
       {disclosure_html("Recommendations", "Active household recommendations and confidence", f'''
         {household_decisions_html(household_decisions, decision_summary)}
-      ''', css_class="system-group")}
-      {disclosure_html("Confidence", "Source readings and data confidence", f'''
-        <div id="system-data-quality">
-          {provider_observations_html(provider_observations)}
-          {data_completeness_html(summary, settings)}
-        </div>
       ''', css_class="system-group")}
       {disclosure_html("Advanced Diagnostics", "Data connections, behaviour, recommendation trail, notifications, and local configuration", advanced_body, css_class="system-group advanced-diagnostics")}
     </section>
@@ -5715,9 +6029,11 @@ def write_html(
     body:has(#system-collector:target) #home,
     body:has(#system-live-data:target) #home,
     body:has(#system-data-quality:target) #home,
+    body:has(#energy-score-explanation:target) #home,
     body:has([id^="system-provider-"]:target) #home {{ display:none; }}
     body:has(#home:target) #home,
     body:has(#home-goals:target) #home,
+    body:has(#energy-score-explanation:target) #home,
     body:has(#setup-billing:target) #setup,
     body:has(#setup-billing-cycle:target) #setup,
     body:has(#setup-tariff:target) #setup,
@@ -5900,6 +6216,12 @@ def write_html(
     .energy-score-main strong {{ display:block; margin:8px 0; font-size:58px; line-height:1; letter-spacing:-.06em; }}
     .energy-score-detail h3 {{ margin:0; font-size:18px; letter-spacing:-.03em; }}
     .energy-score-detail p {{ margin:6px 0 0; color:var(--muted); font-size:13px; }}
+    .energy-score-explain {{ margin-top:13px; padding:13px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
+    .energy-score-explain h4 {{ margin:0; font-size:14px; }}
+    .energy-score-breakdown {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }}
+    .energy-score-breakdown div {{ padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
+    .energy-score-breakdown span {{ display:block; color:var(--ink); font-size:10px; font-weight:850; text-transform:uppercase; }}
+    .energy-score-breakdown p {{ margin-top:5px; font-size:12px; }}
     .energy-score-factors {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:13px; }}
     .energy-score-factors div {{ padding:12px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
     .energy-score-factors span {{ color:var(--ink); }}
@@ -6094,6 +6416,7 @@ def write_html(
     body:has(#setup-billing:target) .top-nav a[href="#setup"],
     body:has(#setup-billing-cycle:target) .top-nav a[href="#setup"],
     body:has(#setup-tariff:target) .top-nav a[href="#setup"],
+    body:has(#energy-score-explanation:target) .top-nav a[href="#home"],
     body:has(#home-goals:target) .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ font-size:34px; letter-spacing:-.055em; }} .page-heading p {{ max-width:620px; font-size:14px; }}
@@ -6134,7 +6457,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

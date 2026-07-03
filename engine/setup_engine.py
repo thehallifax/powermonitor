@@ -52,7 +52,7 @@ class SetupEngine:
                 "household",
                 "Household",
                 [
-                    self._tariff_task(capability_summary),
+                    self._tariff_task(capability_summary, settings),
                     self._billing_cycle_task(settings),
                     self._goals_task(goals),
                 ],
@@ -69,17 +69,10 @@ class SetupEngine:
             ),
             SetupSection(
                 "data_quality",
-                "Data Quality",
+                "Advice Readiness",
                 [
                     self._collector_task(collector_health),
                     self._freshness_task(capability_summary, now),
-                ],
-            ),
-            SetupSection(
-                "recommendations",
-                "Recommendations",
-                [
-                    self._recommendation_centre_task(capability_summary, recommendations),
                     self._energy_score_task(capability_summary),
                 ],
             ),
@@ -111,9 +104,12 @@ class SetupEngine:
             remaining_tasks=remaining,
         )
 
-    def _tariff_task(self, capability_summary: HouseholdCapabilitySummary) -> SetupTask:
+    def _tariff_task(self, capability_summary: HouseholdCapabilitySummary, settings: Any = None) -> SetupTask:
         tariff = capability_summary.get("tariff")
-        ready = bool(tariff and tariff.usable)
+        setup_mode = str(getattr(settings, "tariff_setup_mode", "") or "")
+        plan = str(getattr(settings, "current_plan", "") or "")
+        saved = bool(getattr(settings, "billing_cycle_configured", False))
+        ready = bool(tariff and tariff.usable) or bool(saved and setup_mode in {"catalog", "manual"} and plan)
         return task(
             "configure_tariff",
             "Configure electricity tariff",
@@ -122,8 +118,8 @@ class SetupEngine:
             "2 minutes",
             "Go to Tariff Settings",
             "#setup-tariff",
-            tariff.reason if tariff else "Tariff capability is unavailable.",
-            "HouseholdCapabilitySummary.tariff",
+            tariff.reason if tariff else "Tariff selection is saved." if ready else "Tariff capability is unavailable.",
+            "settings.tariff" if ready and not (tariff and tariff.usable) else "HouseholdCapabilitySummary.tariff",
         )
 
     def _billing_cycle_task(self, settings: Any) -> SetupTask:
@@ -254,7 +250,7 @@ class SetupEngine:
             ready,
             "high",
             "3 minutes",
-            "Review Live Data",
+            "Why isn't live data working?",
             "#system-live-data",
             str(collector_health.get("collector_message") or collector_health.get("message") or status),
             "Data connection",
@@ -275,29 +271,10 @@ class SetupEngine:
             ready,
             "high",
             "2 minutes",
-            "Review Data Quality",
+            "Can I trust today's advice?",
             "#system-data-quality",
             data_freshness.reason if data_freshness else "No data freshness capability is available.",
             "DataEngine.freshness",
-        )
-
-    def _recommendation_centre_task(
-        self,
-        capability_summary: HouseholdCapabilitySummary,
-        recommendations: list[Any],
-    ) -> SetupTask:
-        recs = capability_summary.get("recommendations")
-        ready = bool(recs and recs.usable) or bool(recommendations)
-        return task(
-            "explore_recommendation_centre",
-            "Explore Recommendation Centre",
-            ready,
-            "low",
-            "2 minutes",
-            "Open Recommendation Centre",
-            "#recommendations",
-            "Recommendation Engine is producing household opportunities." if ready else "Recommendations are not ready yet.",
-            "Recommendation Engine",
         )
 
     def _energy_score_task(self, capability_summary: HouseholdCapabilitySummary) -> SetupTask:
@@ -309,8 +286,8 @@ class SetupEngine:
             ready,
             "low",
             "1 minute",
-            "Review Home",
-            "#home",
+            "Why is my score what it is?",
+            "#energy-score-explanation",
             freshness.reason if freshness else "Energy Score needs household readings.",
             "Energy Score",
         )

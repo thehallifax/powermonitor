@@ -16,6 +16,16 @@ import import_ocular_export
 import report
 from engine.import_framework import detect_importer
 from engine.models import to_api_safe
+from engine.tariff_catalog import (
+    BUCKET_ORDER,
+    DEFAULT_PLAN,
+    DEFAULT_RETAILER,
+    DEFAULT_STATE_OR_TERRITORY,
+    MANUAL_TARIFF_ID,
+    apply_structured_tariff,
+    comparison_rates_for_plan,
+    tariff_plan_for_selection,
+)
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
@@ -100,8 +110,11 @@ def update_billing_cycle_settings(
     settings_path: Path,
     *,
     billing_period_start_day,
-    retailer: str,
-    current_plan: str,
+    state_or_territory: str = DEFAULT_STATE_OR_TERRITORY,
+    retailer: str = DEFAULT_RETAILER,
+    current_plan: str = DEFAULT_PLAN,
+    tariff_add_on: str = "none",
+    manual_rates: Optional[dict] = None,
 ) -> dict:
     try:
         start_day = int(billing_period_start_day)
@@ -109,14 +122,10 @@ def update_billing_cycle_settings(
         raise ValueError("Enter a billing cycle start day from 1 to 28.") from exc
     if not 1 <= start_day <= 28:
         raise ValueError("Choose a billing cycle start day from 1 to 28.")
-    allowed_plans = {
-        "synergy_ev_add_on",
-        "synergy_home_plan",
-        "previous_flat_or_home_plan",
-    }
-    plan = str(current_plan or "synergy_ev_add_on")
-    if plan not in allowed_plans:
-        raise ValueError("Choose one of the listed tariff plans.")
+    state = str(state_or_territory or DEFAULT_STATE_OR_TERRITORY).upper()
+    retailer_id = str(retailer or DEFAULT_RETAILER).lower()
+    plan = str(current_plan or DEFAULT_PLAN)
+    add_on = str(tariff_add_on or "none")
 
     if settings_path.exists():
         try:
@@ -128,15 +137,51 @@ def update_billing_cycle_settings(
     else:
         raw = {}
 
-    raw["billing_period_start_day"] = start_day
-    raw["retailer"] = str(retailer or "").strip()
-    raw["current_plan"] = plan
+    raw.update(
+        {
+            "billing_period_start_day": start_day,
+            "state_or_territory": state,
+            "retailer": retailer_id,
+            "retailer_id": retailer_id,
+            "current_plan": plan,
+            "tariff_add_on": add_on,
+        }
+    )
+    if plan == MANUAL_TARIFF_ID or retailer_id == MANUAL_TARIFF_ID:
+        raw.update(_manual_tariff_settings(manual_rates or {}))
+    else:
+        selected = tariff_plan_for_selection(state, retailer_id, plan, add_on)
+        if selected is None:
+            raise ValueError("If your retailer or plan is not listed, choose Manual tariff.")
+        raw = apply_structured_tariff(raw)
+        raw["comparison_plan_rates"] = comparison_rates_for_plan("previous_flat_or_home_plan")
     raw["billing_cycle_configured"] = True
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = settings_path.with_suffix(settings_path.suffix + ".tmp")
     temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(settings_path)
     return raw
+
+
+def _manual_tariff_settings(values: dict) -> dict:
+    try:
+        supply = float(values["supply_charge_per_day"])
+        export = float(values["export_credit_rate"])
+        rates = {bucket: float(values[bucket]) for bucket in BUCKET_ORDER}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Enter all manual tariff rates before saving Manual tariff.") from exc
+    if supply < 0 or export < 0 or any(rate < 0 for rate in rates.values()):
+        raise ValueError("Manual tariff rates cannot be negative.")
+    return {
+        "tariff_setup_mode": "manual",
+        "current_plan": MANUAL_TARIFF_ID,
+        "retailer": "Manual tariff",
+        "retailer_id": MANUAL_TARIFF_ID,
+        "tariff_add_on": "none",
+        "supply_charge_per_day": supply,
+        "export_credit_rate": export,
+        "import_rates": rates,
+    }
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -364,8 +409,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         update_billing_cycle_settings(
             SETTINGS_PATH,
             billing_period_start_day=self.param(params, "billing_period_start_day"),
+            state_or_territory=self.param(params, "state_or_territory", "WA"),
             retailer=self.param(params, "retailer", ""),
             current_plan=self.param(params, "current_plan", ""),
+            tariff_add_on=self.param(params, "tariff_add_on", "none"),
+            manual_rates={
+                "supply_charge_per_day": self.param(params, "manual_supply_charge_per_day"),
+                "export_credit_rate": self.param(params, "manual_export_credit_rate"),
+                "super_off_peak": self.param(params, "manual_import_rate_super_off_peak"),
+                "overnight": self.param(params, "manual_import_rate_overnight"),
+                "off_peak": self.param(params, "manual_import_rate_off_peak"),
+                "peak": self.param(params, "manual_import_rate_peak"),
+            },
         )
         self.redirect("/#setup")
 
