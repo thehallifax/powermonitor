@@ -1,5 +1,19 @@
 # Changelog
 
+## Bugfix - SolarEdge Post-Login Site Navigation
+
+- Updated SolarEdge session refresh to continue past login into the configured
+  site dashboard before accepting cookies or verifying data access.
+- Added Sites-list detection, configured site-id dashboard navigation, and a
+  first-site fallback click when direct site navigation is unavailable.
+- Required dashboard proof via route or dashboard indicators before calling the
+  SolarEdge data endpoint.
+- Added safe navigation debug metadata covering title, hostname, route, Sites
+  list detection, site-row click state, dashboard-loaded state, and configured
+  site-id usage without logging secrets or page HTML.
+- Added regression tests for Sites-list detection, configured-site navigation,
+  first-site fallback, dashboard-before-data verification, and no-site failure.
+
 ## Bugfix - SolarEdge Playwright Login Selectors
 
 - Made the SolarEdge session refresh automation handle current and fallback

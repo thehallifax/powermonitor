@@ -4,6 +4,7 @@ import os
 import re
 from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +69,31 @@ CHALLENGE_SELECTORS = (
     "iframe[src*='recaptcha' i]",
     "iframe[src*='challenge' i]",
     "text=/captcha|challenge|verification|verify you|single sign-on|sso/i",
+)
+
+SITES_LIST_SELECTORS = (
+    "text=/\\bSites\\b/i",
+    "text=/Site ID/i",
+    "table:has-text('Site ID')",
+    "[data-testid*='site' i]",
+    "a[href*='/site/']",
+    "a[href*='siteId=']",
+)
+
+FIRST_SITE_SELECTORS = (
+    "a[href*='/site/']",
+    "a[href*='siteId=']",
+    "tr:has(a[href*='/site/'])",
+    "tr:has-text('Site ID')",
+    "[data-testid*='site' i]",
+)
+
+DASHBOARD_INDICATOR_SELECTORS = (
+    "text=/energy produced/i",
+    "text=/power flow/i",
+    "text=/production/i",
+    "text=/consumption/i",
+    "text=/dashboard/i",
 )
 
 
@@ -168,7 +194,18 @@ def challenge_likely(page) -> bool:
     return False
 
 
-def save_login_debug(page, reason: str, allow_screenshot: bool) -> Path:
+def route_path(page) -> str:
+    try:
+        parsed = urlparse(str(page.url or ""))
+    except Exception:
+        return "unknown"
+    route = parsed.path or "/"
+    if parsed.fragment:
+        route = f"{route}#{parsed.fragment}"
+    return route
+
+
+def save_login_debug(page, reason: str, allow_screenshot: bool, extra: Optional[dict] = None) -> Path:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     base_path = DEBUG_DIR / f"solaredge-login-{timestamp}"
@@ -177,10 +214,13 @@ def save_login_debug(page, reason: str, allow_screenshot: bool) -> Path:
         "title": safe_page_title(page),
         "url": str(getattr(page, "url", "") or ""),
         "hostname": page_hostname(page),
+        "route_path": route_path(page),
         "username_field_found": selector_found(page, USERNAME_SELECTORS),
         "password_field_found": selector_found(page, PASSWORD_SELECTORS),
         "challenge_or_sso_likely": challenge_likely(page),
     }
+    if extra:
+        metadata.update({str(key): value for key, value in extra.items()})
     metadata_path = base_path.with_suffix(".json")
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
@@ -208,6 +248,122 @@ def login_failure_message(page, reason: str, *, username_found: bool, password_f
         f"challenge_or_sso_likely={challenge_likely(page)}; "
         f"debug={debug_path}"
     )
+
+
+def sites_list_detected(page) -> bool:
+    route = route_path(page).lower()
+    if "site" in route and "dashboard" not in route:
+        return True
+    return selector_found(page, SITES_LIST_SELECTORS)
+
+
+def dashboard_loaded(page, site_id: str = SITE_ID) -> bool:
+    route = route_path(page).lower()
+    current_url = str(getattr(page, "url", "") or "").lower()
+    if "dashboard" in route and (not site_id or site_id.lower() in current_url or "site" in route):
+        return True
+    return selector_found(page, DASHBOARD_INDICATOR_SELECTORS)
+
+
+def dashboard_urls(site_id: str) -> tuple[str, ...]:
+    return (
+        f"https://monitoring.solaredge.com/solaredge-web/p/site/{site_id}/#/dashboard",
+        f"https://monitoring.solaredge.com/solaredge-web/p/site/{site_id}",
+        f"https://monitoring.solaredge.com/solaredge-web/p/sites/{site_id}",
+        f"https://monitoring.solaredge.com/solaredge-web/p/dashboard?siteId={site_id}",
+    )
+
+
+def configured_site_selectors(site_id: str) -> tuple[str, ...]:
+    return (
+        f"a[href*='{site_id}']",
+        f"tr:has-text('{site_id}')",
+        f"button:has-text('{site_id}')",
+        f"text='{site_id}'",
+    )
+
+
+def click_site(page, site_id: str = "") -> bool:
+    if site_id and click_first(page, configured_site_selectors(site_id)):
+        return True
+    return click_first(page, FIRST_SITE_SELECTORS)
+
+
+def save_navigation_debug(page, reason: str, metadata: dict) -> Path:
+    safe_metadata = {
+        "sites_list_detected": bool(metadata.get("sites_list_detected")),
+        "site_row_clicked": bool(metadata.get("site_row_clicked")),
+        "dashboard_loaded": bool(metadata.get("dashboard_loaded")),
+        "configured_site_id_used": bool(metadata.get("configured_site_id_used")),
+    }
+    return save_login_debug(page, reason, allow_screenshot=True, extra=safe_metadata)
+
+
+def site_navigation_failure_message(page, reason: str, metadata: dict) -> str:
+    debug_path = save_navigation_debug(page, reason, metadata)
+    return (
+        f"SolarEdge site dashboard could not be opened. "
+        f"title={safe_page_title(page)!r}; "
+        f"hostname={page_hostname(page)!r}; "
+        f"route_path={route_path(page)!r}; "
+        f"sites_list_detected={bool(metadata.get('sites_list_detected'))}; "
+        f"site_row_clicked={bool(metadata.get('site_row_clicked'))}; "
+        f"dashboard_loaded={bool(metadata.get('dashboard_loaded'))}; "
+        f"configured_site_id_used={bool(metadata.get('configured_site_id_used'))}; "
+        f"debug={debug_path}"
+    )
+
+
+def open_site_dashboard(page, site_id: str = SITE_ID) -> dict:
+    wait_for_page_settle(page)
+    metadata = {
+        "sites_list_detected": sites_list_detected(page),
+        "site_row_clicked": False,
+        "dashboard_loaded": dashboard_loaded(page, site_id),
+        "configured_site_id_used": False,
+    }
+    if metadata["dashboard_loaded"]:
+        return metadata
+
+    if site_id:
+        for url in dashboard_urls(site_id):
+            metadata["configured_site_id_used"] = True
+            page.goto(url, wait_until="domcontentloaded")
+            wait_for_page_settle(page)
+            metadata["sites_list_detected"] = metadata["sites_list_detected"] or sites_list_detected(page)
+            metadata["dashboard_loaded"] = dashboard_loaded(page, site_id)
+            if metadata["dashboard_loaded"]:
+                return metadata
+
+    metadata["sites_list_detected"] = metadata["sites_list_detected"] or sites_list_detected(page)
+    metadata["site_row_clicked"] = click_site(page, site_id)
+    metadata["dashboard_loaded"] = dashboard_loaded(page, site_id)
+    if metadata["dashboard_loaded"]:
+        return metadata
+
+    raise RefreshError(site_navigation_failure_message(page, "site dashboard not loaded", metadata))
+
+
+def power_url(day: Optional[date] = None, site_id: str = SITE_ID) -> str:
+    current_day = (day or date.today()).isoformat()
+    return (
+        f"https://monitoring.solaredge.com/services/dashboard/power/sites/{site_id}"
+        "?chart-time-unit=quarter-hours"
+        f"&start-date={current_day}"
+        f"&end-date={current_day}"
+        "&measurement-types=production%2Cconsumption%2C"
+        "consumption-distribution-without-storage%2C"
+        "production-distribution-without-storage%2Cstorage-charge-level"
+    )
+
+
+def verify_data_endpoint(page, site_id: str = SITE_ID) -> None:
+    with page.expect_response(
+        lambda response: f"/services/dashboard/power/sites/{site_id}" in response.url
+        and response.status == 200,
+        timeout=60000,
+    ):
+        page.goto(power_url(site_id=site_id), wait_until="domcontentloaded")
 
 
 def login(page, username: str, password: str) -> None:
@@ -293,24 +449,8 @@ def refresh() -> None:
             context = browser.new_context()
             page = context.new_page()
             login(page, username, password)
-            today = date.today().isoformat()
-            power_url = (
-                f"https://monitoring.solaredge.com/services/dashboard/power/sites/{SITE_ID}"
-                "?chart-time-unit=quarter-hours"
-                f"&start-date={today}"
-                f"&end-date={today}"
-                "&measurement-types=production%2Cconsumption%2C"
-                "consumption-distribution-without-storage%2C"
-                "production-distribution-without-storage%2Cstorage-charge-level"
-            )
-
-            with page.expect_response(
-                lambda response: "/services/dashboard/power/sites/" in response.url
-                and response.status == 200,
-                timeout=60000,
-            ):
-                page.goto(power_url, wait_until="domcontentloaded")
-
+            open_site_dashboard(page, SITE_ID)
+            verify_data_endpoint(page, SITE_ID)
             save_cookie(cookie_header(context.cookies()))
         finally:
             browser.close()

@@ -52,6 +52,8 @@ class FakeLoginLocator:
         self.selector = selector
 
     def count(self):
+        if hasattr(self.page, "selector_count"):
+            return self.page.selector_count(self.selector)
         if self.selector in self.page.available_selectors:
             return 1
         if self.selector.startswith("text=/") and self.page.challenge:
@@ -91,6 +93,53 @@ class FakeLoginPage:
 
     def screenshot(self, path, full_page=True):
         Path(path).write_bytes(b"redacted screenshot placeholder")
+
+
+class FakeSitePage(FakeLoginPage):
+    def __init__(self, site_id="4457399", direct_navigation=True, has_site_row=True):
+        super().__init__(selectors={"text=/\\bSites\\b/i", "text=/Site ID/i"})
+        self.site_id = site_id
+        self.direct_navigation = direct_navigation
+        self.has_site_row = has_site_row
+        self.dashboard_opened = False
+        self.url = "https://monitoring.solaredge.com/solaredge-web/p/sites"
+
+    def goto(self, url, wait_until=None):
+        self.url = url
+        if not self.direct_navigation and self.site_id in url and ("dashboard" in url or "/site/" in url or f"/sites/{self.site_id}" in url):
+            self.url = "https://monitoring.solaredge.com/solaredge-web/p/sites"
+            return
+        if self.direct_navigation and self.site_id in url and ("dashboard" in url or "/site/" in url or f"/sites/{self.site_id}" in url):
+            self.dashboard_opened = True
+            self.available_selectors.add("text=/energy produced/i")
+
+    def selector_count(self, selector):
+        if self.dashboard_opened and selector in refresh_solaredge_session.DASHBOARD_INDICATOR_SELECTORS:
+            return 1
+        if self.site_id in selector and self.has_site_row:
+            return 1
+        if selector in refresh_solaredge_session.FIRST_SITE_SELECTORS and self.has_site_row:
+            return 1
+        if selector in {"text=/\\bSites\\b/i", "text=/Site ID/i", "table:has-text('Site ID')"} and not self.dashboard_opened:
+            return 1
+        return 0
+
+
+class FakeSiteElement(FakeLoginElement):
+    def click(self):
+        super().click()
+        if isinstance(self.page, FakeSitePage):
+            self.page.dashboard_opened = True
+            self.page.url = f"https://monitoring.solaredge.com/solaredge-web/p/site/{self.page.site_id}/#/dashboard"
+            self.page.available_selectors.add("text=/energy produced/i")
+
+
+class FakeSiteLocator(FakeLoginLocator):
+    def first(self):
+        return FakeSiteElement(self.page, self.selector)
+
+
+FakeSitePage.locator = lambda self, selector: FakeSiteLocator(self, selector)
 
 
 class SolarEdgeRecoveryTests(unittest.TestCase):
@@ -204,6 +253,68 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(metadata["challenge_or_sso_likely"])
         self.assertNotIn("user@example.com", json.dumps(metadata))
         self.assertNotIn("redaction-fixture-password", json.dumps(metadata))
+
+    def test_solaredge_post_login_detects_sites_list_and_uses_configured_site_id(self):
+        page = FakeSitePage(site_id="4457399", direct_navigation=True)
+
+        metadata = refresh_solaredge_session.open_site_dashboard(page, "4457399")
+
+        self.assertTrue(metadata["sites_list_detected"])
+        self.assertTrue(metadata["configured_site_id_used"])
+        self.assertFalse(metadata["site_row_clicked"])
+        self.assertTrue(metadata["dashboard_loaded"])
+        self.assertIn("4457399", page.url)
+
+    def test_solaredge_post_login_clicks_first_site_when_direct_navigation_fails(self):
+        page = FakeSitePage(site_id="4457399", direct_navigation=False, has_site_row=True)
+
+        metadata = refresh_solaredge_session.open_site_dashboard(page, "4457399")
+
+        self.assertTrue(metadata["sites_list_detected"])
+        self.assertTrue(metadata["configured_site_id_used"])
+        self.assertTrue(metadata["site_row_clicked"])
+        self.assertTrue(metadata["dashboard_loaded"])
+        self.assertIn("#/dashboard", page.url)
+
+    def test_solaredge_post_login_fails_when_no_site_can_be_opened(self):
+        with TemporaryDirectory() as directory:
+            debug_dir = Path(directory) / "debug"
+            page = FakeSitePage(site_id="4457399", direct_navigation=False, has_site_row=False)
+            with patch.object(refresh_solaredge_session, "DEBUG_DIR", debug_dir):
+                with self.assertRaises(refresh_solaredge_session.RefreshError) as context:
+                    refresh_solaredge_session.open_site_dashboard(page, "4457399")
+
+            message = str(context.exception)
+            debug_files = list(debug_dir.glob("solaredge-login-*.json"))
+
+        self.assertIn("SolarEdge site dashboard could not be opened", message)
+        self.assertIn("sites_list_detected=True", message)
+        self.assertIn("site_row_clicked=False", message)
+        self.assertIn("dashboard_loaded=False", message)
+        self.assertEqual(len(debug_files), 1)
+
+    def test_solaredge_data_endpoint_verification_requires_dashboard_first(self):
+        calls = []
+        page = FakeSitePage(site_id="4457399", direct_navigation=False, has_site_row=True)
+
+        refresh_solaredge_session.open_site_dashboard(page, "4457399")
+
+        def expect_response(predicate, timeout=None):
+            calls.append(("expect_response", page.dashboard_opened))
+
+            class Manager:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            return Manager()
+
+        page.expect_response = expect_response
+        refresh_solaredge_session.verify_data_endpoint(page, "4457399")
+
+        self.assertEqual(calls, [("expect_response", True)])
 
     def test_safe_error_message_redacts_credentials(self):
         message = collect_today.safe_error_message(
