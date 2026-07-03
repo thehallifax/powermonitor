@@ -348,12 +348,19 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertLessEqual(html.count("Secondary observation"), 2)
 
     def test_report_shell_reveals_deep_hash_routes(self):
-        html = inspect.getsource(report.write_html) + inspect.getsource(report.system_page_html)
+        html = (
+            inspect.getsource(report.write_html)
+            + inspect.getsource(report.system_page_html)
+            + inspect.getsource(report.live_data_help_html)
+            + inspect.getsource(report.confidence_section_html)
+        )
 
         self.assertIn("body:has(#setup-tariff:target) #setup", html)
         self.assertIn("body:has(#system-live-data:target) #system", html)
+        self.assertIn("body:has(#energy-score-explanation:target) #home", html)
         self.assertIn('id="system-live-data"', html)
         self.assertIn('id="system-data-quality"', html)
+        self.assertIn('id="energy-score-explanation"', inspect.getsource(report.energy_score_html))
         self.assertIn("revealHashTarget", html)
 
     def test_page_heading_includes_home_breadcrumb(self):
