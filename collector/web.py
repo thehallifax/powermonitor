@@ -17,7 +17,7 @@ import report
 from engine.import_framework import detect_importer
 from engine.models import to_api_safe
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
@@ -210,12 +210,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 self.send_html(result_html.encode("utf-8"))
             else:
+                action_name = request.path.rsplit("/", 1)[-1] if request.path.startswith("/api/providers/") else "update"
+                if action_name in {"configure", "edit", "save"}:
+                    user_message = f"Unable to save settings. {exc}" if isinstance(exc, ValueError) else "Unable to save settings."
+                else:
+                    user_message = str(exc) if isinstance(exc, ValueError) else "Request update failed."
                 self.send_json(
                     {
                         "action": {
                             "success": False,
                             "status": "failure",
-                            "user_message": str(exc) if isinstance(exc, ValueError) else "Request update failed.",
+                            "user_message": user_message,
                             "next_step": "Review the highlighted fields and try again.",
                             "technical_details": {"path": request.path},
                         }

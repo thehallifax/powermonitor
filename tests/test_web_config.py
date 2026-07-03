@@ -17,13 +17,13 @@ import web
 
 
 class WebConfigTests(unittest.TestCase):
-    def test_defaults_preserve_development_bind(self):
+    def test_default_bind_is_lan_reachable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_settings = Path(temp_dir) / "missing.json"
             with patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(
                     web.resolve_web_bind(missing_settings),
-                    ("127.0.0.1", 8765),
+                    ("0.0.0.0", 8765),
                 )
 
     def test_config_file_can_set_host_and_port(self):
@@ -59,6 +59,16 @@ class WebConfigTests(unittest.TestCase):
                 clear=True,
             ):
                 self.assertEqual(web.resolve_web_bind(settings), ("0.0.0.0", 9999))
+
+    def test_localhost_only_mode_is_explicit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+            settings.write_text(
+                json.dumps({"web_server": {"host": "127.0.0.1", "port": 8765}}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(web.resolve_web_bind(settings), ("127.0.0.1", 8765))
 
     def test_invalid_port_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
