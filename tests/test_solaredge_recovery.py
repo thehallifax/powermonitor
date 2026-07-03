@@ -88,7 +88,7 @@ class FakeLoginPage:
     def wait_for_load_state(self, state, timeout=None):
         return None
 
-    def wait_for_selector(self, selector, timeout=None):
+    def wait_for_selector(self, selector, timeout=None, state=None):
         return None
 
     def wait_for_timeout(self, timeout):
@@ -175,12 +175,22 @@ class FakeSolarEdgeLoginPage(FakeLoginPage):
         self.corporate_email_filled = False
         self.existing_account_sign_in_clicked = False
         self.corporate_sign_in_clicked = False
+        self.waited_selectors = []
 
     def title(self):
         return "Sign-in"
 
     def goto(self, url, wait_until=None):
         self.url = "https://login.solaredge.com/login"
+
+    def wait_for_selector(self, selector, timeout=None, state=None):
+        self.waited_selectors.append((selector, timeout, state))
+        if selector in {
+            'input[name="username"][type="email"]',
+            'input[name="password"][type="password"]',
+        }:
+            return FakeSolarEdgeLoginElement(self, selector)
+        return None
 
     def selector_count(self, selector):
         if selector in refresh_solaredge_session.LOGIN_SOLAREDGE_USERNAME_SELECTORS:
@@ -374,12 +384,22 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
 
         refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
 
+        self.assertIn(('input[name="username"][type="email"]', 30000, "visible"), page.waited_selectors)
+        self.assertIn(('input[name="password"][type="password"]', 30000, "visible"), page.waited_selectors)
         self.assertTrue(page.username_filled)
         self.assertTrue(page.password_filled)
         self.assertFalse(page.corporate_email_filled)
         self.assertTrue(page.existing_account_sign_in_clicked)
         self.assertFalse(page.corporate_sign_in_clicked)
         self.assertTrue(page.submitted)
+
+    def test_solaredge_login_dot_solaredge_explicit_path_does_not_require_generic_discovery(self):
+        page = FakeSolarEdgeLoginPage()
+
+        with patch.object(refresh_solaredge_session, "wait_for_login_fields", side_effect=AssertionError("generic discovery used")):
+            refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+        self.assertTrue(page.existing_account_sign_in_clicked)
 
     def test_solaredge_login_dot_solaredge_does_not_use_idp_email_selector(self):
         page = FakeSolarEdgeLoginPage()

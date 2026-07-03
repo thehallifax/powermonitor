@@ -204,6 +204,23 @@ def selector_count(page, selectors: tuple[str, ...]) -> int:
     return total
 
 
+def visible_selector_count(page, selectors: tuple[str, ...]) -> int:
+    total = 0
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = int(locator.count())
+        except Exception:
+            continue
+        for index in range(count):
+            try:
+                if element_visible(locator_item(locator, index)):
+                    total += 1
+            except Exception:
+                continue
+    return total
+
+
 def click_first(page, selectors: tuple[str, ...]) -> bool:
     target = find_first(page, selectors)
     if target is None:
@@ -339,6 +356,13 @@ def login_failure_message(
         f"initial_login_button_candidates={int(extra.get('initial_login_button_candidates') or 0)}; "
         f"initial_login_button_visible_candidates={int(extra.get('initial_login_button_visible_candidates') or 0)}; "
         f"initial_login_clicked_selector={extra.get('initial_login_clicked_selector') or ''}; "
+        f"explicit_login_host_path_used={bool(extra.get('explicit_login_host_path_used'))}; "
+        f"explicit_username_wait_success={bool(extra.get('explicit_username_wait_success'))}; "
+        f"explicit_password_wait_success={bool(extra.get('explicit_password_wait_success'))}; "
+        f"visible_email_input_count={int(extra.get('visible_email_input_count') or 0)}; "
+        f"visible_password_input_count={int(extra.get('visible_password_input_count') or 0)}; "
+        f"sign_in_button_count={int(extra.get('sign_in_button_count') or 0)}; "
+        f"clicked_sign_in_selector={extra.get('clicked_sign_in_selector') or ''}; "
         f"field_search_attempts={int(extra.get('field_search_attempts') or 0)}; "
         f"debug={debug_path}"
     )
@@ -478,6 +502,71 @@ def find_sign_in_button(page):
     return find_first(page, SIGN_IN_SELECTORS)
 
 
+def click_existing_account_sign_in(page) -> tuple[object, str]:
+    for selector in LOGIN_SOLAREDGE_SIGN_IN_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            count = int(locator.count())
+        except Exception:
+            continue
+        for index in range(count):
+            try:
+                candidate = locator_item(locator, index)
+            except Exception:
+                continue
+            if not element_visible(candidate) or not element_enabled(candidate):
+                continue
+            candidate.click()
+            return candidate, selector
+    return None, ""
+
+
+def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, dict]:
+    metadata = {
+        "explicit_login_host_path_used": is_solaredge_login_host(page),
+        "explicit_username_wait_success": False,
+        "explicit_password_wait_success": False,
+        "visible_email_input_count": 0,
+        "visible_password_input_count": 0,
+        "sign_in_button_count": 0,
+        "clicked_sign_in_selector": "",
+    }
+    if not metadata["explicit_login_host_path_used"]:
+        return False, metadata
+
+    try:
+        page.wait_for_selector('input[name="username"][type="email"]', state="visible", timeout=30000)
+        metadata["explicit_username_wait_success"] = True
+    except Exception:
+        metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
+        return False, metadata
+
+    try:
+        page.wait_for_selector('input[name="password"][type="password"]', state="visible", timeout=30000)
+        metadata["explicit_password_wait_success"] = True
+    except Exception:
+        metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
+        metadata["visible_password_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_PASSWORD_SELECTORS)
+        return False, metadata
+
+    metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
+    metadata["visible_password_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_PASSWORD_SELECTORS)
+    username_field = find_first(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
+    password_field = find_first(page, LOGIN_SOLAREDGE_PASSWORD_SELECTORS)
+    if username_field is None or password_field is None:
+        return False, metadata
+
+    username_field.fill(username)
+    password_field.fill(password)
+    metadata["sign_in_button_count"] = selector_count(page, LOGIN_SOLAREDGE_SIGN_IN_SELECTORS)
+    submit, clicked_selector = click_existing_account_sign_in(page)
+    metadata["clicked_sign_in_selector"] = clicked_selector
+    if submit is None:
+        password_field.press("Enter")
+    wait_for_page_settle(page)
+    return True, metadata
+
+
 def sites_list_detected(page) -> bool:
     route = route_path(page).lower()
     if "site" in route and "dashboard" not in route:
@@ -598,6 +687,10 @@ def login(page, username: str, password: str) -> None:
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     wait_for_page_settle(page)
 
+    explicit_success, explicit_metadata = explicit_login_solaredge(page, username, password)
+    if explicit_success:
+        return
+
     url_before_initial_click = str(getattr(page, "url", "") or "")
     initial_button = None
     initial_clicked = False
@@ -616,6 +709,10 @@ def login(page, username: str, password: str) -> None:
         if initial_button_metadata["initial_login_button_clicked"]:
             initial_clicked = True
             wait_after_initial_login_click(page)
+            explicit_success, explicit_retry_metadata = explicit_login_solaredge(page, username, password)
+            explicit_metadata.update({key: value for key, value in explicit_retry_metadata.items() if value not in (False, 0, "")})
+            if explicit_success:
+                return
             username_field, password_field, retry_attempts = wait_for_login_fields(page)
             field_search_attempts += retry_attempts
     url_after_initial_click = str(getattr(page, "url", "") or "")
@@ -627,6 +724,7 @@ def login(page, username: str, password: str) -> None:
         "url_after_initial_login_click": url_after_initial_click,
         "field_search_attempts": field_search_attempts,
         **initial_button_metadata,
+        **explicit_metadata,
     }
     if username_field is None:
         raise RefreshError(

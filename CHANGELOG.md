@@ -1,5 +1,19 @@
 # Changelog
 
+## Bugfix - SolarEdge Login Explicit Wait Path
+
+- Added an explicit `login.solaredge.com` credential-entry path before generic
+  login-field discovery.
+- Waits up to 30 seconds for visible account email and password fields using
+  the live selectors `input[name="username"][type="email"]` and
+  `input[name="password"][type="password"]`.
+- Fills the account form and clicks the existing-account Sign in button before
+  falling back to generic discovery.
+- Extended safe debug metadata with explicit path usage, username/password wait
+  success, visible field counts, Sign in button count, and clicked selector.
+- Added regression coverage proving the explicit path does not require generic
+  discovery and still avoids the corporate SSO field.
+
 ## Bugfix - SolarEdge Login Form Selectors
 
 - Added `login.solaredge.com`-specific account login selectors for
