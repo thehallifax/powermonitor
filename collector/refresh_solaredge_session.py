@@ -65,7 +65,12 @@ SIGN_IN_SELECTORS = (
 )
 
 INITIAL_LOGIN_SELECTORS = (
+    "#se-signing-mfe button:has-text('Log in')",
+    '#se-signing-mfe button:has-text("Log in")',
+    "button[type='button']:has-text('Log in')",
+    'button[type="button"]:has-text("Log in")',
     "button:has-text('Log in')",
+    'button:has-text("Log in")',
     "button:has-text('Login')",
     "button:has-text('Sign in')",
     "a:has-text('Log in')",
@@ -152,6 +157,16 @@ def find_first(page, selectors: tuple[str, ...]):
 
 def selector_found(page, selectors: tuple[str, ...]) -> bool:
     return find_first(page, selectors) is not None
+
+
+def selector_count(page, selectors: tuple[str, ...]) -> int:
+    total = 0
+    for selector in selectors:
+        try:
+            total += int(page.locator(selector).count())
+        except Exception:
+            continue
+    return total
 
 
 def click_first(page, selectors: tuple[str, ...]) -> bool:
@@ -269,6 +284,8 @@ def login_failure_message(
         f"challenge_or_sso_likely={challenge_likely(page)}; "
         f"initial_login_button_found={bool(extra.get('initial_login_button_found'))}; "
         f"initial_login_button_clicked={bool(extra.get('initial_login_button_clicked'))}; "
+        f"signing_mfe_found={bool(extra.get('signing_mfe_found'))}; "
+        f"initial_login_button_candidates={int(extra.get('initial_login_button_candidates') or 0)}; "
         f"field_search_attempts={int(extra.get('field_search_attempts') or 0)}; "
         f"debug={debug_path}"
     )
@@ -287,6 +304,28 @@ def wait_for_login_fields(page, attempts: int = 6) -> tuple[object, object, int]
         except Exception:
             wait_for_page_settle(page)
     return username_field, password_field, max(1, attempts)
+
+
+def wait_for_initial_login_shell(page) -> bool:
+    try:
+        page.wait_for_selector("div#se-signing-mfe", timeout=15000)
+    except Exception:
+        pass
+    return selector_found(page, ("div#se-signing-mfe", "#se-signing-mfe"))
+
+
+def wait_after_initial_login_click(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector(
+            ", ".join(USERNAME_SELECTORS + PASSWORD_SELECTORS),
+            timeout=15000,
+        )
+    except Exception:
+        wait_for_page_settle(page)
 
 
 def sites_list_detected(page) -> bool:
@@ -412,19 +451,24 @@ def login(page, username: str, password: str) -> None:
     url_before_initial_click = str(getattr(page, "url", "") or "")
     initial_button = None
     initial_clicked = False
+    signing_mfe_found = wait_for_initial_login_shell(page)
+    initial_button_candidates = 0
     username_field, password_field, field_search_attempts = wait_for_login_fields(page)
     if username_field is None and password_field is None:
+        initial_button_candidates = selector_count(page, INITIAL_LOGIN_SELECTORS)
         initial_button = find_first(page, INITIAL_LOGIN_SELECTORS)
         if initial_button is not None:
             initial_button.click()
             initial_clicked = True
-            wait_for_page_settle(page)
+            wait_after_initial_login_click(page)
             username_field, password_field, retry_attempts = wait_for_login_fields(page)
             field_search_attempts += retry_attempts
     url_after_initial_click = str(getattr(page, "url", "") or "")
     login_metadata = {
         "initial_login_button_found": initial_button is not None,
         "initial_login_button_clicked": initial_clicked,
+        "signing_mfe_found": signing_mfe_found,
+        "initial_login_button_candidates": initial_button_candidates,
         "url_before_initial_login_click": url_before_initial_click,
         "url_after_initial_login_click": url_after_initial_click,
         "field_search_attempts": field_search_attempts,

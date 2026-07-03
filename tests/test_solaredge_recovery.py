@@ -100,7 +100,17 @@ class FakeLoginPage:
 
 class FakeInitialLoginPage(FakeLoginPage):
     def __init__(self):
-        super().__init__(selectors={"button:has-text('Log in')"})
+        super().__init__(
+            selectors={
+                "div#se-signing-mfe",
+                "#se-signing-mfe",
+                "#se-signing-mfe button:has-text('Log in')",
+                '#se-signing-mfe button:has-text("Log in")',
+                "button[type='button']:has-text('Log in')",
+                'button[type="button"]:has-text("Log in")',
+                "button:has-text('Log in')",
+            }
+        )
         self.url = "https://monitoring.solaredge.com/mfe/auth/"
 
     def goto(self, url, wait_until=None):
@@ -110,9 +120,9 @@ class FakeInitialLoginPage(FakeLoginPage):
 class FakeInitialLoginElement(FakeLoginElement):
     def click(self):
         self.page.clicks.append(self.selector)
-        if self.selector == "button:has-text('Log in')":
+        if "Log in" in self.selector:
             self.page.url = "https://monitoring.solaredge.com/solaredge-web/p/login"
-            self.page.available_selectors.discard("button:has-text('Log in')")
+            self.page.available_selectors.difference_update(refresh_solaredge_session.INITIAL_LOGIN_SELECTORS)
             self.page.available_selectors.add("input[type='email']")
             self.page.available_selectors.add("input[type='password']")
             self.page.available_selectors.add("button:has-text('Sign in')")
@@ -266,11 +276,28 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
 
         refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
 
-        self.assertIn("button:has-text('Log in')", page.clicks)
+        self.assertIn("#se-signing-mfe button:has-text('Log in')", page.clicks)
         self.assertTrue(page.username_filled)
         self.assertTrue(page.password_filled)
         self.assertTrue(page.submitted)
         self.assertEqual(page.url, "https://monitoring.solaredge.com/solaredge-web/p/login")
+
+    def test_solaredge_login_failure_reports_mfe_and_button_candidate_counts(self):
+        with TemporaryDirectory() as directory:
+            debug_dir = Path(directory) / "debug"
+            page = FakeLoginPage(selectors={"div#se-signing-mfe", "#se-signing-mfe"})
+            with patch.object(refresh_solaredge_session, "DEBUG_DIR", debug_dir):
+                with self.assertRaises(refresh_solaredge_session.RefreshError) as context:
+                    refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+            message = str(context.exception)
+            debug_files = list(debug_dir.glob("solaredge-login-*.json"))
+            metadata = json.loads(debug_files[0].read_text(encoding="utf-8"))
+
+        self.assertIn("signing_mfe_found=True", message)
+        self.assertIn("initial_login_button_candidates=0", message)
+        self.assertTrue(metadata["signing_mfe_found"])
+        self.assertEqual(metadata["initial_login_button_candidates"], 0)
 
     def test_solaredge_login_failure_reports_safe_page_diagnostics(self):
         with TemporaryDirectory() as directory:
@@ -291,6 +318,8 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertIn("challenge_or_sso_likely=True", message)
         self.assertIn("initial_login_button_found=False", message)
         self.assertIn("initial_login_button_clicked=False", message)
+        self.assertIn("signing_mfe_found=False", message)
+        self.assertIn("initial_login_button_candidates=0", message)
         self.assertIn("field_search_attempts=", message)
         self.assertNotIn("user@example.com", message)
         self.assertNotIn("redaction-fixture-password", message)
@@ -301,6 +330,8 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(metadata["challenge_or_sso_likely"])
         self.assertFalse(metadata["initial_login_button_found"])
         self.assertFalse(metadata["initial_login_button_clicked"])
+        self.assertFalse(metadata["signing_mfe_found"])
+        self.assertEqual(metadata["initial_login_button_candidates"], 0)
         self.assertEqual(metadata["url_before_initial_login_click"], "https://monitoring.solaredge.com/mfe/auth/")
         self.assertEqual(metadata["url_after_initial_login_click"], "https://monitoring.solaredge.com/mfe/auth/")
         self.assertGreaterEqual(metadata["field_search_attempts"], 1)

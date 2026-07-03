@@ -1,5 +1,17 @@
 # Changelog
 
+## Bugfix - SolarEdge Initial Log In Button Selector
+
+- Made SolarEdge session refresh wait for `div#se-signing-mfe` before looking
+  for the initial landing-page `Log in` control.
+- Added explicit selectors for `#se-signing-mfe button:has-text("Log in")`,
+  `button:has-text("Log in")`, and `button[type="button"]:has-text("Log in")`.
+- Added post-click waiting for navigation or username/password fields while
+  preserving the credential field retry loop.
+- Extended safe debug metadata with `#se-signing-mfe` detection and candidate
+  Log in button counts.
+- Added regression coverage for the live SolarEdge auth shell/button shape.
+
 ## Bugfix - SolarEdge Initial Log In Button
 
 - Changed SolarEdge session refresh to start from the current
