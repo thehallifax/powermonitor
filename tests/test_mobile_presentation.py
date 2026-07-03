@@ -169,8 +169,22 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn('name="provider_action" value="save" formaction="/api/providers/solaredge/save"', html)
         self.assertIn('name="provider_action" value="test" formaction="/api/providers/solaredge/test"', html)
         self.assertNotIn('action="/setup/billing-cycle"', html)
+        self.assertIn("provider-config-form", html)
         self.assertNotIn("Upload latest file", html)
         self.assertNotIn("Replace upload", html)
+
+        flash_html = report.provider_management_html(
+            SimpleNamespace(providers=lambda: [provider]),
+            provider_flash={
+                "provider_id": "solaredge",
+                "action": "save",
+                "status": "success",
+                "message": "Settings saved. Now test the connection.",
+                "next_step": "Run Test Connection before relying on this data source.",
+            },
+        )
+        self.assertIn("provider-flash", flash_html)
+        self.assertIn("Settings saved. Now test the connection.", flash_html)
 
     def test_billing_cycle_form_closes_before_provider_forms_begin(self):
         provider = SimpleNamespace(

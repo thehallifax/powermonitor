@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 import inspect
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,6 +38,31 @@ class WebConfigTests(unittest.TestCase):
         self.assertIn("result.status", source)
         self.assertNotIn("password", source.lower())
         self.assertNotIn("cookie", source.lower())
+
+    def test_provider_browser_form_redirect_uses_system_anchor(self):
+        result = SimpleNamespace(
+            success=True,
+            status="success",
+            user_message="Settings saved successfully.",
+            next_step="Run Test Connection before relying on this provider.",
+        )
+
+        location = web.provider_action_redirect("solaredge", "save", result)
+
+        self.assertIn("/?", location)
+        self.assertIn("provider_action_provider=solaredge", location)
+        self.assertIn("provider_action=save", location)
+        self.assertIn("Settings+saved.+Now+test+the+connection.", location)
+        self.assertTrue(location.endswith("#system-provider-solaredge"))
+        self.assertNotIn("password", location.lower())
+        self.assertNotIn("cookie", location.lower())
+
+    def test_provider_request_json_detection_distinguishes_forms_and_api(self):
+        json_request = SimpleNamespace(headers={"Content-Type": "application/json", "Accept": "application/json"})
+        form_request = SimpleNamespace(headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/html"})
+
+        self.assertTrue(web.DashboardHandler.provider_request_wants_json(json_request))
+        self.assertFalse(web.DashboardHandler.provider_request_wants_json(form_request))
 
     def test_config_file_can_set_host_and_port(self):
         with tempfile.TemporaryDirectory() as temp_dir:

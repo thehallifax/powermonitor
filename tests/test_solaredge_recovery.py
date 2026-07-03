@@ -78,6 +78,23 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertNotIn("redaction-fixture-password", message)
         self.assertNotIn("redaction-fixture-cookie", message)
 
+    def test_solaredge_test_connection_refreshes_session_before_retry(self):
+        with TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "solaredge_cookie.txt"
+
+            def refresh():
+                cookie_path.write_text("SESSION=fresh\n", encoding="utf-8")
+
+            with patch.object(collect_today, "COOKIE_PATH", cookie_path), \
+                patch.object(collect_today, "refresh_solaredge_session", side_effect=refresh) as refresh_mock, \
+                patch.object(collect_today, "fetch_solaredge", return_value="200") as fetch_mock, \
+                patch.object(collect_today, "validate_response", return_value=24):
+                result = collect_today.SolarEdgeAdapter().test_connection()
+
+        self.assertTrue(result["success"])
+        refresh_mock.assert_called_once()
+        self.assertEqual(fetch_mock.call_args.args[0], "SESSION=fresh")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -223,6 +223,31 @@ class ProviderManagerTests(unittest.TestCase):
             self.assertEqual(test["user_message"], "Connected successfully.")
             self.assertEqual(refreshed.lifecycle_state, ProviderConnectionStatus.CONNECTED)
 
+    def test_successful_solaredge_test_after_credentials_marks_provider_connected(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(
+                registry(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": True,
+                        "authentication_status": "authenticated",
+                        "available_datasets": ["daily_summary"],
+                        "warnings": [],
+                        "measurements": 24,
+                    }
+                },
+                **paths,
+            )
+
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            test = manager.action("solaredge", "test").as_dict()
+            refreshed = ProviderManager(registry(), **paths).get("solaredge").as_dict()
+
+            self.assertTrue(test["success"])
+            self.assertEqual(refreshed["lifecycle_state"], "CONNECTED")
+            self.assertTrue(refreshed["onboarding"]["connected"])
+
     def test_solaredge_adapter_test_result_is_normalized_with_guidance(self):
         manager = ProviderManager(
             registry(),

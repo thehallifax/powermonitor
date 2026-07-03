@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import import_ocular_export
 import report
@@ -94,6 +94,37 @@ def normalize_provider_payload(payload: dict) -> dict:
     if mappings:
         normalized["entity_mappings"] = mappings
     return normalized
+
+
+def provider_flash_from_params(params: dict) -> Optional[dict]:
+    provider_id = DashboardHandler.param(params, "provider_action_provider")
+    if not provider_id:
+        return None
+    return {
+        "provider_id": provider_id,
+        "action": DashboardHandler.param(params, "provider_action", ""),
+        "status": DashboardHandler.param(params, "provider_status", ""),
+        "message": DashboardHandler.param(params, "provider_message", ""),
+        "next_step": DashboardHandler.param(params, "provider_next", ""),
+    }
+
+
+def provider_action_redirect(provider_id: str, action: str, result) -> str:
+    message = str(result.user_message or "Provider action completed.")
+    next_step = str(result.next_step or "Review provider status.")
+    if action in {"save", "configure", "edit"} and result.success:
+        message = "Settings saved. Now test the connection."
+        next_step = "Run Test Connection before relying on this data source."
+    query = urlencode(
+        {
+            "provider_action_provider": provider_id,
+            "provider_action": action,
+            "provider_status": str(result.status or ("success" if result.success else "failure")),
+            "provider_message": message,
+            "provider_next": next_step,
+        }
+    )
+    return f"/?{query}#system-provider-{provider_id}"
 
 
 def parse_port(value) -> int:
@@ -265,6 +296,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     success=False,
                 )
                 self.send_html(result_html.encode("utf-8"))
+            elif request.path.startswith("/api/providers/") and not self.provider_request_wants_json():
+                parts = [part for part in request.path.split("/") if part]
+                provider_id = parts[2] if len(parts) >= 3 else "provider"
+                action_name = parts[3] if len(parts) >= 4 else "update"
+                message = f"Unable to save settings. {exc}" if isinstance(exc, ValueError) and action_name in {"configure", "edit", "save"} else "Provider action failed."
+                query = urlencode(
+                    {
+                        "provider_action_provider": provider_id,
+                        "provider_action": action_name,
+                        "provider_status": "failure",
+                        "provider_message": message,
+                        "provider_next": "Review the provider form and try again.",
+                    }
+                )
+                self.redirect(f"/?{query}#system-provider-{provider_id}")
             else:
                 action_name = request.path.rsplit("/", 1)[-1] if request.path.startswith("/api/providers/") else "update"
                 if action_name in {"configure", "edit", "save"}:
@@ -357,7 +403,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 action,
                 result.status,
             )
-            self.send_json({"action": result.as_dict()})
+            self.send_provider_action_response(provider_id, action, result)
             return
         if action in {"configure", "edit", "save", "reset", "reconnect", "disable", "enable", "remove"}:
             result = manager.action(provider_id, action, payload)
@@ -367,9 +413,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 action,
                 result.status,
             )
-            self.send_json({"action": result.as_dict()})
+            self.send_provider_action_response(provider_id, action, result)
             return
         self.send_json({"error": "unsupported provider action"}, status=400)
+
+    def send_provider_action_response(self, provider_id: str, action: str, result) -> None:
+        if self.provider_request_wants_json():
+            self.send_json({"action": result.as_dict()})
+            return
+        self.redirect(provider_action_redirect(provider_id, action, result))
+
+    def provider_request_wants_json(self) -> bool:
+        content_type = self.headers.get("Content-Type", "")
+        accept = self.headers.get("Accept", "")
+        requested_with = self.headers.get("X-Requested-With", "")
+        if "application/json" in content_type or requested_with.lower() == "xmlhttprequest":
+            return True
+        return "application/json" in accept and "text/html" not in accept
 
     def read_request_payload(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -523,6 +583,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             period,
             self.param(params, "start"),
             self.param(params, "end"),
+            provider_flash=provider_flash_from_params(params),
         ).encode("utf-8")
         self.send_html(content)
 

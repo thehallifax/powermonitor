@@ -1,5 +1,18 @@
 # Changelog
 
+## Bugfix - Provider Action UX and SolarEdge Test Flow
+
+- Changed browser-submitted provider actions to redirect back to the System
+  provider card with a visible status banner instead of displaying raw JSON.
+- Kept JSON responses for API/XHR provider action callers.
+- Added server-rendered provider action feedback for Save, Connect, Test
+  Connection, Disconnect, and provider action failures without exposing
+  credentials in URLs, logs, HTML, or status text.
+- Confirmed SolarEdge Test Connection refreshes the session through the saved
+  credential path before retrying the SolarEdge request.
+- Tightened provider card spacing so live provider forms sit cleanly inside
+  the redesigned data-source cards on desktop and mobile.
+
 ## Bugfix - Provider Connect Form Submission
 
 - Made System / Your Data Sources provider forms standalone POST forms so

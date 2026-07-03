@@ -5009,7 +5009,25 @@ def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
     return _provider_configuration_form_html(data, live_actions)
 
 
-def _data_source_card_html(provider, data: dict, onboarding: dict) -> str:
+def _provider_flash_html(provider_id: str, provider_flash: Optional[dict]) -> str:
+    if not provider_flash or str(provider_flash.get("provider_id") or "") != provider_id:
+        return ""
+    status = str(provider_flash.get("status") or "success").lower()
+    if status not in {"success", "warning", "failure"}:
+        status = "warning"
+    action = friendly_label(str(provider_flash.get("action") or "provider action"))
+    message = str(provider_flash.get("message") or "Provider action completed.")
+    next_step = str(provider_flash.get("next_step") or "Review provider status.")
+    return f"""
+      <div class="provider-action-result visible {html.escape(status)} provider-flash" role="status">
+        <span>{html.escape(action)}</span>
+        <strong>{html.escape(message)}</strong>
+        <small>{html.escape(next_step)}</small>
+      </div>
+    """
+
+
+def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flash: Optional[dict] = None) -> str:
     provider_id = str(data.get("provider_id") or provider.provider_id)
     kind = _source_kind(provider_id, data)
     status = _data_source_status(kind, data, onboarding)
@@ -5048,6 +5066,7 @@ def _data_source_card_html(provider, data: dict, onboarding: dict) -> str:
         <div><span>Status</span><strong>{html.escape(status)}</strong></div>
         <div><span>Last updated</span><strong>{html.escape(last_updated)}</strong></div>
       </div>
+      {_provider_flash_html(provider_id, provider_flash)}
       <div class="source-provides"><span>Provides</span><ul>{provides}</ul></div>
       {_data_source_actions_html(kind, data, status)}
       {disclosure_html("Setup help", "What this source needs and why", setup_body, css_class="provider-details")}
@@ -5057,7 +5076,7 @@ def _data_source_card_html(provider, data: dict, onboarding: dict) -> str:
     """
 
 
-def provider_management_html(provider_management: Optional[ProviderManager]) -> str:
+def provider_management_html(provider_management: Optional[ProviderManager], provider_flash: Optional[dict] = None) -> str:
     if not provider_management:
         return """
     <div class="system-card">
@@ -5071,7 +5090,7 @@ def provider_management_html(provider_management: Optional[ProviderManager]) -> 
         onboarding = data.get("onboarding") or _provider_onboarding_fallback(data)
         if not _should_show_data_source(str(data.get("provider_id") or provider.provider_id), data, onboarding):
             continue
-        rows.append(_data_source_card_html(provider, data, onboarding))
+        rows.append(_data_source_card_html(provider, data, onboarding, provider_flash))
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Your Data Sources</h3><span>{len(rows)} active</span></div>
@@ -5754,6 +5773,7 @@ def system_page_html(
     notification_readiness_summary: Optional[dict] = None,
     notification_preferences: Optional[dict] = None,
     notification_history: Optional[dict] = None,
+    provider_flash: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -5819,7 +5839,7 @@ def system_page_html(
       {system_action_needed_html(setup, provider_management)}
       {confidence_section_html(summary, settings, provider_observations)}
       {disclosure_html("Your Data Sources", "What PowerMonitor knows about your household", f'''
-        {provider_management_html(provider_management)}
+        {provider_management_html(provider_management, provider_flash=provider_flash)}
       ''', open_by_default=True, css_class="system-group")}
       {disclosure_html("Live data help", "What is unavailable, why, and what to do next", live_data_help_html(health, summary), css_class="system-group")}
       {disclosure_html("Recommendations", "Active household recommendations and confidence", f'''
@@ -6122,6 +6142,7 @@ def write_html(
     billing_summary: Optional[Summary] = None,
     glance_only: bool = False,
     overnight_baseload_watts: Optional[float] = None,
+    provider_flash: Optional[dict] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -6471,7 +6492,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     {page_heading_html("Can I trust today's advice?", "Provider status, confidence, household data limits, and privacy-safe diagnostics.")}
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash)}
   </section>
 """
     )
@@ -6801,7 +6822,7 @@ def write_html(
     .system-card th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .system-overview-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
     .system-group .disclosure-body {{ padding-top:1px; }}
-    .provider-status-card {{ margin-top:10px; padding:14px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
+    .provider-status-card {{ margin-top:10px; padding:16px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
     .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }} .provider-status-card.neutral {{ background:#fffaf0; border-color:#eeddb0; }}
     .provider-status-card:target,.deep-link-target {{ outline:3px solid rgba(31,107,80,.32); scroll-margin-top:24px; }}
     .provider-status-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
@@ -6814,7 +6835,7 @@ def write_html(
     .provider-status-grid strong {{ margin-top:3px; font-size:12px; line-height:1.3; }}
     .provider-status-card p {{ margin:9px 0 0; color:var(--muted); font-size:12px; }}
     .data-source-grid {{ grid-template-columns:repeat(3,minmax(0,1fr)); }}
-    .source-provides {{ margin-top:10px; padding:10px; background:rgba(255,255,255,.72); border-radius:10px; }}
+    .source-provides {{ margin-top:12px; padding:10px; background:rgba(255,255,255,.72); border-radius:10px; }}
     .source-provides span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .source-provides ul {{ margin:6px 0 0; padding-left:17px; color:var(--ink); font-size:12px; line-height:1.45; }}
     .provider-details {{ margin-top:10px; background:rgba(255,255,255,.68); }}
@@ -6825,7 +6846,7 @@ def write_html(
     .provider-guidance-grid ul {{ margin:6px 0 0; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.4; }}
     .trust-checklist li {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; }}
     .trust-checklist li span {{ text-align:right; text-transform:none; letter-spacing:0; font-size:11px; font-weight:650; }}
-    .provider-config-form {{ display:grid; gap:12px; }}
+    .provider-config-form {{ display:grid; gap:12px; margin-top:12px; padding:12px; background:rgba(255,255,255,.78); border:1px solid rgba(210,220,214,.7); border-radius:12px; }}
     .provider-form-section > span {{ display:block; margin:0 0 8px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
     .provider-form-grid label {{ display:block; padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
@@ -6833,13 +6854,14 @@ def write_html(
     .provider-form-grid label span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-form-grid label small {{ margin-top:4px; color:var(--muted); font-size:10px; }}
     .provider-form-grid input {{ width:100%; min-height:38px; margin-top:5px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; }}
-    .provider-action-row {{ display:flex; flex-wrap:wrap; gap:8px; }}
-    .provider-action-row button {{ min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
+    .provider-action-row {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+    .provider-action-row button {{ min-height:38px; padding:8px 12px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
     .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
     .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-row button[data-provider-action="remove"],.provider-action-row button[data-provider-action="disable"] {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
     .provider-action-row button[data-provider-action="reset"] {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-result {{ display:none; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
+    .provider-flash {{ margin-top:12px; }}
     .provider-action-result.visible {{ display:block; }}
     .provider-action-result.success {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-action-result.warning {{ background:#fffaf0; border-color:#eeddb0; }} .provider-action-result.failure {{ background:#fff5f3; border-color:#f0cec8; }}
     .provider-action-result strong,.provider-action-result span,.provider-action-result small {{ display:block; }}
@@ -7184,6 +7206,7 @@ def build_live_html(
     start: Optional[str] = None,
     end: Optional[str] = None,
     glance_only: bool = False,
+    provider_flash: Optional[dict] = None,
 ) -> str:
     settings = load_settings()
     current_day = local_today()
@@ -7235,6 +7258,7 @@ def build_live_html(
         billing_summary=billing_summary,
         glance_only=glance_only,
         overnight_baseload_watts=overnight_baseload_watts,
+        provider_flash=provider_flash,
     )
 
 
