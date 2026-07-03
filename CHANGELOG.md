@@ -1,5 +1,18 @@
 # Changelog
 
+## Bugfix - SolarEdge Initial Log In Button
+
+- Changed SolarEdge session refresh to start from the current
+  `/mfe/auth/` entry point.
+- Added first-page `Log in` button detection/clicking before credential field
+  discovery when the username and password fields are not visible yet.
+- Added retry-based credential field discovery after the first login click so
+  dynamic redirects/forms can load before failing.
+- Extended safe debug metadata with initial login button found/clicked state,
+  URL before and after the click, and field search attempts without logging
+  credentials, cookies, tokens, headers, or HTML.
+- Added regression coverage for the initial login-button flow.
+
 ## Bugfix - SolarEdge Post-Login Site Navigation
 
 - Updated SolarEdge session refresh to continue past login into the configured

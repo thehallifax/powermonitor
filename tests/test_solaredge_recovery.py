@@ -85,6 +85,9 @@ class FakeLoginPage:
     def wait_for_selector(self, selector, timeout=None):
         return None
 
+    def wait_for_timeout(self, timeout):
+        return None
+
     def locator(self, selector):
         return FakeLoginLocator(self, selector)
 
@@ -93,6 +96,37 @@ class FakeLoginPage:
 
     def screenshot(self, path, full_page=True):
         Path(path).write_bytes(b"redacted screenshot placeholder")
+
+
+class FakeInitialLoginPage(FakeLoginPage):
+    def __init__(self):
+        super().__init__(selectors={"button:has-text('Log in')"})
+        self.url = "https://monitoring.solaredge.com/mfe/auth/"
+
+    def goto(self, url, wait_until=None):
+        self.url = url
+
+
+class FakeInitialLoginElement(FakeLoginElement):
+    def click(self):
+        self.page.clicks.append(self.selector)
+        if self.selector == "button:has-text('Log in')":
+            self.page.url = "https://monitoring.solaredge.com/solaredge-web/p/login"
+            self.page.available_selectors.discard("button:has-text('Log in')")
+            self.page.available_selectors.add("input[type='email']")
+            self.page.available_selectors.add("input[type='password']")
+            self.page.available_selectors.add("button:has-text('Sign in')")
+            self.page.password_available = True
+        else:
+            super().click()
+
+
+class FakeInitialLoginLocator(FakeLoginLocator):
+    def first(self):
+        return FakeInitialLoginElement(self.page, self.selector)
+
+
+FakeInitialLoginPage.locator = lambda self, selector: FakeInitialLoginLocator(self, selector)
 
 
 class FakeSitePage(FakeLoginPage):
@@ -227,6 +261,17 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(page.submitted)
         self.assertGreaterEqual(page.clicks.count("button[type='submit']"), 1)
 
+    def test_solaredge_login_clicks_initial_login_button_before_field_search_retry(self):
+        page = FakeInitialLoginPage()
+
+        refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+        self.assertIn("button:has-text('Log in')", page.clicks)
+        self.assertTrue(page.username_filled)
+        self.assertTrue(page.password_filled)
+        self.assertTrue(page.submitted)
+        self.assertEqual(page.url, "https://monitoring.solaredge.com/solaredge-web/p/login")
+
     def test_solaredge_login_failure_reports_safe_page_diagnostics(self):
         with TemporaryDirectory() as directory:
             debug_dir = Path(directory) / "debug"
@@ -244,6 +289,9 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertIn("username_field_found=False", message)
         self.assertIn("password_field_found=False", message)
         self.assertIn("challenge_or_sso_likely=True", message)
+        self.assertIn("initial_login_button_found=False", message)
+        self.assertIn("initial_login_button_clicked=False", message)
+        self.assertIn("field_search_attempts=", message)
         self.assertNotIn("user@example.com", message)
         self.assertNotIn("redaction-fixture-password", message)
         self.assertEqual(len(debug_files), 1)
@@ -251,6 +299,11 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertFalse(metadata["username_field_found"])
         self.assertFalse(metadata["password_field_found"])
         self.assertTrue(metadata["challenge_or_sso_likely"])
+        self.assertFalse(metadata["initial_login_button_found"])
+        self.assertFalse(metadata["initial_login_button_clicked"])
+        self.assertEqual(metadata["url_before_initial_login_click"], "https://monitoring.solaredge.com/mfe/auth/")
+        self.assertEqual(metadata["url_after_initial_login_click"], "https://monitoring.solaredge.com/mfe/auth/")
+        self.assertGreaterEqual(metadata["field_search_attempts"], 1)
         self.assertNotIn("user@example.com", json.dumps(metadata))
         self.assertNotIn("redaction-fixture-password", json.dumps(metadata))
 

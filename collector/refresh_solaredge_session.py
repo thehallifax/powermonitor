@@ -12,7 +12,7 @@ COOKIE_PATH = PROJECT_ROOT / "collector" / "solaredge_cookie.txt"
 SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.json"
 DEBUG_DIR = PROJECT_ROOT / "logs" / "debug"
 SITE_ID = os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID", "4457399")
-LOGIN_URL = "https://monitoring.solaredge.com/solaredge-web/p/login"
+LOGIN_URL = "https://monitoring.solaredge.com/mfe/auth/"
 
 USERNAME_SELECTORS = (
     "input[type='email']",
@@ -62,6 +62,18 @@ SIGN_IN_SELECTORS = (
     "input[value*='Login' i]",
     "input[value*='Log in' i]",
     "input[value*='Sign in' i]",
+)
+
+INITIAL_LOGIN_SELECTORS = (
+    "button:has-text('Log in')",
+    "button:has-text('Login')",
+    "button:has-text('Sign in')",
+    "a:has-text('Log in')",
+    "a:has-text('Login')",
+    "a:has-text('Sign in')",
+    "input[value*='Log in' i]",
+    "input[value*='Login' i]",
+    "[role='button']:has-text('Log in')",
 )
 
 CHALLENGE_SELECTORS = (
@@ -237,8 +249,17 @@ def save_login_debug(page, reason: str, allow_screenshot: bool, extra: Optional[
     return metadata_path
 
 
-def login_failure_message(page, reason: str, *, username_found: bool, password_found: bool, allow_screenshot: bool) -> str:
-    debug_path = save_login_debug(page, reason, allow_screenshot=allow_screenshot)
+def login_failure_message(
+    page,
+    reason: str,
+    *,
+    username_found: bool,
+    password_found: bool,
+    allow_screenshot: bool,
+    extra: Optional[dict] = None,
+) -> str:
+    debug_path = save_login_debug(page, reason, allow_screenshot=allow_screenshot, extra=extra)
+    extra = extra or {}
     return (
         f"SolarEdge login fields were not found. "
         f"title={safe_page_title(page)!r}; "
@@ -246,8 +267,26 @@ def login_failure_message(page, reason: str, *, username_found: bool, password_f
         f"username_field_found={username_found}; "
         f"password_field_found={password_found}; "
         f"challenge_or_sso_likely={challenge_likely(page)}; "
+        f"initial_login_button_found={bool(extra.get('initial_login_button_found'))}; "
+        f"initial_login_button_clicked={bool(extra.get('initial_login_button_clicked'))}; "
+        f"field_search_attempts={int(extra.get('field_search_attempts') or 0)}; "
         f"debug={debug_path}"
     )
+
+
+def wait_for_login_fields(page, attempts: int = 6) -> tuple[object, object, int]:
+    username_field = None
+    password_field = None
+    for attempt in range(1, max(1, attempts) + 1):
+        username_field = find_first(page, USERNAME_SELECTORS)
+        password_field = find_first(page, PASSWORD_SELECTORS)
+        if username_field is not None or password_field is not None:
+            return username_field, password_field, attempt
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            wait_for_page_settle(page)
+    return username_field, password_field, max(1, attempts)
 
 
 def sites_list_detected(page) -> bool:
@@ -370,8 +409,26 @@ def login(page, username: str, password: str) -> None:
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
     wait_for_page_settle(page)
 
-    username_field = find_first(page, USERNAME_SELECTORS)
-    password_field = find_first(page, PASSWORD_SELECTORS)
+    url_before_initial_click = str(getattr(page, "url", "") or "")
+    initial_button = None
+    initial_clicked = False
+    username_field, password_field, field_search_attempts = wait_for_login_fields(page)
+    if username_field is None and password_field is None:
+        initial_button = find_first(page, INITIAL_LOGIN_SELECTORS)
+        if initial_button is not None:
+            initial_button.click()
+            initial_clicked = True
+            wait_for_page_settle(page)
+            username_field, password_field, retry_attempts = wait_for_login_fields(page)
+            field_search_attempts += retry_attempts
+    url_after_initial_click = str(getattr(page, "url", "") or "")
+    login_metadata = {
+        "initial_login_button_found": initial_button is not None,
+        "initial_login_button_clicked": initial_clicked,
+        "url_before_initial_login_click": url_before_initial_click,
+        "url_after_initial_login_click": url_after_initial_click,
+        "field_search_attempts": field_search_attempts,
+    }
     if username_field is None:
         raise RefreshError(
             login_failure_message(
@@ -380,6 +437,7 @@ def login(page, username: str, password: str) -> None:
                 username_found=False,
                 password_found=password_field is not None,
                 allow_screenshot=True,
+                extra=login_metadata,
             )
         )
 
@@ -395,6 +453,7 @@ def login(page, username: str, password: str) -> None:
                 username_found=True,
                 password_found=False,
                 allow_screenshot=False,
+                extra=login_metadata,
             )
         )
 
