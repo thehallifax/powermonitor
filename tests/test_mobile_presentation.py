@@ -130,7 +130,13 @@ class MobilePresentationTests(unittest.TestCase):
                 "health": {"collector_status": "ok"},
                 "sync_state": "SYNCED",
                 "actions": ["configure"],
-                "configuration": {"credentials": [], "entity_mapping": None},
+                "configuration": {
+                    "credentials": [
+                        {"field": "username", "label": "Username/Email", "required": True, "sensitive": False, "configured": False},
+                        {"field": "password", "label": "Password", "required": True, "sensitive": True, "configured": False},
+                    ],
+                    "entity_mapping": None,
+                },
                 "onboarding": {
                     "state": "CONNECTED",
                     "state_label": "Connected",
@@ -156,8 +162,57 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Connect", html)
         self.assertIn("Test Connection", html)
         self.assertIn("Disconnect", html)
+        self.assertIn('class="provider-config-form" data-provider-id="solaredge" method="post" action="/api/providers/solaredge/save"', html)
+        self.assertIn('name="provider_id" value="solaredge"', html)
+        self.assertIn('name="username"', html)
+        self.assertIn('name="password"', html)
+        self.assertIn('name="provider_action" value="save" formaction="/api/providers/solaredge/save"', html)
+        self.assertIn('name="provider_action" value="test" formaction="/api/providers/solaredge/test"', html)
+        self.assertNotIn('action="/setup/billing-cycle"', html)
         self.assertNotIn("Upload latest file", html)
         self.assertNotIn("Replace upload", html)
+
+    def test_billing_cycle_form_closes_before_provider_forms_begin(self):
+        provider = SimpleNamespace(
+            provider_id="solaredge",
+            name="SolarEdge",
+            as_dict=lambda: {
+                "provider_id": "solaredge",
+                "provider_type": "solar",
+                "lifecycle_state": "CONFIGURED",
+                "capability_summary": {"capabilities": ["interval_history", "daily_summary"]},
+                "diagnostics": {},
+                "health": {"collector_status": "unknown"},
+                "sync_state": "NEVER_SYNCED",
+                "actions": ["configure"],
+                "configuration": {
+                    "credentials": [
+                        {"field": "username", "label": "Username/Email", "required": True, "sensitive": False, "configured": False},
+                        {"field": "password", "label": "Password", "required": True, "sensitive": True, "configured": False},
+                    ],
+                    "entity_mapping": None,
+                },
+                "onboarding": {
+                    "state": "READY_TO_CONNECT",
+                    "state_label": "Waiting For Setup",
+                    "connected": False,
+                    "healthy": False,
+                    "data_available": False,
+                    "last_successful_sync": None,
+                    "required_information": ["SolarEdge username/email", "SolarEdge password"],
+                    "why_required": "Solar access lets PowerMonitor explain generation.",
+                    "recovery_steps": ["Run Test Connection"],
+                    "technical_details": {},
+                },
+            },
+        )
+
+        html = report.billing_cycle_setup_html(report.load_settings()) + report.provider_management_html(SimpleNamespace(providers=lambda: [provider]))
+        billing_open = html.index('action="/setup/billing-cycle"')
+        billing_close = html.index("</form>", billing_open)
+        provider_form = html.index('class="provider-config-form"')
+
+        self.assertLess(billing_close, provider_form)
 
     def test_smart_meter_source_is_not_fabricated(self):
         provider = SimpleNamespace(

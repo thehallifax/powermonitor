@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,16 @@ class WebConfigTests(unittest.TestCase):
                     web.resolve_web_bind(missing_settings),
                     ("0.0.0.0", 8765),
                 )
+
+    def test_provider_action_posts_are_logged_without_payload_values(self):
+        source = inspect.getsource(web.DashboardHandler.update_provider)
+
+        self.assertIn("Provider action POST provider_id=%s action=%s status=%s", source)
+        self.assertIn("provider_id", source)
+        self.assertIn("action", source)
+        self.assertIn("result.status", source)
+        self.assertNotIn("password", source.lower())
+        self.assertNotIn("cookie", source.lower())
 
     def test_config_file_can_set_host_and_port(self):
         with tempfile.TemporaryDirectory() as temp_dir:

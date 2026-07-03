@@ -110,6 +110,15 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(configuration["lifecycle_state"], "NOT_CONFIGURED")
         self.assertIn("Password", configuration["notes"])
 
+    def test_empty_provider_save_does_not_update_provider_state(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(registry(status=ProviderStatus.MISSING), **paths)
+            configuration = manager.configure("solaredge", {"username": "", "password": ""}).as_dict()
+
+            self.assertEqual(configuration["lifecycle_state"], "NOT_CONFIGURED")
+            self.assertFalse(paths["provider_state_path"].exists())
+
     def test_cookie_remains_advanced_fallback_configuration_path(self):
         with TemporaryDirectory() as directory:
             manager = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory))

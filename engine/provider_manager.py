@@ -639,6 +639,7 @@ class ProviderManager:
         record = dict(self.provider_state.get(provider.provider_id, {}))
         configured_fields = set(record.get("configured_fields") or [])
         public_values = dict(record.get("public_values") or {})
+        changed = False
         for field_name in _editable_fields(provider.provider_type, provider.provider_id):
             if field_name not in values:
                 continue
@@ -649,6 +650,9 @@ class ProviderManager:
             if field_name not in SENSITIVE_FIELDS:
                 public_values[field_name] = str(raw)
             self._persist_provider_value(provider.provider_id, provider.provider_type, field_name, str(raw))
+            changed = True
+        if not changed:
+            return record
         record.update(
             {
                 "enabled": True,

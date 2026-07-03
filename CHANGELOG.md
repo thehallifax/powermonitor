@@ -1,5 +1,17 @@
 # Changelog
 
+## Bugfix - Provider Connect Form Submission
+
+- Made System / Your Data Sources provider forms standalone POST forms so
+  SolarEdge Connect submits to `/api/providers/solaredge/save` instead of
+  falling through to the billing-cycle setup endpoint.
+- Added provider action form metadata for provider id, action type, and
+  credential fields while preserving secret redaction.
+- Added provider action POST logging for provider id, action, and result
+  status without logging submitted credential values.
+- Added regression coverage for billing/provider form separation, SolarEdge
+  provider endpoints, credential fields, and provider action logging.
+
 ## TRUST-002 - SolarEdge Credential Recovery
 
 - Made SolarEdge collection recover from missing or expired cookies by

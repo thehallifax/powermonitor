@@ -4785,6 +4785,7 @@ def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
 
 def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[str, str, str]]] = None) -> str:
     provider_id = str(data.get("provider_id") or "")
+    provider_action_base = f"/api/providers/{html.escape(provider_id)}"
     configuration = data.get("configuration") or {}
     credentials = configuration.get("credentials") or []
     fields = []
@@ -4847,11 +4848,12 @@ def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[s
         ("Remove", "remove", "button"),
     ]
     action_buttons = "".join(
-        f'<button type="{html.escape(button_type)}" data-provider-action="{html.escape(action)}">{html.escape(label)}</button>'
+        f'<button type="submit" name="provider_action" value="{html.escape(action)}" formaction="{provider_action_base}/{html.escape(action)}" formmethod="post" data-provider-action="{html.escape(action)}">{html.escape(label)}</button>'
         for label, action, button_type in action_specs
     )
     return f"""
-      <form class="provider-config-form" data-provider-id="{html.escape(provider_id)}">
+      <form class="provider-config-form" data-provider-id="{html.escape(provider_id)}" method="post" action="{provider_action_base}/save">
+        <input type="hidden" name="provider_id" value="{html.escape(provider_id)}">
         <div class="provider-form-section">
           <span>Connection details</span>
           <div class="provider-form-grid">{''.join(fields) or '<p class="notice">No editable connection fields for this provider.</p>'}</div>
@@ -7162,10 +7164,9 @@ def write_html(
   document.querySelectorAll(".provider-config-form").forEach((form) => {{
     form.addEventListener("submit", (event) => {{
       event.preventDefault();
-      runProviderAction(form, "save");
-    }});
-    form.querySelectorAll("[data-provider-action]").forEach((button) => {{
-      button.addEventListener("click", () => runProviderAction(form, button.dataset.providerAction));
+      const submitter = event.submitter;
+      const actionName = submitter && submitter.dataset.providerAction ? submitter.dataset.providerAction : "save";
+      runProviderAction(form, actionName);
     }});
   }});
 }})();

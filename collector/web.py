@@ -348,12 +348,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         provider_id = parts[2]
         action = parts[3]
         manager = report.provider_management_data()
-        if action == "test":
-            self.send_json({"action": manager.action(provider_id, action).as_dict()})
-            return
         payload = self.read_request_payload()
+        if action == "test":
+            result = manager.action(provider_id, action)
+            logging.info(
+                "Provider action POST provider_id=%s action=%s status=%s",
+                provider_id,
+                action,
+                result.status,
+            )
+            self.send_json({"action": result.as_dict()})
+            return
         if action in {"configure", "edit", "save", "reset", "reconnect", "disable", "enable", "remove"}:
-            self.send_json({"action": manager.action(provider_id, action, payload).as_dict()})
+            result = manager.action(provider_id, action, payload)
+            logging.info(
+                "Provider action POST provider_id=%s action=%s status=%s",
+                provider_id,
+                action,
+                result.status,
+            )
+            self.send_json({"action": result.as_dict()})
             return
         self.send_json({"error": "unsupported provider action"}, status=400)
 
