@@ -439,9 +439,13 @@ class ProviderManager:
             technical_details={
                 "http_status": raw.get("http_status"),
                 "measurements": raw.get("measurements"),
+                "imported": raw.get("imported"),
                 "data_retrieved": raw.get("data_retrieved"),
                 "sample_date": raw.get("sample_date"),
                 "report_regenerated": raw.get("report_regenerated"),
+                "auth_path": raw.get("auth_path"),
+                "data_fetch_attempted": raw.get("data_fetch_attempted"),
+                "import_attempted": raw.get("import_attempted"),
                 "adapter": "runtime",
                 "entity_mapping": raw.get("entity_mapping"),
             },

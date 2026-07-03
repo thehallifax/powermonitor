@@ -69,6 +69,15 @@ class NoRecentSolarData(RuntimeError):
     pass
 
 
+def log_solaredge_action(action: str, **details) -> None:
+    safe_details = {
+        str(key): redact_sensitive(str(value))
+        for key, value in details.items()
+        if value is not None
+    }
+    logging.info("SolarEdge provider action=%s details=%s", action, safe_details)
+
+
 SECRET_PATTERNS = (
     (re.compile(r"(Cookie:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
     (re.compile(r"(Authorization:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
@@ -114,8 +123,9 @@ class SolarEdgeAdapter:
         output_path.unlink(missing_ok=True)
         started = datetime.now().astimezone()
         sample_day = None
+        auth_path = None
         try:
-            status, measurements, sample_day = fetch_usable_sample(output_path)
+            status, measurements, sample_day, auth_path = fetch_usable_sample(output_path)
             success = True
             auth_status = "authenticated"
             warning = None
@@ -145,21 +155,57 @@ class SolarEdgeAdapter:
             "http_status": status,
             "sample_date": sample_day.isoformat() if sample_day else None,
             "data_retrieved": bool(measurements),
+            "auth_path": auth_path,
+            "data_fetch_attempted": True,
         }
 
     def reconnect(self) -> dict:
         started = datetime.now().astimezone()
+        summary = {}
         try:
-            refresh_solaredge_session()
-            collect_recent()
+            summary = collect_recent(action="reconnect")
             success = True
             warning = None
             status = "collection_complete"
+        except CredentialsMissing as exc:
+            success = False
+            warning = f"Credentials missing. {safe_error_message(exc)}"
+            status = "credentials_missing"
+        except SignInFailed as exc:
+            success = False
+            warning = f"Login failed. {safe_error_message(exc)}"
+            status = "login_failed"
+        except SolarEdgeUnavailable as exc:
+            success = False
+            warning = f"Session refresh failed. {safe_error_message(exc)}"
+            status = "session_refresh_failed"
+        except SessionRefreshFailure as exc:
+            success = False
+            warning = f"Session refresh failed. {safe_error_message(exc)}"
+            status = "session_refresh_failed"
+        except NoRecentSolarData as exc:
+            success = False
+            warning = f"Data retrieval failed. {safe_error_message(exc)}"
+            status = "data_retrieval_failed"
+        except CollectionBackfillFailure as exc:
+            success = False
+            warning = f"Data retrieval failed. {safe_error_message(exc)}"
+            status = "data_retrieval_failed"
+        except ReportGenerationFailure as exc:
+            success = False
+            warning = f"Report regeneration failed. {safe_error_message(exc)}"
+            status = "report_regeneration_failed"
+        except subprocess.SubprocessError as exc:
+            success = False
+            warning = f"Import failed. {safe_error_message(exc)}"
+            status = "import_failed"
         except Exception as exc:
             success = False
             warning = safe_error_message(exc)
             status = "failed"
         duration_ms = int((datetime.now().astimezone() - started).total_seconds() * 1000)
+        measurements = int(summary.get("measurements") or 0)
+        imported = int(summary.get("imported") or 0)
         return {
             "success": success,
             "authentication_status": "authenticated" if success else "not_authenticated",
@@ -167,10 +213,14 @@ class SolarEdgeAdapter:
             "available_datasets": ["interval_history", "daily_summary"] if success else [],
             "warnings": [warning] if warning else [],
             "response_time_ms": duration_ms,
-            "measurements": 1 if success else 0,
+            "measurements": measurements,
+            "imported": imported,
             "http_status": status,
-            "data_retrieved": success,
-            "report_regenerated": success,
+            "data_retrieved": success and measurements > 0,
+            "report_regenerated": bool(summary.get("report_regenerated")),
+            "auth_path": ", ".join(summary.get("auth_paths") or []),
+            "data_fetch_attempted": True,
+            "import_attempted": True,
         }
 
     def discover_capabilities(self) -> list[ProviderCapability]:
@@ -295,23 +345,51 @@ def validate_response(path: Path, expected_day: date) -> int:
     return len(measurements)
 
 
-def fetch_usable_sample(output_path: Path, days: int = 7) -> tuple[str, int, date]:
+def fetch_with_session_recovery(current_day: date, output_path: Path) -> tuple[str, int, str]:
+    auth_path = "existing_session"
     try:
         session_header = read_session_header()
-    except AuthenticationFailure:
-        refresh_solaredge_session()
-        session_header = read_session_header()
+        status = fetch_solaredge(session_header, current_day, output_path)
+        measurements = validate_response(output_path, current_day)
+        return status, measurements, auth_path
+    except AuthenticationFailure as exc:
+        log_solaredge_action(
+            "fetch",
+            stage="authentication_recovery",
+            auth_path="saved_credentials",
+            data_fetch_attempted=True,
+            result=safe_error_message(exc),
+        )
+        output_path.unlink(missing_ok=True)
 
+    refresh_solaredge_session()
+    session_header = read_session_header()
+    auth_path = "credential_refresh"
+    status = fetch_solaredge(session_header, current_day, output_path)
+    measurements = validate_response(output_path, current_day)
+    return status, measurements, auth_path
+
+
+def fetch_usable_sample(output_path: Path, days: int = 7) -> tuple[str, int, date, str]:
     current_day = date.today()
     last_error = "No recent SolarEdge data was received."
     for offset in range(max(1, days)):
         sample_day = current_day - timedelta(days=offset)
         output_path.unlink(missing_ok=True)
         try:
-            status = fetch_solaredge(session_header, sample_day, output_path)
-            measurements = validate_response(output_path, sample_day)
-            return status, measurements, sample_day
+            status, measurements, auth_path = fetch_with_session_recovery(sample_day, output_path)
+            log_solaredge_action(
+                "test_connection",
+                auth_path=auth_path,
+                data_fetch_attempted=True,
+                result="usable_sample",
+                measurements=measurements,
+                sample_date=sample_day,
+            )
+            return status, measurements, sample_day, auth_path
         except AuthenticationFailure:
+            raise
+        except SessionRefreshFailure:
             raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             last_error = safe_error_message(exc)
@@ -453,9 +531,7 @@ def refresh_solaredge_session() -> None:
         logging.info("Automated SolarEdge session refresh result: %s", safe_output)
 
 
-def collect_recent() -> None:
-    session_header = read_session_header()
-
+def collect_recent(action: str = "scheduled_collection") -> dict:
     current_day = date.today()
     backfill_days = load_collection_backfill_days()
     start_day = current_day - timedelta(days=backfill_days - 1)
@@ -475,17 +551,30 @@ def collect_recent() -> None:
     total_measurements = 0
     total_imported = 0
     failures = []
+    auth_paths = set()
 
     for collection_day in days_to_fetch:
         temp_outfile = OUTFILE.with_name(f"latest-{collection_day.isoformat()}.json.tmp")
         temp_outfile.unlink(missing_ok=True)
-        logging.info("Fetching SolarEdge data for %s", collection_day)
+        log_solaredge_action(action, stage="fetch", data_fetch_attempted=True, day=collection_day)
         try:
-            fetch_solaredge(session_header, collection_day, temp_outfile)
-            measurement_count = validate_response(temp_outfile, collection_day)
+            _status, measurement_count, auth_path = fetch_with_session_recovery(collection_day, temp_outfile)
+            auth_paths.add(auth_path)
+            log_solaredge_action(
+                action,
+                stage="import",
+                auth_path=auth_path,
+                data_fetch_attempted=True,
+                import_attempted=True,
+                measurements=measurement_count,
+                day=collection_day,
+            )
             imported_count, importer_message = import_day(temp_outfile)
             temp_outfile.replace(OUTFILE)
         except AuthenticationFailure:
+            temp_outfile.unlink(missing_ok=True)
+            raise
+        except SessionRefreshFailure:
             temp_outfile.unlink(missing_ok=True)
             raise
         except (subprocess.SubprocessError, OSError, RuntimeError, ValueError) as exc:
@@ -536,19 +625,30 @@ def collect_recent() -> None:
 
     generate_report()
     print("Dashboard report regenerated")
+    log_solaredge_action(
+        action,
+        stage="complete",
+        auth_path=",".join(sorted(auth_paths)),
+        data_fetch_attempted=True,
+        import_attempted=True,
+        report_regeneration_attempted=True,
+        result="success",
+        measurements=total_measurements,
+        imported=total_imported,
+    )
+    return {
+        "succeeded": succeeded,
+        "failed": failed,
+        "measurements": total_measurements,
+        "imported": total_imported,
+        "auth_paths": sorted(auth_paths),
+        "report_regenerated": True,
+    }
 
 
 def main() -> None:
     setup_logging()
-    try:
-        collect_recent()
-    except AuthenticationFailure:
-        try:
-            refresh_solaredge_session()
-        except SessionRefreshFailure:
-            raise
-        logging.info("Retrying SolarEdge recent collection once after session refresh")
-        collect_recent()
+    collect_recent(action="scheduled_collection")
 
 
 def handle_failure(failure_type: str, message: str) -> None:

@@ -1,5 +1,23 @@
 # Changelog
 
+## Bugfix - SolarEdge Reconnect Data Collection
+
+- Unified SolarEdge Test Connection, Reconnect, and scheduled collection around
+  the same session recovery and data retrieval helper.
+- Changed Reconnect to use saved-credential recovery through the collection
+  path instead of forcing the older refresh-only path before import.
+- Made successful reconnects report real measurement/import counts, auth path,
+  and dashboard regeneration status.
+- Added stage-specific reconnect failure wording for missing credentials, login
+  failure, session refresh failure, data retrieval failure, import failure, and
+  report regeneration failure.
+- Added safe SolarEdge provider-action logging for auth path, fetch/import
+  attempts, report regeneration, and result without logging credentials or
+  session values.
+- Added regression coverage for shared recovery, scheduled collection import,
+  reconnect import reporting, legacy-refresh avoidance, and stage-specific
+  failures.
+
 ## LD-001 - Live Data Lifecycle
 
 - Tightened SolarEdge Test Connection so it verifies usable recent solar data,
