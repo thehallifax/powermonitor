@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import unittest
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -14,6 +15,82 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import collect_today
 import refresh_solaredge_session
+
+
+class FakeLoginElement:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    def is_visible(self, timeout=None):
+        return True
+
+    def fill(self, value):
+        if "password" in self.selector:
+            self.page.password_filled = True
+        else:
+            self.page.username_filled = True
+
+    def click(self):
+        self.page.clicks.append(self.selector)
+        if self.page.username_filled and not self.page.password_available:
+            self.page.password_available = True
+            self.page.available_selectors.add("input[type='password']")
+            self.page.available_selectors.add("button:has-text('Sign in')")
+        elif self.page.password_filled:
+            self.page.submitted = True
+
+    def press(self, key):
+        self.page.pressed.append(key)
+        if self.page.password_filled:
+            self.page.submitted = True
+
+
+class FakeLoginLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    def count(self):
+        if self.selector in self.page.available_selectors:
+            return 1
+        if self.selector.startswith("text=/") and self.page.challenge:
+            return 1
+        return 0
+
+    def first(self):
+        return FakeLoginElement(self.page, self.selector)
+
+
+class FakeLoginPage:
+    def __init__(self, selectors=None, challenge=False):
+        self.available_selectors = set(selectors or [])
+        self.challenge = challenge
+        self.password_available = "input[type='password']" in self.available_selectors
+        self.username_filled = False
+        self.password_filled = False
+        self.submitted = False
+        self.clicks = []
+        self.pressed = []
+        self.url = "https://monitoring.solaredge.com/solaredge-web/p/login"
+
+    def goto(self, url, wait_until=None):
+        self.url = url
+
+    def wait_for_load_state(self, state, timeout=None):
+        return None
+
+    def wait_for_selector(self, selector, timeout=None):
+        return None
+
+    def locator(self, selector):
+        return FakeLoginLocator(self, selector)
+
+    def title(self):
+        return "SolarEdge Login"
+
+    def screenshot(self, path, full_page=True):
+        Path(path).write_bytes(b"redacted screenshot placeholder")
 
 
 class SolarEdgeRecoveryTests(unittest.TestCase):
@@ -90,6 +167,43 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
 
         self.assertIn("Credentials missing", str(context.exception))
         self.assertNotIn("config/secrets.json", str(context.exception))
+
+    def test_solaredge_login_supports_two_step_username_then_password(self):
+        page = FakeLoginPage(selectors={"input[type='email']", "button[type='submit']"})
+
+        refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+        self.assertTrue(page.username_filled)
+        self.assertTrue(page.password_filled)
+        self.assertTrue(page.submitted)
+        self.assertGreaterEqual(page.clicks.count("button[type='submit']"), 1)
+
+    def test_solaredge_login_failure_reports_safe_page_diagnostics(self):
+        with TemporaryDirectory() as directory:
+            debug_dir = Path(directory) / "debug"
+            page = FakeLoginPage(selectors=set(), challenge=True)
+            with patch.object(refresh_solaredge_session, "DEBUG_DIR", debug_dir):
+                with self.assertRaises(refresh_solaredge_session.RefreshError) as context:
+                    refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+            message = str(context.exception)
+            debug_files = list(debug_dir.glob("solaredge-login-*.json"))
+            metadata = json.loads(debug_files[0].read_text(encoding="utf-8"))
+
+        self.assertIn("title='SolarEdge Login'", message)
+        self.assertIn("hostname='monitoring.solaredge.com'", message)
+        self.assertIn("username_field_found=False", message)
+        self.assertIn("password_field_found=False", message)
+        self.assertIn("challenge_or_sso_likely=True", message)
+        self.assertNotIn("user@example.com", message)
+        self.assertNotIn("redaction-fixture-password", message)
+        self.assertEqual(len(debug_files), 1)
+        self.assertEqual(metadata["hostname"], "monitoring.solaredge.com")
+        self.assertFalse(metadata["username_field_found"])
+        self.assertFalse(metadata["password_field_found"])
+        self.assertTrue(metadata["challenge_or_sso_likely"])
+        self.assertNotIn("user@example.com", json.dumps(metadata))
+        self.assertNotIn("redaction-fixture-password", json.dumps(metadata))
 
     def test_safe_error_message_redacts_credentials(self):
         message = collect_today.safe_error_message(

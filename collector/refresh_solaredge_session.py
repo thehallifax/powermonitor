@@ -2,14 +2,73 @@
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COOKIE_PATH = PROJECT_ROOT / "collector" / "solaredge_cookie.txt"
 SECRETS_PATH = PROJECT_ROOT / "config" / "secrets.json"
+DEBUG_DIR = PROJECT_ROOT / "logs" / "debug"
 SITE_ID = os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID", "4457399")
 LOGIN_URL = "https://monitoring.solaredge.com/solaredge-web/p/login"
+
+USERNAME_SELECTORS = (
+    "input[type='email']",
+    "input[name='username']",
+    "input[name='j_username']",
+    "input[name='email']",
+    "input[name='loginfmt']",
+    "input[name='identifier']",
+    "input[id*='user' i]",
+    "input[id*='email' i]",
+    "input[id*='login' i]",
+    "input[name*='user' i]",
+    "input[name*='email' i]",
+    "input[autocomplete='username']",
+    "input[autocomplete='email']",
+    "input[placeholder*='email' i]",
+    "input[placeholder*='username' i]",
+)
+
+PASSWORD_SELECTORS = (
+    "input[type='password']",
+    "input[name='password']",
+    "input[name='j_password']",
+    "input[id*='password' i]",
+    "input[name*='password' i]",
+    "input[autocomplete='current-password']",
+)
+
+CONTINUE_SELECTORS = (
+    "button[type='submit']",
+    "input[type='submit']",
+    "button:has-text('Continue')",
+    "button:has-text('Next')",
+    "button:has-text('Proceed')",
+    "input[value*='Continue' i]",
+    "input[value*='Next' i]",
+)
+
+SIGN_IN_SELECTORS = (
+    "button[type='submit']",
+    "input[type='submit']",
+    "button:has-text('Login')",
+    "button:has-text('Log in')",
+    "button:has-text('Sign in')",
+    "button:has-text('Sign In')",
+    "button:has-text('Submit')",
+    "input[value*='Login' i]",
+    "input[value*='Log in' i]",
+    "input[value*='Sign in' i]",
+)
+
+CHALLENGE_SELECTORS = (
+    "iframe[src*='captcha' i]",
+    "iframe[src*='recaptcha' i]",
+    "iframe[src*='challenge' i]",
+    "text=/captcha|challenge|verification|verify you|single sign-on|sso/i",
+)
 
 
 class RefreshError(RuntimeError):
@@ -35,55 +94,163 @@ def load_secret(name: str, aliases: tuple[str, ...] = ()) -> str:
 
 def find_first(page, selectors: tuple[str, ...]):
     for selector in selectors:
-        locator = page.locator(selector)
-        if locator.count():
-            return locator.first()
+        try:
+            locator = page.locator(selector)
+            if locator.count():
+                first = locator.first()
+                try:
+                    if hasattr(first, "is_visible") and not first.is_visible(timeout=1000):
+                        continue
+                except TypeError:
+                    if hasattr(first, "is_visible") and not first.is_visible():
+                        continue
+                except Exception:
+                    pass
+                return first
+        except Exception:
+            continue
     return None
+
+
+def selector_found(page, selectors: tuple[str, ...]) -> bool:
+    return find_first(page, selectors) is not None
+
+
+def click_first(page, selectors: tuple[str, ...]) -> bool:
+    target = find_first(page, selectors)
+    if target is None:
+        return False
+    target.click()
+    wait_for_page_settle(page)
+    return True
+
+
+def wait_for_page_settle(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector("input, button", timeout=10000)
+    except Exception:
+        pass
+
+
+def page_hostname(page) -> str:
+    try:
+        hostname = urlparse(str(page.url or "")).hostname
+    except Exception:
+        hostname = None
+    return hostname or "unknown"
+
+
+def safe_page_title(page) -> str:
+    try:
+        title = str(page.title() or "").strip()
+    except Exception:
+        title = ""
+    return title or "untitled"
+
+
+def challenge_likely(page) -> bool:
+    if "captcha" in safe_page_title(page).lower():
+        return True
+    for selector in CHALLENGE_SELECTORS:
+        try:
+            if page.locator(selector).count():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def save_login_debug(page, reason: str, allow_screenshot: bool) -> Path:
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_path = DEBUG_DIR / f"solaredge-login-{timestamp}"
+    metadata = {
+        "reason": reason,
+        "title": safe_page_title(page),
+        "url": str(getattr(page, "url", "") or ""),
+        "hostname": page_hostname(page),
+        "username_field_found": selector_found(page, USERNAME_SELECTORS),
+        "password_field_found": selector_found(page, PASSWORD_SELECTORS),
+        "challenge_or_sso_likely": challenge_likely(page),
+    }
+    metadata_path = base_path.with_suffix(".json")
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        metadata_path.chmod(0o600)
+    except OSError:
+        pass
+    if allow_screenshot:
+        screenshot_path = base_path.with_suffix(".png")
+        try:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            screenshot_path.chmod(0o600)
+        except Exception:
+            pass
+    return metadata_path
+
+
+def login_failure_message(page, reason: str, *, username_found: bool, password_found: bool, allow_screenshot: bool) -> str:
+    debug_path = save_login_debug(page, reason, allow_screenshot=allow_screenshot)
+    return (
+        f"SolarEdge login fields were not found. "
+        f"title={safe_page_title(page)!r}; "
+        f"hostname={page_hostname(page)!r}; "
+        f"username_field_found={username_found}; "
+        f"password_field_found={password_found}; "
+        f"challenge_or_sso_likely={challenge_likely(page)}; "
+        f"debug={debug_path}"
+    )
 
 
 def login(page, username: str, password: str) -> None:
     page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    username_field = find_first(
-        page,
-        (
-            "input[type='email']",
-            "input[name='username']",
-            "input[name='j_username']",
-            "input[id*='user' i]",
-            "input[name*='email' i]",
-        ),
-    )
-    password_field = find_first(
-        page,
-        (
-            "input[type='password']",
-            "input[name='password']",
-            "input[name='j_password']",
-            "input[id*='password' i]",
-        ),
-    )
-    if username_field is None or password_field is None:
-        raise RefreshError("SolarEdge login fields were not found")
+    wait_for_page_settle(page)
+
+    username_field = find_first(page, USERNAME_SELECTORS)
+    password_field = find_first(page, PASSWORD_SELECTORS)
+    if username_field is None:
+        raise RefreshError(
+            login_failure_message(
+                page,
+                "username field missing",
+                username_found=False,
+                password_found=password_field is not None,
+                allow_screenshot=True,
+            )
+        )
 
     username_field.fill(username)
+    if password_field is None:
+        click_first(page, CONTINUE_SELECTORS)
+        password_field = find_first(page, PASSWORD_SELECTORS)
+    if password_field is None:
+        raise RefreshError(
+            login_failure_message(
+                page,
+                "password field missing after username step",
+                username_found=True,
+                password_found=False,
+                allow_screenshot=False,
+            )
+        )
+
     password_field.fill(password)
 
-    submit = find_first(
-        page,
-        (
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Login')",
-            "button:has-text('Log in')",
-            "button:has-text('Sign in')",
-        ),
-    )
+    submit = find_first(page, SIGN_IN_SELECTORS)
     if submit is None:
         password_field.press("Enter")
     else:
         submit.click()
 
-    page.wait_for_load_state("domcontentloaded", timeout=30000)
+    wait_for_page_settle(page)
 
 
 def cookie_header(cookies: list[dict]) -> str:

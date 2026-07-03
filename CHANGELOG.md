@@ -1,5 +1,18 @@
 # Changelog
 
+## Bugfix - SolarEdge Playwright Login Selectors
+
+- Made the SolarEdge session refresh automation handle current and fallback
+  login-field selectors for email/username and password fields.
+- Added support for two-step SolarEdge login flows with Continue/Next before
+  the password field appears.
+- Added safe login-failure diagnostics with page title, hostname, field-found
+  booleans, challenge/SSO likelihood, and redacted debug metadata without
+  dumping page HTML or credentials.
+- Improved login-field failure messages so reconnect/test failures explain the
+  page state instead of only saying fields were missing.
+- Added selector fallback regression tests using a fake Playwright page.
+
 ## Bugfix - SolarEdge Reconnect Data Collection
 
 - Unified SolarEdge Test Connection, Reconnect, and scheduled collection around
