@@ -738,6 +738,9 @@ def provider_management_data() -> ProviderManager:
             "solaredge": solaredge_adapter.test_connection,
             "home_assistant": home_assistant_adapter.test_connection,
         },
+        reconnect_handlers={
+            "solaredge": solaredge_adapter.reconnect,
+        },
         provider_entity_mappings={"home_assistant": home_assistant_record},
         settings=settings,
     )
@@ -4783,7 +4786,7 @@ def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
     """
 
 
-def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[str, str, str]]] = None) -> str:
+def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[str, str, str]]] = None, *, hide_credentials: bool = False) -> str:
     provider_id = str(data.get("provider_id") or "")
     provider_action_base = f"/api/providers/{html.escape(provider_id)}"
     configuration = data.get("configuration") or {}
@@ -4851,13 +4854,32 @@ def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[s
         f'<button type="submit" name="provider_action" value="{html.escape(action)}" formaction="{provider_action_base}/{html.escape(action)}" formmethod="post" data-provider-action="{html.escape(action)}">{html.escape(label)}</button>'
         for label, action, button_type in action_specs
     )
+    fields_html = ''.join(fields) or '<p class="notice">No editable connection fields for this provider.</p>'
+    if hide_credentials:
+        connection_details = f"""
+        <div class="provider-account-summary">
+          <div><span>Connected account</span><strong>Saved locally</strong></div>
+          <div><span>Credentials</span><strong>Hidden for privacy</strong></div>
+        </div>
+        <details class="credential-editor">
+          <summary>Edit credentials</summary>
+          <div class="provider-form-grid">{fields_html}</div>
+          <div class="provider-action-row credential-save-row">
+            <button type="submit" name="provider_action" value="save" formaction="{provider_action_base}/save" formmethod="post" data-provider-action="save">Save credentials</button>
+          </div>
+        </details>
+        """
+    else:
+        connection_details = f"""
+        <div class="provider-form-section">
+          <span>Connection details</span>
+          <div class="provider-form-grid">{fields_html}</div>
+        </div>
+        """
     return f"""
       <form class="provider-config-form" data-provider-id="{html.escape(provider_id)}" method="post" action="{provider_action_base}/save">
         <input type="hidden" name="provider_id" value="{html.escape(provider_id)}">
-        <div class="provider-form-section">
-          <span>Connection details</span>
-          <div class="provider-form-grid">{''.join(fields) or '<p class="notice">No editable connection fields for this provider.</p>'}</div>
-        </div>
+        {connection_details}
         {mapping_html}
         <div class="provider-action-row">
           {action_buttons}
@@ -4955,21 +4977,28 @@ def _data_source_provides(provider_id: str, data: dict) -> list[str]:
 
 def _data_source_status(kind: str, data: dict, onboarding: dict) -> str:
     state = str(data.get("lifecycle_state") or onboarding.get("state") or "")
+    health_status = str(onboarding.get("health_status") or (data.get("health") or {}).get("last_error") or "")
     if kind == "configuration":
         return "Connected" if state in {"CONFIGURED", "CONNECTED", "SYNCING"} else "Needs attention"
     if kind == "import":
         return "Latest upload available" if onboarding.get("data_available") else "Not connected"
     if onboarding.get("connected"):
         return "Connected"
+    if "signed in" in health_status.lower() and "no recent solar data" in health_status.lower():
+        return "Signed in, but no data received"
+    if onboarding.get("data_available") and state in {"CONFIGURED", "NOT_CONFIGURED"}:
+        return "Historical data only"
     if state in {"ERROR", "DEGRADED"}:
         return "Needs attention"
+    if state in {"CONFIGURED"}:
+        return "Waiting for setup"
     return "Not connected"
 
 
 def _data_source_tone(status: str) -> str:
     if status in {"Connected", "Latest upload available"}:
         return "good"
-    if status == "Needs attention":
+    if status in {"Needs attention", "Signed in, but no data received"}:
         return "bad"
     return "neutral"
 
@@ -4983,6 +5012,31 @@ def _format_source_timestamp(value: Any, fallback: str = "Not available yet") ->
         return local.strftime("%-d %b, %-I:%M %p")
     except (TypeError, ValueError):
         return str(value)
+
+
+def _provider_data_available_label(provider_id: str, data: dict, onboarding: dict) -> str:
+    freshness = ((data.get("diagnostics") or {}).get("freshness") or {})
+    latest = freshness.get("observed_at") or onboarding.get("last_successful_sync")
+    if provider_id == "solaredge" and latest:
+        return f"Solar history available. Latest solar reading: {_format_source_timestamp(latest)}."
+    if onboarding.get("data_available"):
+        return "Household history available."
+    return "No usable live data received yet."
+
+
+def _provider_next_refresh_label(kind: str, onboarding: dict) -> str:
+    if kind == "import":
+        return "Manual upload"
+    return _format_source_timestamp(onboarding.get("next_scheduled_sync"), str(onboarding.get("next_scheduled_sync") or "Next scheduled refresh"))
+
+
+def _provider_has_enough_configuration(data: dict) -> bool:
+    credentials = ((data.get("configuration") or {}).get("credentials") or [])
+    configured = {str(item.get("field")) for item in credentials if isinstance(item, dict) and item.get("configured")}
+    provider_id = str(data.get("provider_id") or "")
+    if provider_id == "solaredge":
+        return {"username", "password"}.issubset(configured) or "cookie" in configured
+    return bool(configured)
 
 
 def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
@@ -5001,11 +5055,15 @@ def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
             <a class="button-link" href="#setup-billing">Edit configuration</a>
           </div>
         """
-    live_actions = [("Connect", "save", "submit"), ("Test Connection", "test", "button")]
-    if status in {"Connected", "Needs attention"}:
-        live_actions.append(("Disconnect", "disable", "button"))
-    else:
-        live_actions.append(("Disconnect", "disable", "button"))
+    if status == "Connected":
+        live_actions = [("Test connection", "test", "submit"), ("Reconnect", "reconnect", "submit"), ("Disconnect", "disable", "submit")]
+        return _provider_configuration_form_html(data, live_actions, hide_credentials=True)
+    live_actions = [("Connect", "save", "submit")]
+    if _provider_has_enough_configuration(data):
+        live_actions.append(("Test connection", "test", "submit"))
+    if status in {"Needs attention", "Signed in, but no data received", "Historical data only", "Waiting for setup"}:
+        live_actions.append(("Reconnect", "reconnect", "submit"))
+        live_actions.append(("Disconnect", "disable", "submit"))
     return _provider_configuration_form_html(data, live_actions)
 
 
@@ -5037,6 +5095,9 @@ def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flas
         last_updated = "Configured" if status == "Connected" else "Needs setup"
     elif kind == "import" and status == "Latest upload available":
         last_updated = _format_source_timestamp(onboarding.get("last_successful_sync"), "Uploaded previously")
+    next_refresh = _provider_next_refresh_label(kind, onboarding)
+    data_available = _provider_data_available_label(provider_id, data, onboarding)
+    action_needed = str(onboarding.get("next_step") or "No action needed right now.")
     setup_body = f"""
       <div class="provider-guidance-grid">
         <div><span>What this needs</span><strong>{html.escape(', '.join(onboarding.get("required_information") or ["Connection details"]))}</strong></div>
@@ -5064,7 +5125,10 @@ def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flas
       <div class="provider-status-grid data-source-grid">
         <div><span>Source</span><strong>{html.escape(_source_display_name(provider_id, data))}</strong></div>
         <div><span>Status</span><strong>{html.escape(status)}</strong></div>
-        <div><span>Last updated</span><strong>{html.escape(last_updated)}</strong></div>
+        <div><span>Last successful refresh</span><strong>{html.escape(last_updated)}</strong></div>
+        <div><span>Next refresh</span><strong>{html.escape(next_refresh)}</strong></div>
+        <div><span>Data available</span><strong>{html.escape(data_available)}</strong></div>
+        <div><span>Action needed</span><strong>{html.escape(trust_wording(action_needed))}</strong></div>
       </div>
       {_provider_flash_html(provider_id, provider_flash)}
       <div class="source-provides"><span>Provides</span><ul>{provides}</ul></div>
@@ -6847,6 +6911,15 @@ def write_html(
     .trust-checklist li {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; }}
     .trust-checklist li span {{ text-align:right; text-transform:none; letter-spacing:0; font-size:11px; font-weight:650; }}
     .provider-config-form {{ display:grid; gap:12px; margin-top:12px; padding:12px; background:rgba(255,255,255,.78); border:1px solid rgba(210,220,214,.7); border-radius:12px; }}
+    .provider-account-summary {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    .provider-account-summary div {{ padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
+    .provider-account-summary span,.provider-account-summary strong {{ display:block; }}
+    .provider-account-summary span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .provider-account-summary strong {{ margin-top:4px; font-size:12px; }}
+    .credential-editor {{ padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
+    .credential-editor summary {{ cursor:pointer; color:var(--deep); font-size:12px; font-weight:800; }}
+    .credential-editor .provider-form-grid {{ margin-top:10px; }}
+    .credential-save-row {{ margin-top:10px; }}
     .provider-form-section > span {{ display:block; margin:0 0 8px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
     .provider-form-grid label {{ display:block; padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; }}
@@ -7024,7 +7097,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

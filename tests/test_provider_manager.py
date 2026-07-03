@@ -199,7 +199,7 @@ class ProviderManagerTests(unittest.TestCase):
             or "Unable to connect" in connected["user_message"]
         )
 
-    def test_connected_state_requires_successful_test_and_data_retrieval(self):
+    def test_solaredge_test_connection_requires_data_retrieval_before_connected(self):
         with TemporaryDirectory() as directory:
             paths = manager_paths(directory)
             manager = ProviderManager(
@@ -217,11 +217,39 @@ class ProviderManagerTests(unittest.TestCase):
 
             manager.action("solaredge", "save", {"cookie": "redaction-fixture-cookie"})
             test = manager.action("solaredge", "test").as_dict()
-            refreshed = ProviderManager(registry(), **paths).get("solaredge")
+            refreshed = ProviderManager(registry(), **paths).get("solaredge").as_dict()
 
-            self.assertTrue(test["success"])
-            self.assertEqual(test["user_message"], "Connected successfully.")
-            self.assertEqual(refreshed.lifecycle_state, ProviderConnectionStatus.CONNECTED)
+            self.assertFalse(test["success"])
+            self.assertEqual(test["status"], "warning")
+            self.assertIn("Signed in, but no recent solar data was received", test["user_message"])
+            self.assertNotEqual(refreshed["lifecycle_state"], "CONNECTED")
+
+    def test_solaredge_signed_in_without_data_has_clear_warning_status(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(
+                registry(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": False,
+                        "authentication_status": "authenticated",
+                        "available_datasets": [],
+                        "warnings": ["Signed in, but no recent solar data was received."],
+                        "status": "warning",
+                        "measurements": 0,
+                    }
+                },
+                **paths,
+            )
+
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            test = manager.action("solaredge", "test").as_dict()
+            refreshed = ProviderManager(registry(), **paths).get("solaredge").as_dict()
+
+            self.assertFalse(test["success"])
+            self.assertEqual(test["status"], "warning")
+            self.assertEqual(test["user_message"], "Signed in, but no recent solar data was received.")
+            self.assertEqual(refreshed["onboarding"]["health_status"], "Signed in, but no recent solar data was received.")
 
     def test_successful_solaredge_test_after_credentials_marks_provider_connected(self):
         with TemporaryDirectory() as directory:
@@ -247,6 +275,35 @@ class ProviderManagerTests(unittest.TestCase):
             self.assertTrue(test["success"])
             self.assertEqual(refreshed["lifecycle_state"], "CONNECTED")
             self.assertTrue(refreshed["onboarding"]["connected"])
+
+    def test_solaredge_reconnect_uses_refresh_collect_handler_and_reports_regeneration(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            calls = []
+            manager = ProviderManager(
+                registry(),
+                reconnect_handlers={
+                    "solaredge": lambda: calls.append("reconnect") or {
+                        "success": True,
+                        "authentication_status": "authenticated",
+                        "available_datasets": ["daily_summary"],
+                        "warnings": [],
+                        "measurements": 48,
+                        "data_retrieved": True,
+                        "report_regenerated": True,
+                    }
+                },
+                **paths,
+            )
+
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            reconnect = manager.action("solaredge", "reconnect").as_dict()
+            refreshed = ProviderManager(registry(), **paths).get("solaredge").as_dict()
+
+            self.assertEqual(calls, ["reconnect"])
+            self.assertTrue(reconnect["success"])
+            self.assertIn("Dashboard regenerated", reconnect["next_step"])
+            self.assertEqual(refreshed["lifecycle_state"], "CONNECTED")
 
     def test_solaredge_adapter_test_result_is_normalized_with_guidance(self):
         manager = ProviderManager(

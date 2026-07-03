@@ -65,6 +65,10 @@ class SolarEdgeUnavailable(SessionRefreshFailure):
     pass
 
 
+class NoRecentSolarData(RuntimeError):
+    pass
+
+
 SECRET_PATTERNS = (
     (re.compile(r"(Cookie:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
     (re.compile(r"(Authorization:\s*)[^\n\r]+", re.IGNORECASE), r"\1REDACTED"),
@@ -109,22 +113,52 @@ class SolarEdgeAdapter:
         output_path = TEMP_OUTFILE.with_name("solaredge-runtime-test.json.tmp")
         output_path.unlink(missing_ok=True)
         started = datetime.now().astimezone()
+        sample_day = None
         try:
-            try:
-                status = fetch_solaredge(read_session_header(), date.today(), output_path)
-            except AuthenticationFailure:
-                refresh_solaredge_session()
-                status = fetch_solaredge(read_session_header(), date.today(), output_path)
-            measurements = validate_response(output_path, date.today())
+            status, measurements, sample_day = fetch_usable_sample(output_path)
             success = True
+            auth_status = "authenticated"
             warning = None
+        except NoRecentSolarData as exc:
+            status = "no_recent_data"
+            measurements = 0
+            success = False
+            auth_status = "authenticated"
+            warning = safe_error_message(exc)
         except Exception as exc:
             status = "failed"
             measurements = 0
             success = False
+            auth_status = "not_authenticated"
             warning = safe_error_message(exc)
         finally:
             output_path.unlink(missing_ok=True)
+        duration_ms = int((datetime.now().astimezone() - started).total_seconds() * 1000)
+        return {
+            "success": success,
+            "authentication_status": auth_status,
+            "provider_version": "solaredge-monitoring-local",
+            "available_datasets": ["interval_history", "daily_summary"] if success else [],
+            "warnings": [warning] if warning else [],
+            "response_time_ms": duration_ms,
+            "measurements": measurements,
+            "http_status": status,
+            "sample_date": sample_day.isoformat() if sample_day else None,
+            "data_retrieved": bool(measurements),
+        }
+
+    def reconnect(self) -> dict:
+        started = datetime.now().astimezone()
+        try:
+            refresh_solaredge_session()
+            collect_recent()
+            success = True
+            warning = None
+            status = "collection_complete"
+        except Exception as exc:
+            success = False
+            warning = safe_error_message(exc)
+            status = "failed"
         duration_ms = int((datetime.now().astimezone() - started).total_seconds() * 1000)
         return {
             "success": success,
@@ -133,8 +167,10 @@ class SolarEdgeAdapter:
             "available_datasets": ["interval_history", "daily_summary"] if success else [],
             "warnings": [warning] if warning else [],
             "response_time_ms": duration_ms,
-            "measurements": measurements,
+            "measurements": 1 if success else 0,
             "http_status": status,
+            "data_retrieved": success,
+            "report_regenerated": success,
         }
 
     def discover_capabilities(self) -> list[ProviderCapability]:
@@ -257,6 +293,32 @@ def validate_response(path: Path, expected_day: date) -> int:
     if not usable_measurements:
         raise ValueError("SolarEdge response contains no usable power values")
     return len(measurements)
+
+
+def fetch_usable_sample(output_path: Path, days: int = 7) -> tuple[str, int, date]:
+    try:
+        session_header = read_session_header()
+    except AuthenticationFailure:
+        refresh_solaredge_session()
+        session_header = read_session_header()
+
+    current_day = date.today()
+    last_error = "No recent SolarEdge data was received."
+    for offset in range(max(1, days)):
+        sample_day = current_day - timedelta(days=offset)
+        output_path.unlink(missing_ok=True)
+        try:
+            status = fetch_solaredge(session_header, sample_day, output_path)
+            measurements = validate_response(output_path, sample_day)
+            return status, measurements, sample_day
+        except AuthenticationFailure:
+            raise
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            last_error = safe_error_message(exc)
+            continue
+        finally:
+            output_path.unlink(missing_ok=True)
+    raise NoRecentSolarData(f"Signed in, but no recent solar data was received. {last_error}")
 
 
 def build_url(today: str) -> str:

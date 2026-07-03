@@ -95,6 +95,21 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         refresh_mock.assert_called_once()
         self.assertEqual(fetch_mock.call_args.args[0], "SESSION=fresh")
 
+    def test_solaredge_test_connection_warns_when_signed_in_but_no_data(self):
+        with TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "solaredge_cookie.txt"
+            cookie_path.write_text("SESSION=fresh\n", encoding="utf-8")
+
+            with patch.object(collect_today, "COOKIE_PATH", cookie_path), \
+                patch.object(collect_today, "fetch_solaredge", return_value="200"), \
+                patch.object(collect_today, "validate_response", side_effect=ValueError("SolarEdge response has no measurements")):
+                result = collect_today.SolarEdgeAdapter().test_connection()
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["authentication_status"], "authenticated")
+        self.assertEqual(result["http_status"], "no_recent_data")
+        self.assertIn("Signed in, but no recent solar data was received", result["warnings"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

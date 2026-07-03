@@ -132,8 +132,8 @@ class MobilePresentationTests(unittest.TestCase):
                 "actions": ["configure"],
                 "configuration": {
                     "credentials": [
-                        {"field": "username", "label": "Username/Email", "required": True, "sensitive": False, "configured": False},
-                        {"field": "password", "label": "Password", "required": True, "sensitive": True, "configured": False},
+                        {"field": "username", "label": "Username/Email", "required": True, "sensitive": True, "configured": True},
+                        {"field": "password", "label": "Password", "required": True, "sensitive": True, "configured": True},
                     ],
                     "entity_mapping": None,
                 },
@@ -147,7 +147,10 @@ class MobilePresentationTests(unittest.TestCase):
                     "required_information": ["SolarEdge session"],
                     "why_required": "Solar access lets PowerMonitor explain generation.",
                     "recovery_steps": ["Run Test Connection"],
-                    "technical_details": {},
+                    "health_status": "Healthy.",
+                    "next_scheduled_sync": "2026-07-02T20:40:00+08:00",
+                    "next_step": "No action needed right now.",
+                    "technical_details": {"lifecycle_state": "CONNECTED", "sync_state": "SYNCED"},
                 },
             },
         )
@@ -159,19 +162,32 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("SolarEdge", html)
         self.assertIn("Solar export", html)
         self.assertIn("Daily production", html)
-        self.assertIn("Connect", html)
-        self.assertIn("Test Connection", html)
+        self.assertNotIn(">Connect<", html)
+        self.assertIn("Test connection", html)
+        self.assertIn("Reconnect", html)
+        self.assertIn("Edit credentials", html)
+        self.assertIn("Connected account", html)
+        self.assertIn("Credentials", html)
+        self.assertIn("Hidden for privacy", html)
         self.assertIn("Disconnect", html)
         self.assertIn('class="provider-config-form" data-provider-id="solaredge" method="post" action="/api/providers/solaredge/save"', html)
         self.assertIn('name="provider_id" value="solaredge"', html)
         self.assertIn('name="username"', html)
         self.assertIn('name="password"', html)
-        self.assertIn('name="provider_action" value="save" formaction="/api/providers/solaredge/save"', html)
         self.assertIn('name="provider_action" value="test" formaction="/api/providers/solaredge/test"', html)
         self.assertNotIn('action="/setup/billing-cycle"', html)
         self.assertIn("provider-config-form", html)
+        self.assertIn("Last successful refresh", html)
+        self.assertIn("Next refresh", html)
+        self.assertIn("Data available", html)
+        self.assertIn("Action needed", html)
         self.assertNotIn("Upload latest file", html)
         self.assertNotIn("Replace upload", html)
+        before_advanced = html.split("Advanced Diagnostics", 1)[0]
+        self.assertNotIn("Runtime state", before_advanced)
+        self.assertNotIn("Sync state", before_advanced)
+        self.assertNotIn("Lifecycle", before_advanced)
+        self.assertNotIn("Observation count", before_advanced)
 
         flash_html = report.provider_management_html(
             SimpleNamespace(providers=lambda: [provider]),

@@ -1,5 +1,22 @@
 # Changelog
 
+## LD-001 - Live Data Lifecycle
+
+- Tightened SolarEdge Test Connection so it verifies usable recent solar data,
+  not just authentication.
+- Added a clear "Signed in, but no recent solar data was received" warning
+  when credentials work but SolarEdge returns no usable readings.
+- Made SolarEdge Reconnect run the refresh/import/report path so successful
+  reconnects update readings and regenerate the dashboard.
+- Updated provider lifecycle recording so SolarEdge only becomes Connected
+  after data retrieval succeeds.
+- Reworked live provider cards to show homeowner-facing status, last
+  successful refresh, next refresh, data available, what PowerMonitor receives,
+  and action needed, with runtime/sync/lifecycle details kept in Advanced
+  Diagnostics.
+- Hid connected-provider credential fields behind Edit credentials and removed
+  the Connect button once a live provider is connected.
+
 ## Bugfix - Provider Action UX and SolarEdge Test Flow
 
 - Changed browser-submitted provider actions to redirect back to the System

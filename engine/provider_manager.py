@@ -58,7 +58,7 @@ class ProviderSyncState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-SENSITIVE_FIELDS = {"password", "cookie", "api_key", "token", "secret"}
+SENSITIVE_FIELDS = {"username", "password", "cookie", "api_key", "token", "secret"}
 SOLAREDGE_PRIMARY_FIELDS = {"username", "password"}
 SOLAREDGE_COOKIE_FALLBACK_FIELDS = {"cookie"}
 
@@ -325,6 +325,7 @@ class ProviderManager:
         promotion_summary: Optional[dict[str, Any]] = None,
         runtime_status: Optional[dict[str, Any]] = None,
         connection_testers: Optional[dict[str, Any]] = None,
+        reconnect_handlers: Optional[dict[str, Any]] = None,
         settings: Any = None,
         provider_entity_mappings: Optional[dict[str, Any]] = None,
         entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
@@ -339,6 +340,7 @@ class ProviderManager:
         self.promotion_summary = promotion_summary or {}
         self.runtime_status = runtime_status or {}
         self.connection_testers = connection_testers or {}
+        self.reconnect_handlers = reconnect_handlers or {}
         self.settings = settings
         self.provider_entity_mappings = provider_entity_mappings or {}
         self.entity_mapping_store_path = entity_mapping_store_path
@@ -412,7 +414,15 @@ class ProviderManager:
             raw = {"success": False, "warnings": [str(exc)], "authentication_status": "not_authenticated"}
         success = bool(raw.get("success"))
         warnings = [str(item) for item in raw.get("warnings", []) if item]
-        status = "success" if success and not warnings else "warning" if success else "failure"
+        if provider.provider_id == "solaredge" and success:
+            data_retrieved = bool(raw.get("data_retrieved")) or int(raw.get("measurements") or 0) > 0
+            if not data_retrieved:
+                success = False
+                raw["authentication_status"] = raw.get("authentication_status") or "authenticated"
+                if not warnings:
+                    warnings.append("Signed in, but no recent solar data was received.")
+                raw["status"] = "warning"
+        status = str(raw.get("status") or ("success" if success and not warnings else "warning" if success or str(raw.get("authentication_status")) == "authenticated" else "failure"))
         datasets = raw.get("available_datasets") or []
         return ProviderTestResult(
             provider_id=provider.provider_id,
@@ -429,6 +439,9 @@ class ProviderManager:
             technical_details={
                 "http_status": raw.get("http_status"),
                 "measurements": raw.get("measurements"),
+                "data_retrieved": raw.get("data_retrieved"),
+                "sample_date": raw.get("sample_date"),
+                "report_regenerated": raw.get("report_regenerated"),
                 "adapter": "runtime",
                 "entity_mapping": raw.get("entity_mapping"),
             },
@@ -442,7 +455,10 @@ class ProviderManager:
         if result.success:
             record["last_successful_test_at"] = now
             record.pop("last_connection_error", None)
-            data_returned = bool(result.available_datasets) or bool(result.technical_details.get("measurements"))
+            if provider_id == "solaredge":
+                data_returned = bool(result.technical_details.get("data_retrieved")) or int(result.technical_details.get("measurements") or 0) > 0
+            else:
+                data_returned = bool(result.available_datasets) or bool(result.technical_details.get("data_retrieved")) or int(result.technical_details.get("measurements") or 0) > 0
             if data_returned:
                 record["last_successful_data_at"] = now
                 record["last_successful_sync_at"] = now
@@ -556,7 +572,15 @@ class ProviderManager:
                 )
             return self._state_action(provider_id, "reset", enabled=True, removed=False, message="Provider settings were reset to recommended local defaults.")
         if normalized == "reconnect":
-            test_result = self.test_connection(provider_id)
+            reconnecter = self.reconnect_handlers.get(provider_id)
+            if reconnecter:
+                provider = self.get(provider_id)
+                if provider is None:
+                    raise ValueError(f"Unknown provider: {provider_id}")
+                test_result = self._adapter_test_connection(provider, reconnecter)
+                self._record_connection_test(provider_id, test_result)
+            else:
+                test_result = self.test_connection(provider_id)
             status = "success" if test_result.success else test_result.status
             refreshed = self.get(provider_id)
             return ProviderActionResult(
@@ -565,7 +589,11 @@ class ProviderManager:
                 success=test_result.success,
                 status=status,
                 user_message=test_result.user_message,
-                next_step=test_result.next_step,
+                next_step=(
+                    "Dashboard regenerated with the latest available SolarEdge data."
+                    if test_result.success and test_result.technical_details.get("report_regenerated")
+                    else test_result.next_step
+                ),
                 test=test_result.as_dict(),
                 provider=refreshed.as_dict() if refreshed else None,
                 technical_details={"reconnect": "test_connection", **test_result.technical_details},
@@ -790,6 +818,7 @@ def build_provider_management(
     promotion_summary: Optional[dict[str, Any]] = None,
     runtime_status: Optional[dict[str, Any]] = None,
     connection_testers: Optional[dict[str, Any]] = None,
+    reconnect_handlers: Optional[dict[str, Any]] = None,
     settings: Any = None,
     provider_entity_mappings: Optional[dict[str, Any]] = None,
     entity_mapping_store_path: Path = DEFAULT_PROVIDER_MAPPING_PATH,
@@ -805,6 +834,7 @@ def build_provider_management(
         promotion_summary=promotion_summary,
         runtime_status=runtime_status,
         connection_testers=connection_testers,
+        reconnect_handlers=reconnect_handlers,
         settings=settings,
         provider_entity_mappings=provider_entity_mappings,
         entity_mapping_store_path=entity_mapping_store_path,
@@ -914,6 +944,8 @@ def _test_user_message(status: str, warnings: list[str]) -> str:
         return "Connected successfully."
     if status == "warning":
         detail = warnings[0] if warnings else "The provider responded, but some checks need attention."
+        if "signed in" in detail.lower() and "no recent solar data" in detail.lower():
+            return "Signed in, but no recent solar data was received."
         return f"Connected with a warning: {detail}"
     detail = warnings[0] if warnings else "PowerMonitor could not connect to the provider."
     lowered = detail.lower()
@@ -932,7 +964,7 @@ def _test_next_step(status: str) -> str:
     if status == "success":
         return "Keep this provider connected and watch the next scheduled sync."
     if status == "warning":
-        return "Review the warning, then run Test Connection again after fixing it."
+        return "Check the provider has recent data, then run Test Connection again."
     return "Update the saved username/password or refresh the provider session, then run Test Connection again."
 
 
