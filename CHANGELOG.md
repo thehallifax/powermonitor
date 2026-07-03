@@ -1,5 +1,17 @@
 # Changelog
 
+## Bugfix - SolarEdge Log In Candidate Click
+
+- Removed the requirement for `div#se-signing-mfe` to exist before attempting
+  the initial SolarEdge `Log in` button click.
+- Changed initial login handling to iterate all candidate selectors and click
+  the first visible, enabled candidate.
+- Added `text="Log in"` and `role=button[name=/log in/i]` candidate selectors.
+- Extended safe debug metadata with selector attempts, candidate counts,
+  visible counts, clicked selector, and skip reasons when candidates are found
+  but none can be clicked.
+- Added regression coverage for candidate-found-but-not-clicked diagnostics.
+
 ## Bugfix - SolarEdge Initial Log In Button Selector
 
 - Made SolarEdge session refresh wait for `div#se-signing-mfe` before looking

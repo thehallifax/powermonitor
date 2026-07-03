@@ -25,6 +25,9 @@ class FakeLoginElement:
     def is_visible(self, timeout=None):
         return True
 
+    def is_enabled(self, timeout=None):
+        return True
+
     def fill(self, value):
         if "password" in self.selector:
             self.page.password_filled = True
@@ -62,6 +65,9 @@ class FakeLoginLocator:
 
     def first(self):
         return FakeLoginElement(self.page, self.selector)
+
+    def nth(self, index):
+        return self.first()
 
 
 class FakeLoginPage:
@@ -135,8 +141,31 @@ class FakeInitialLoginLocator(FakeLoginLocator):
     def first(self):
         return FakeInitialLoginElement(self.page, self.selector)
 
+    def nth(self, index):
+        return self.first()
+
 
 FakeInitialLoginPage.locator = lambda self, selector: FakeInitialLoginLocator(self, selector)
+
+
+class FakeHiddenInitialLoginElement(FakeInitialLoginElement):
+    def is_visible(self, timeout=None):
+        return False
+
+
+class FakeHiddenInitialLoginLocator(FakeInitialLoginLocator):
+    def first(self):
+        return FakeHiddenInitialLoginElement(self.page, self.selector)
+
+    def nth(self, index):
+        return self.first()
+
+
+class FakeHiddenInitialLoginPage(FakeInitialLoginPage):
+    pass
+
+
+FakeHiddenInitialLoginPage.locator = lambda self, selector: FakeHiddenInitialLoginLocator(self, selector)
 
 
 class FakeSitePage(FakeLoginPage):
@@ -281,6 +310,27 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(page.password_filled)
         self.assertTrue(page.submitted)
         self.assertEqual(page.url, "https://monitoring.solaredge.com/solaredge-web/p/login")
+
+    def test_solaredge_login_candidate_buttons_explain_skip_when_not_clicked(self):
+        with TemporaryDirectory() as directory:
+            debug_dir = Path(directory) / "debug"
+            page = FakeHiddenInitialLoginPage()
+            with patch.object(refresh_solaredge_session, "DEBUG_DIR", debug_dir):
+                with self.assertRaises(refresh_solaredge_session.RefreshError) as context:
+                    refresh_solaredge_session.login(page, "user@example.com", "redaction-fixture-password")
+
+            message = str(context.exception)
+            debug_files = list(debug_dir.glob("solaredge-login-*.json"))
+            metadata = json.loads(debug_files[0].read_text(encoding="utf-8"))
+
+        self.assertIn("initial_login_button_found=True", message)
+        self.assertIn("initial_login_button_clicked=False", message)
+        self.assertIn("initial_login_button_visible_candidates=0", message)
+        self.assertTrue(metadata["initial_login_button_found"])
+        self.assertFalse(metadata["initial_login_button_clicked"])
+        self.assertGreater(metadata["initial_login_button_candidates"], 0)
+        self.assertEqual(metadata["initial_login_button_visible_candidates"], 0)
+        self.assertTrue(any("not_visible" in " ".join(item["skipped"]) for item in metadata["initial_login_candidate_details"]))
 
     def test_solaredge_login_failure_reports_mfe_and_button_candidate_counts(self):
         with TemporaryDirectory() as directory:

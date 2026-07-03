@@ -67,10 +67,12 @@ SIGN_IN_SELECTORS = (
 INITIAL_LOGIN_SELECTORS = (
     "#se-signing-mfe button:has-text('Log in')",
     '#se-signing-mfe button:has-text("Log in")',
+    'button:has-text("Log in")',
+    "button:has-text('Log in')",
     "button[type='button']:has-text('Log in')",
     'button[type="button"]:has-text("Log in")',
-    "button:has-text('Log in')",
-    'button:has-text("Log in")',
+    'text="Log in"',
+    "role=button[name=/log in/i]",
     "button:has-text('Login')",
     "button:has-text('Sign in')",
     "a:has-text('Log in')",
@@ -286,6 +288,8 @@ def login_failure_message(
         f"initial_login_button_clicked={bool(extra.get('initial_login_button_clicked'))}; "
         f"signing_mfe_found={bool(extra.get('signing_mfe_found'))}; "
         f"initial_login_button_candidates={int(extra.get('initial_login_button_candidates') or 0)}; "
+        f"initial_login_button_visible_candidates={int(extra.get('initial_login_button_visible_candidates') or 0)}; "
+        f"initial_login_clicked_selector={extra.get('initial_login_clicked_selector') or ''}; "
         f"field_search_attempts={int(extra.get('field_search_attempts') or 0)}; "
         f"debug={debug_path}"
     )
@@ -312,6 +316,95 @@ def wait_for_initial_login_shell(page) -> bool:
     except Exception:
         pass
     return selector_found(page, ("div#se-signing-mfe", "#se-signing-mfe"))
+
+
+def locator_item(locator, index: int):
+    try:
+        return locator.nth(index)
+    except Exception:
+        if index == 0:
+            return locator.first()
+        raise
+
+
+def element_visible(element) -> bool:
+    try:
+        return bool(element.is_visible(timeout=1000))
+    except TypeError:
+        try:
+            return bool(element.is_visible())
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def element_enabled(element) -> bool:
+    try:
+        return bool(element.is_enabled(timeout=1000))
+    except TypeError:
+        try:
+            return bool(element.is_enabled())
+        except Exception:
+            return True
+    except AttributeError:
+        return True
+    except Exception:
+        return False
+
+
+def click_initial_login_button(page) -> tuple[object, dict]:
+    details = []
+    total_candidates = 0
+    visible_candidates = 0
+    for selector in INITIAL_LOGIN_SELECTORS:
+        selector_detail = {
+            "selector": selector,
+            "candidate_count": 0,
+            "visible_count": 0,
+            "skipped": [],
+        }
+        try:
+            locator = page.locator(selector)
+            count = int(locator.count())
+        except Exception as exc:
+            selector_detail["skipped"].append(f"selector_error:{type(exc).__name__}")
+            details.append(selector_detail)
+            continue
+        selector_detail["candidate_count"] = count
+        total_candidates += count
+        for index in range(count):
+            try:
+                candidate = locator_item(locator, index)
+            except Exception as exc:
+                selector_detail["skipped"].append(f"{index}:locator_error:{type(exc).__name__}")
+                continue
+            if not element_visible(candidate):
+                selector_detail["skipped"].append(f"{index}:not_visible")
+                continue
+            selector_detail["visible_count"] += 1
+            visible_candidates += 1
+            if not element_enabled(candidate):
+                selector_detail["skipped"].append(f"{index}:not_enabled")
+                continue
+            candidate.click()
+            return candidate, {
+                "initial_login_button_found": True,
+                "initial_login_button_clicked": True,
+                "initial_login_button_candidates": total_candidates,
+                "initial_login_button_visible_candidates": visible_candidates,
+                "initial_login_clicked_selector": selector,
+                "initial_login_candidate_details": details + [selector_detail],
+            }
+        details.append(selector_detail)
+    return None, {
+        "initial_login_button_found": total_candidates > 0,
+        "initial_login_button_clicked": False,
+        "initial_login_button_candidates": total_candidates,
+        "initial_login_button_visible_candidates": visible_candidates,
+        "initial_login_clicked_selector": "",
+        "initial_login_candidate_details": details,
+    }
 
 
 def wait_after_initial_login_click(page) -> None:
@@ -452,26 +545,31 @@ def login(page, username: str, password: str) -> None:
     initial_button = None
     initial_clicked = False
     signing_mfe_found = wait_for_initial_login_shell(page)
-    initial_button_candidates = 0
+    initial_button_metadata = {
+        "initial_login_button_found": False,
+        "initial_login_button_clicked": False,
+        "initial_login_button_candidates": 0,
+        "initial_login_button_visible_candidates": 0,
+        "initial_login_clicked_selector": "",
+        "initial_login_candidate_details": [],
+    }
     username_field, password_field, field_search_attempts = wait_for_login_fields(page)
     if username_field is None and password_field is None:
-        initial_button_candidates = selector_count(page, INITIAL_LOGIN_SELECTORS)
-        initial_button = find_first(page, INITIAL_LOGIN_SELECTORS)
-        if initial_button is not None:
-            initial_button.click()
+        initial_button, initial_button_metadata = click_initial_login_button(page)
+        if initial_button_metadata["initial_login_button_clicked"]:
             initial_clicked = True
             wait_after_initial_login_click(page)
             username_field, password_field, retry_attempts = wait_for_login_fields(page)
             field_search_attempts += retry_attempts
     url_after_initial_click = str(getattr(page, "url", "") or "")
     login_metadata = {
-        "initial_login_button_found": initial_button is not None,
+        "initial_login_button_found": initial_button_metadata["initial_login_button_found"],
         "initial_login_button_clicked": initial_clicked,
         "signing_mfe_found": signing_mfe_found,
-        "initial_login_button_candidates": initial_button_candidates,
         "url_before_initial_login_click": url_before_initial_click,
         "url_after_initial_login_click": url_after_initial_click,
         "field_search_attempts": field_search_attempts,
+        **initial_button_metadata,
     }
     if username_field is None:
         raise RefreshError(
