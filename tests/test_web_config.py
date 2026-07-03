@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import web
+from engine.tariff_catalog import SUPPORTED_PLANS
 
 
 class WebConfigTests(unittest.TestCase):
@@ -104,10 +105,29 @@ class WebConfigTests(unittest.TestCase):
         self.assertEqual(saved["state_or_territory"], "WA")
         self.assertEqual(saved["tariff_setup_mode"], "catalog")
         self.assertEqual(saved["current_plan"], "synergy_home_plan")
-        self.assertEqual(saved["import_rates"]["peak"], 0.30)
+        self.assertEqual(saved["import_rates"]["peak"], 0.327582)
         self.assertEqual(updated["comparison_plan_rates"]["flat_import_rate"], 0.30)
 
     def test_wa_synergy_ev_add_on_selection_applies_catalog_rates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Path(temp_dir) / "settings.json"
+
+            updated = web.update_billing_cycle_settings(
+                settings,
+                billing_period_start_day="6",
+                state_or_territory="WA",
+                retailer="synergy",
+                current_plan="synergy_ev_add_on",
+            )
+
+        self.assertEqual(updated["retailer"], "Synergy")
+        self.assertEqual(updated["retailer_id"], "synergy")
+        self.assertEqual(updated["current_plan"], "synergy_ev_add_on")
+        self.assertEqual(updated["tariff_add_on"], "none")
+        self.assertAlmostEqual(updated["import_rates"]["peak"], 0.538446)
+        self.assertAlmostEqual(updated["import_rates"]["super_off_peak"], 0.086151)
+
+    def test_ev_add_on_is_not_applied_as_separate_add_on(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Path(temp_dir) / "settings.json"
 
@@ -120,12 +140,22 @@ class WebConfigTests(unittest.TestCase):
                 tariff_add_on="ev_add_on",
             )
 
-        self.assertEqual(updated["retailer"], "Synergy")
-        self.assertEqual(updated["retailer_id"], "synergy")
-        self.assertEqual(updated["current_plan"], "synergy_ev_add_on")
-        self.assertEqual(updated["tariff_add_on"], "ev_add_on")
-        self.assertAlmostEqual(updated["import_rates"]["peak"], 0.538446)
-        self.assertAlmostEqual(updated["import_rates"]["super_off_peak"], 0.086151)
+        self.assertEqual(updated["current_plan"], "synergy_home_plan")
+        self.assertEqual(updated["tariff_add_on"], "none")
+        self.assertAlmostEqual(updated["import_rates"]["peak"], 0.327582)
+
+    def test_catalogue_plans_have_distinct_rates_and_windows(self):
+        home = SUPPORTED_PLANS["synergy_home_plan"]
+        ev = SUPPORTED_PLANS["synergy_ev_add_on"]
+        previous = SUPPORTED_PLANS["previous_flat_or_home_plan"]
+
+        self.assertNotEqual(home.import_rates, ev.import_rates)
+        self.assertNotEqual(home.import_rates, previous.import_rates)
+        self.assertGreater(ev.import_rates["peak"], ev.import_rates["super_off_peak"])
+        self.assertEqual(len(set(home.import_rates.values())), 1)
+        self.assertEqual(len(set(previous.import_rates.values())), 1)
+        self.assertIn("9am-3pm", " ".join(ev.tariff_windows))
+        self.assertIn("Flat anytime", " ".join(home.tariff_windows))
 
     def test_manual_tariff_fallback_saves_manual_rates(self):
         with tempfile.TemporaryDirectory() as temp_dir:

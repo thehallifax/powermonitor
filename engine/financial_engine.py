@@ -194,6 +194,269 @@ class FinancialEngine:
             "recommendation": recommendation,
         }
 
+    def explain_bill_change(
+        self,
+        current_summary: Any,
+        previous_summary: Optional[Any],
+        settings: Any,
+        *,
+        current_bill: Optional[float] = None,
+        previous_bill: Optional[float] = None,
+        projected: bool = False,
+    ) -> dict[str, Any]:
+        if previous_summary is None:
+            return {
+                "available": False,
+                "reason": "Historical comparison is unavailable.",
+                "narrative": "PowerMonitor cannot explain the bill change yet because a previous completed billing period is unavailable.",
+                "current_bill": current_bill if current_bill is not None else self._number(current_summary, "net_cost"),
+                "previous_bill": None,
+                "difference": None,
+                "contributors": [],
+                "positive_changes": [],
+                "negative_changes": [],
+                "ev_explanation": None,
+                "confidence": "Low",
+            }
+
+        current_total = float(current_bill if current_bill is not None else self._number(current_summary, "net_cost"))
+        previous_total = float(previous_bill if previous_bill is not None else self._number(previous_summary, "net_cost"))
+        difference = current_total - previous_total
+        scale = self._projection_scale(current_summary, current_total)
+        previous_scale = 1.0
+        contributors = self._bill_change_contributors(current_summary, previous_summary, settings, scale, previous_scale)
+        positive = [item for item in contributors if item["impact"] < 0]
+        negative = [item for item in contributors if item["impact"] > 0]
+        ev_explanation = self.ev_bill_explanation(current_summary, settings, scale=scale)
+        confidence = self._bill_change_confidence(current_summary, previous_summary, projected)
+        narrative = self.bill_change_narrative(
+            current_total,
+            previous_total,
+            contributors,
+            projected=projected,
+            confidence=confidence,
+            ev_explanation=ev_explanation,
+        )
+        return {
+            "available": True,
+            "reason": None,
+            "narrative": narrative,
+            "current_bill": current_total,
+            "previous_bill": previous_total,
+            "difference": difference,
+            "contributors": contributors,
+            "positive_changes": positive,
+            "negative_changes": negative,
+            "ev_explanation": ev_explanation,
+            "confidence": confidence,
+        }
+
+    def bill_change_narrative(
+        self,
+        current_bill: float,
+        previous_bill: float,
+        contributors: list[dict[str, Any]],
+        *,
+        projected: bool = False,
+        confidence: str = "Medium",
+        ev_explanation: Optional[dict[str, Any]] = None,
+    ) -> str:
+        difference = current_bill - previous_bill
+        bill_word = "projected to be" if projected else "about"
+        direction = "higher" if difference > 0 else "lower" if difference < 0 else "about the same"
+        if abs(difference) < 0.005:
+            return f"Your bill is {bill_word} about the same as the previous billing period. {confidence} confidence."
+
+        largest = [item for item in contributors if abs(float(item.get("impact") or 0.0)) > 0.005][:2]
+        if largest:
+            reasons = self._join_phrases([str(item["label"]).lower() for item in largest])
+        else:
+            reasons = "the available billing components moved slightly"
+        sentence = (
+            f"Your bill is {bill_word} ${abs(difference):.0f} {direction} than the previous billing period "
+            f"because {reasons}."
+        )
+        if ev_explanation and ev_explanation.get("savings_vs_peak", 0) > 0:
+            sentence += (
+                f" Off-peak charging has saved approximately ${ev_explanation['savings_vs_peak']:.0f} "
+                "compared with charging during peak periods."
+            )
+        sentence += f" {confidence} confidence."
+        return sentence
+
+    def ev_bill_explanation(self, summary: Any, settings: Any, *, scale: float = 1.0) -> Optional[dict[str, Any]]:
+        source = str(self._value(summary, "ev_charging_source", "") or "")
+        if source not in {"ocular_export", "home_assistant_ocpp"}:
+            return None
+        energy = self._number(summary, "actual_ev_charging_kwh") or self._number(summary, "ev_charging_kwh")
+        cost = self._number(summary, "actual_ev_charging_cost") or self._number(summary, "ev_charging_cost")
+        energy *= scale
+        cost *= scale
+        import_rates = self._value(settings, "import_rates", {}) or {}
+        peak_rate = float(import_rates.get("peak", 0.0) or 0.0)
+        peak_cost = energy * peak_rate
+        savings_vs_peak = max(peak_cost - cost, 0.0)
+        petrol_equivalent = self._petrol_equivalent_cost(summary, settings, energy)
+        return {
+            "available": True,
+            "source": source,
+            "total_energy_kwh": energy,
+            "charging_cost": cost,
+            "cost_if_all_peak": peak_cost,
+            "savings_vs_peak": savings_vs_peak,
+            "petrol_equivalent_cost": petrol_equivalent,
+        }
+
+    def _bill_change_contributors(
+        self,
+        current: Any,
+        previous: Any,
+        settings: Any,
+        current_scale: float,
+        previous_scale: float,
+    ) -> list[dict[str, Any]]:
+        items = []
+
+        def add(label: str, impact: float, detail: str, category: str) -> None:
+            if abs(impact) < 0.005:
+                return
+            items.append(
+                {
+                    "label": label,
+                    "impact": impact,
+                    "direction": "extra_cost" if impact > 0 else "saving",
+                    "detail": detail,
+                    "category": category,
+                }
+            )
+
+        current_ev_cost = self._number(current, "ev_charging_cost") * current_scale
+        previous_ev_cost = self._number(previous, "ev_charging_cost") * previous_scale
+        if self._has_ev_data(current) or self._has_ev_data(previous):
+            current_ev_kwh = self._number(current, "ev_charging_kwh") * current_scale
+            previous_ev_kwh = self._number(previous, "ev_charging_kwh") * previous_scale
+            add(
+                "EV charging increased" if current_ev_cost >= previous_ev_cost else "EV charging decreased",
+                current_ev_cost - previous_ev_cost,
+                f"EV charging moved from {previous_ev_kwh:.1f} kWh to {current_ev_kwh:.1f} kWh.",
+                "ev",
+            )
+
+        for bucket, label in (
+            ("peak", "Peak usage"),
+            ("off_peak", "Off-peak usage"),
+            ("overnight", "Overnight usage"),
+            ("super_off_peak", "Super off-peak / EV window usage"),
+        ):
+            current_cost = self._bucket_number(current, bucket, "cost") * current_scale
+            previous_cost = self._bucket_number(previous, bucket, "cost") * previous_scale
+            add(
+                f"{label} increased" if current_cost >= previous_cost else f"{label} decreased",
+                current_cost - previous_cost,
+                f"{label} cost moved from ${previous_cost:.2f} to ${current_cost:.2f}.",
+                bucket,
+            )
+
+        current_export = self._number(current, "export_credit") * current_scale
+        previous_export = self._number(previous, "export_credit") * previous_scale
+        add(
+            "Export credits decreased" if current_export <= previous_export else "Export credits increased",
+            previous_export - current_export,
+            f"Export credits moved from ${previous_export:.2f} to ${current_export:.2f}.",
+            "export_credit",
+        )
+
+        current_supply = self._number(current, "supply_cost") * current_scale
+        previous_supply = self._number(previous, "supply_cost") * previous_scale
+        add(
+            "Supply charge increased" if current_supply >= previous_supply else "Supply charge decreased",
+            current_supply - previous_supply,
+            f"Supply charges moved from ${previous_supply:.2f} to ${current_supply:.2f}.",
+            "supply",
+        )
+
+        current_solar = self._number(current, "solar_generated_kwh") * current_scale
+        previous_solar = self._number(previous, "solar_generated_kwh") * previous_scale
+        average_rate = self.weighted_average_import_rate(current) or self.weighted_average_import_rate(previous)
+        solar_impact = (previous_solar - current_solar) * average_rate
+        add(
+            "Solar generation decreased" if current_solar <= previous_solar else "Solar generation increased",
+            solar_impact,
+            f"Solar generation moved from {previous_solar:.1f} kWh to {current_solar:.1f} kWh.",
+            "solar",
+        )
+
+        current_household = max(self._number(current, "import_cost") * current_scale - current_ev_cost, 0.0)
+        previous_household = max(self._number(previous, "import_cost") * previous_scale - previous_ev_cost, 0.0)
+        add(
+            "General household consumption increased" if current_household >= previous_household else "General household consumption decreased",
+            current_household - previous_household,
+            "Grid import cost after removing identifiable EV charging changed.",
+            "household",
+        )
+
+        current_plan = self._value(current, "current_plan") or self._value(current, "plan_name")
+        previous_plan = self._value(previous, "current_plan") or self._value(previous, "plan_name")
+        if current_plan and previous_plan and current_plan != previous_plan:
+            current_avg_rate = self.weighted_average_import_rate(current)
+            previous_avg_rate = self.weighted_average_import_rate(previous)
+            import_kwh = self._number(current, "grid_import_kwh") * current_scale
+            add(
+                "Tariff changes increased costs" if current_avg_rate >= previous_avg_rate else "Tariff changes reduced costs",
+                (current_avg_rate - previous_avg_rate) * import_kwh,
+                f"Average import rate moved from ${previous_avg_rate:.4f}/kWh to ${current_avg_rate:.4f}/kWh.",
+                "tariff",
+            )
+
+        return sorted(items, key=lambda item: abs(float(item["impact"])), reverse=True)
+
+    def _projection_scale(self, summary: Any, current_bill: float) -> float:
+        net_cost = self._number(summary, "net_cost")
+        if net_cost <= 0:
+            return 1.0
+        return max(float(current_bill) / net_cost, 0.0)
+
+    def _bill_change_confidence(self, current: Any, previous: Any, projected: bool) -> str:
+        current_days = self._number(current, "reading_days")
+        previous_days = self._number(previous, "reading_days")
+        if current_days < 5 or previous_days < 5:
+            return "Low"
+        if projected or current_days < 15:
+            return "Medium"
+        return "High"
+
+    def _has_ev_data(self, summary: Any) -> bool:
+        return str(self._value(summary, "ev_charging_source", "") or "") in {"ocular_export", "home_assistant_ocpp"}
+
+    def _bucket_number(self, summary: Any, bucket: str, field: str) -> float:
+        buckets = self._value(summary, "buckets", {}) or {}
+        values = buckets.get(bucket, {}) if isinstance(buckets, dict) else {}
+        if isinstance(values, dict):
+            return float(values.get(field) or 0.0)
+        return 0.0
+
+    def _petrol_equivalent_cost(self, summary: Any, settings: Any, ev_energy_kwh: float) -> Optional[float]:
+        ev_efficiency = self._value(settings, "ev_kwh_per_100km")
+        petrol_l_per_100km = self._value(settings, "previous_car_l_per_100km")
+        petrol_price = self._value(settings, "petrol_price_per_litre")
+        try:
+            ev_efficiency = float(ev_efficiency)
+            petrol_l_per_100km = float(petrol_l_per_100km)
+            petrol_price = float(petrol_price)
+        except (TypeError, ValueError):
+            return None
+        if ev_efficiency <= 0 or petrol_l_per_100km <= 0 or petrol_price < 0:
+            return None
+        distance_km = ev_energy_kwh / ev_efficiency * 100
+        return distance_km / 100 * petrol_l_per_100km * petrol_price
+
+    def _join_phrases(self, phrases: list[str]) -> str:
+        if not phrases:
+            return ""
+        if len(phrases) == 1:
+            return phrases[0]
+        return ", ".join(phrases[:-1]) + f" and {phrases[-1]}"
+
     def _value(self, source: Any, name: str, default: Any = None) -> Any:
         if isinstance(source, dict):
             return source.get(name, default)

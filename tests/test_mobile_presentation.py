@@ -12,8 +12,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
+from engine.insights_engine import HouseholdInsight
 from engine.models import BriefingPriority, DailyBriefing, DecisionTimeline, FinancialImpact, Goal, GoalProgress, GoalStatus, TimelineEntry
 from engine.provider_framework import ProviderCapability
+from engine.trends_engine import HouseholdRecord, HouseholdTrend, HouseholdTrendsReport
 from presentation.glance import GlanceState
 
 
@@ -231,13 +233,54 @@ class MobilePresentationTests(unittest.TestCase):
             SimpleNamespace(
                 billing_period_start_day=6,
                 retailer="Synergy",
+                retailer_id="synergy",
+                state_or_territory="WA",
                 current_plan="synergy_ev_add_on",
+                tariff_add_on="none",
             )
         )
 
         self.assertIn('id="setup-billing"', html)
         self.assertIn('id="setup-billing-cycle"', html)
         self.assertIn('id="setup-tariff"', html)
+        self.assertIn('class="catalogue-tariff-previews"', html)
+        self.assertIn('data-plan="synergy_ev_add_on"', html)
+        self.assertIn("Super off-peak / EV window", html)
+        self.assertIn('class="manual-tariff-fields"', html)
+        self.assertNotIn("Optional add-on", html)
+        self.assertNotIn('name="tariff_add_on"', html)
+
+    def test_manual_tariff_form_has_manual_plan_without_catalogue_add_on(self):
+        html = report.billing_cycle_setup_html(
+            SimpleNamespace(
+                billing_period_start_day=6,
+                retailer="Manual tariff",
+                retailer_id="manual_tariff",
+                state_or_territory="WA",
+                current_plan="manual_tariff",
+                tariff_add_on="none",
+                import_rates={
+                    "super_off_peak": 0.11,
+                    "overnight": 0.22,
+                    "off_peak": 0.33,
+                    "peak": 0.44,
+                },
+                supply_charge_per_day=1.10,
+                export_credit_rate=0.03,
+            )
+        )
+
+        self.assertIn('<option value="manual_tariff" selected>Manual tariff</option>', html)
+        self.assertIn('class="manual-tariff-fields"', html)
+        self.assertIn('name="manual_import_rate_peak"', html)
+        self.assertNotIn("Optional add-on", html)
+
+    def test_manual_tariff_visibility_is_controlled_by_selected_plan(self):
+        source = (PROJECT_ROOT / "collector" / "report.py").read_text(encoding="utf-8")
+
+        self.assertIn(".manual-tariff-fields {{ display:none;", source)
+        self.assertIn('option[value="manual_tariff"]:checked) .manual-tariff-fields', source)
+        self.assertIn('option[value="manual_tariff"]:checked) .catalogue-tariff-previews', source)
 
     def test_goals_and_glance_have_direct_action_targets(self):
         goal = GoalProgress(
@@ -369,6 +412,68 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn('class="page-breadcrumb"', html)
         self.assertIn('href="#home"', html)
         self.assertIn("Can I trust today&#x27;s advice?", html)
+
+    def test_household_insights_home_section_is_limited_to_three(self):
+        insights = [
+            HouseholdInsight(
+                insight_id=f"insight_{index}",
+                headline=f"Household pattern {index}",
+                explanation="This changed compared with recent household history.",
+                comparison_period="Recent days",
+                confidence="Medium",
+                supporting_values={"Difference": f"{index}%"},
+                topic=f"topic_{index}",
+                usefulness=10.0,
+            )
+            for index in range(5)
+        ]
+
+        html = report.household_insights_html(insights)
+
+        self.assertIn("Interesting things we noticed", html)
+        self.assertIn("Household observations, not action items.", html)
+        self.assertEqual(html.count('class="household-insight-card"'), 3)
+        self.assertIn("Household pattern 0", html)
+        self.assertNotIn("Household pattern 4", html)
+
+    def test_home_trends_records_section_limits_display(self):
+        trends = [
+            HouseholdTrend(
+                trend_id=f"trend_{index}",
+                label=f"Trend {index}",
+                current_value="10.0 kWh",
+                previous_value="8.0 kWh",
+                percentage_change=25.0,
+                direction="up",
+                confidence="Medium",
+                explanation="This changed compared with the previous period.",
+                topic=f"topic_{index}",
+            )
+            for index in range(4)
+        ]
+        records = [
+            HouseholdRecord(
+                record_id=f"record_{index}",
+                label=f"Record {index}",
+                value="12.0 kWh",
+                date="7 Jun",
+                previous_record="10.0 kWh",
+                confidence="Medium",
+                explanation="This is the strongest record PowerMonitor found.",
+                topic=f"record_{index}",
+            )
+            for index in range(3)
+        ]
+
+        html = report.home_trends_records_html(HouseholdTrendsReport(trends, records))
+
+        self.assertIn("Trends and records", html)
+        self.assertEqual(html.count('class="household-trend-card"'), 2)
+        self.assertEqual(html.count('class="household-record-card"'), 1)
+        self.assertIn("Trend 0", html)
+        self.assertNotIn("Trend 3", html)
+        self.assertIn("record 0", html)
+        self.assertNotIn("record 2", html)
 
     def test_timeline_groups_events_with_readable_icons_and_types(self):
         html = report.timeline_html(

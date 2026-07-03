@@ -15,7 +15,6 @@ DEFAULT_STATE_OR_TERRITORY = "WA"
 DEFAULT_RETAILER = "synergy"
 DEFAULT_PLAN = "synergy_ev_add_on"
 NO_ADD_ON = "none"
-EV_ADD_ON = "ev_add_on"
 
 
 @dataclass(frozen=True)
@@ -30,6 +29,7 @@ class TariffPlan:
     export_credit_rate: float
     add_on_id: str = NO_ADD_ON
     add_on_label: str = "None"
+    tariff_windows: tuple[str, ...] = ()
 
 
 SYNERGY_EV_RATES = {
@@ -39,6 +39,12 @@ SYNERGY_EV_RATES = {
     "peak": 0.538446,
 }
 FLAT_HOME_RATES = {
+    "super_off_peak": 0.327582,
+    "overnight": 0.327582,
+    "off_peak": 0.327582,
+    "peak": 0.327582,
+}
+PREVIOUS_FLAT_RATES = {
     "super_off_peak": 0.30,
     "overnight": 0.30,
     "off_peak": 0.30,
@@ -57,6 +63,7 @@ SUPPORTED_PLANS: dict[str, TariffPlan] = {
         import_rates=FLAT_HOME_RATES,
         supply_charge_per_day=DEFAULT_SUPPLY_CHARGE_PER_DAY,
         export_credit_rate=DEFAULT_EXPORT_CREDIT_RATE,
+        tariff_windows=("Flat anytime import rate across all periods.",),
     ),
     "synergy_ev_add_on": TariffPlan(
         plan_id="synergy_ev_add_on",
@@ -67,8 +74,12 @@ SUPPORTED_PLANS: dict[str, TariffPlan] = {
         import_rates=SYNERGY_EV_RATES,
         supply_charge_per_day=DEFAULT_SUPPLY_CHARGE_PER_DAY,
         export_credit_rate=DEFAULT_EXPORT_CREDIT_RATE,
-        add_on_id=EV_ADD_ON,
-        add_on_label="EV Add On",
+        tariff_windows=(
+            "Super off-peak / EV window: 9am-3pm",
+            "Overnight: 11pm-6am",
+            "Off-peak: shoulder periods outside Peak, Overnight, and EV window",
+            "Peak: evening high-cost period",
+        ),
     ),
     "previous_flat_or_home_plan": TariffPlan(
         plan_id="previous_flat_or_home_plan",
@@ -76,15 +87,15 @@ SUPPORTED_PLANS: dict[str, TariffPlan] = {
         state_or_territory="WA",
         retailer_id="synergy",
         retailer_label="Synergy",
-        import_rates=FLAT_HOME_RATES,
+        import_rates=PREVIOUS_FLAT_RATES,
         supply_charge_per_day=DEFAULT_SUPPLY_CHARGE_PER_DAY,
         export_credit_rate=DEFAULT_EXPORT_CREDIT_RATE,
+        tariff_windows=("Legacy flat/home comparison rate across all periods.",),
     ),
 }
 
 STATE_OPTIONS = (("WA", "Western Australia"),)
 RETAILER_OPTIONS = (("synergy", "Synergy"),)
-ADD_ON_OPTIONS = ((NO_ADD_ON, "None"), (EV_ADD_ON, "EV Add On"))
 
 
 def supported_plan_options() -> tuple[tuple[str, str], ...]:
@@ -107,9 +118,6 @@ def tariff_plan_for_selection(
     state = str(state_or_territory or "").upper()
     retailer_id = str(retailer or "").lower()
     plan = str(plan_id or "")
-    add_on = str(add_on_id or NO_ADD_ON)
-    if plan == "synergy_home_plan" and add_on == EV_ADD_ON:
-        plan = "synergy_ev_add_on"
     candidate = SUPPORTED_PLANS.get(plan)
     if not candidate:
         return None
@@ -142,7 +150,7 @@ def apply_structured_tariff(raw: dict[str, Any]) -> dict[str, Any]:
     raw["retailer"] = selected.retailer_label
     raw["retailer_id"] = selected.retailer_id
     raw["current_plan"] = selected.plan_id
-    raw["tariff_add_on"] = selected.add_on_id
+    raw["tariff_add_on"] = NO_ADD_ON
     raw["supply_charge_per_day"] = selected.supply_charge_per_day
     raw["import_rates"] = dict(selected.import_rates)
     raw["export_credit_rate"] = selected.export_credit_rate

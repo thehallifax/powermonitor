@@ -33,6 +33,8 @@ from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
 from engine.household_state_engine import HouseholdStateEngine
+from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
+from engine.trends_engine import HouseholdTrendsReport, TrendsEngine
 from engine.models import (
     Account,
     Advisor,
@@ -61,17 +63,16 @@ from engine.recommendation_adapter import RecommendationPresentation
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from engine.tariff_catalog import (
-    ADD_ON_OPTIONS,
     DEFAULT_EXPORT_CREDIT_RATE,
     DEFAULT_PLAN,
     DEFAULT_RETAILER,
     DEFAULT_STATE_OR_TERRITORY,
     DEFAULT_SUPPLY_CHARGE_PER_DAY,
-    EV_ADD_ON,
     MANUAL_TARIFF_ID,
     MANUAL_TARIFF_LABEL,
     NO_ADD_ON,
     STATE_OPTIONS,
+    SUPPORTED_PLANS,
     apply_structured_tariff,
     comparison_rates_for_plan,
     plan_label,
@@ -183,7 +184,7 @@ EV_BUCKET_LABELS = {
 DEFAULT_SETTINGS = {
     "state_or_territory": DEFAULT_STATE_OR_TERRITORY,
     "tariff_setup_mode": "catalog",
-    "tariff_add_on": EV_ADD_ON,
+    "tariff_add_on": NO_ADD_ON,
     "supply_charge_per_day": DEFAULT_SUPPLY_CHARGE_PER_DAY,
     "import_rates": {
         "super_off_peak": 0.086151,
@@ -359,6 +360,7 @@ def dashboard_data(
         )
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
+        compared_trends = load_daily_trends(conn, compared.start, compared.end, settings)
         health = health_data(conn, current_day, settings)
         capability_summary = context_engine.get_household_capability_summary(current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings, household_context)
@@ -387,6 +389,21 @@ def dashboard_data(
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
+    )
+    comparison_previous_summary = comparison.get("summary_b") if comparison else None
+    bill_change = financial_engine(household_context).explain_bill_change(
+        billing_summary,
+        comparison_previous_summary,
+        settings,
+        current_bill=glance_projected,
+        previous_bill=(
+            comparison_previous_summary.get("net_cost")
+            if isinstance(comparison_previous_summary, dict)
+            else getattr(comparison_previous_summary, "net_cost", None)
+            if comparison_previous_summary is not None
+            else None
+        ),
+        projected=True,
     )
     generated_at = datetime.now().astimezone()
     import_sources = setup_import_sources()
@@ -544,6 +561,23 @@ def dashboard_data(
         behaviour=household_behaviour,
     )
     recommendation_presentations = decision_pipeline.recommendations
+    household_insights = HouseholdInsightsEngine().build(
+        trends=trends,
+        current_summary=period_summary,
+        billing_summary=billing_summary,
+        comparison=comparison,
+        projected_bill=glance_projected,
+        recommendations=recommendation_presentations,
+    )
+    household_trends = TrendsEngine().build(
+        current_summary=period_summary,
+        previous_summary=comparison_previous_summary,
+        current_trends=trends,
+        previous_trends=compared_trends,
+        comparison_label=str(comparison.get("period_b", {}).get("label") or "previous period"),
+        insights=household_insights,
+        recommendations=recommendation_presentations,
+    )
     briefing = briefing_engine(household_context).build(
         advisor_explanations,
         current_day,
@@ -626,8 +660,11 @@ def dashboard_data(
         "actual_ev_cost_partial": period_summary.actual_ev_cost_partial,
         "ev_session_analytics": period_summary.ev_session_analytics,
         "daily_trends": [trend_to_dict(trend) for trend in trends],
+        "household_insights": [insight.as_dict() for insight in household_insights],
+        "household_trends": household_trends.as_dict(),
         "tariff_scenario": tariff_scenario(period_summary, settings),
         "plan_comparison": plan,
+        "bill_change_explanation": bill_change,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": display_timeline.as_dict(),
@@ -3235,6 +3272,8 @@ def daily_briefing_html(
     briefing: DailyBriefing,
     goals: Optional[list[GoalProgress]] = None,
     glance: Optional[GlanceState] = None,
+    insights: Optional[list[HouseholdInsight]] = None,
+    trends_report: Optional[HouseholdTrendsReport] = None,
 ) -> str:
     action_items = dedupe_briefing_items([*briefing.top_priorities, *briefing.items_to_watch])
     positive_items = dedupe_briefing_items(briefing.positive_outcomes)
@@ -3250,12 +3289,112 @@ def daily_briefing_html(
       {home_status_strip_html(briefing, glance)}
       {actions}
       {secondary}
+      {household_insights_html(insights or [])}
+      {home_trends_records_html(trends_report)}
       <section class="briefing-block home-change-block">
         <div class="section-title"><div><span class="eyebrow">What changed?</span><h2>{html.escape(change_note[0])}</h2></div></div>
         <p class="notice">{html.escape(change_note[1])}</p>
       </section>
       {goal_progress}
     </section>
+    """
+
+
+def home_trends_records_html(report: Optional[HouseholdTrendsReport]) -> str:
+    trends = list(report.trends[:2]) if report else []
+    records = list(report.records[:1]) if report else []
+    if not trends and not records:
+        return """
+      <section class="briefing-block household-trends-block">
+        <div class="section-title"><div><span class="eyebrow">Trends and records</span><h2>No long-term change stood out yet.</h2></div></div>
+        <p class="notice">PowerMonitor will show trends and personal records here once there is enough comparison history.</p>
+      </section>
+        """
+    trend_cards = []
+    for trend in trends:
+        change = (
+            f"{abs(trend.percentage_change):.0f}% {trend.direction}"
+            if trend.percentage_change is not None and trend.direction != "flat"
+            else "steady"
+        )
+        trend_cards.append(
+            f"""
+            <article class="household-trend-card">
+              <span>Trend</span>
+              <h3>{html.escape(trend.label)} is {html.escape(change)}.</h3>
+              <p>{html.escape(trend.explanation)}</p>
+              <div class="briefing-meta">
+                <small>Now: {html.escape(trend.current_value)}</small>
+                <small>Before: {html.escape(trend.previous_value)}</small>
+                <small>{html.escape(trend.confidence)} confidence</small>
+              </div>
+            </article>
+            """
+        )
+    record_cards = []
+    for record in records:
+        previous = f"Previous record: {record.previous_record}" if record.previous_record else "First comparable record"
+        record_cards.append(
+            f"""
+            <article class="household-record-card">
+              <span>Record</span>
+              <h3>{html.escape(record.date)} was your {html.escape(record.label.lower())}.</h3>
+              <p>{html.escape(record.explanation)}</p>
+              <div class="briefing-meta">
+                <small>Value: {html.escape(record.value)}</small>
+                <small>{html.escape(previous)}</small>
+                <small>{html.escape(record.confidence)} confidence</small>
+              </div>
+            </article>
+            """
+        )
+    count_label = ", ".join(
+        part for part in (
+            f"{len(trends)} trend{'s' if len(trends) != 1 else ''}" if trends else "",
+            f"{len(records)} record{'s' if len(records) != 1 else ''}" if records else "",
+        )
+        if part
+    )
+    return f"""
+      <section class="briefing-block household-trends-block">
+        <div class="section-title"><div><span class="eyebrow">Trends and records</span><h2>Longer-term household context.</h2></div><p>{html.escape(count_label)}</p></div>
+        <div class="briefing-grid">{''.join(trend_cards + record_cards)}</div>
+      </section>
+    """
+
+
+def household_insights_html(insights: list[HouseholdInsight]) -> str:
+    if not insights:
+        return """
+      <section class="briefing-block household-insights-block">
+        <div class="section-title"><div><span class="eyebrow">Interesting things we noticed</span><h2>No unusual household pattern stood out.</h2></div></div>
+        <p class="notice">PowerMonitor will show up to three observations here when recent household history looks meaningfully different from normal.</p>
+      </section>
+        """
+    cards = []
+    for insight in insights[:3]:
+        values = "".join(
+            f"<small>{html.escape(label)}: {html.escape(value)}</small>"
+            for label, value in insight.supporting_values.items()
+        )
+        cards.append(
+            f"""
+            <article class="household-insight-card">
+              <div class="briefing-card-heading">
+                <span>{html.escape(insight.confidence)} confidence</span>
+                <strong>{html.escape(insight.comparison_period)}</strong>
+              </div>
+              <h3>{html.escape(insight.headline)}</h3>
+              <p>{html.escape(insight.explanation)}</p>
+              <div class="briefing-meta">{values}</div>
+            </article>
+            """
+        )
+    return f"""
+      <section class="briefing-block household-insights-block">
+        <div class="section-title"><div><span class="eyebrow">Interesting things we noticed</span><h2>Household observations, not action items.</h2></div><p>Up to three</p></div>
+        <div class="briefing-grid">{''.join(cards)}</div>
+      </section>
     """
 
 
@@ -3750,7 +3889,6 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     state_or_territory = getattr(settings, "state_or_territory", DEFAULT_STATE_OR_TERRITORY)
     retailer_id = getattr(settings, "retailer_id", DEFAULT_RETAILER)
     current_plan = getattr(settings, "current_plan", DEFAULT_PLAN)
-    tariff_add_on = getattr(settings, "tariff_add_on", NO_ADD_ON)
     supply_charge = getattr(settings, "supply_charge_per_day", DEFAULT_SETTINGS["supply_charge_per_day"])
     export_credit_rate = getattr(settings, "export_credit_rate", DEFAULT_SETTINGS["export_credit_rate"])
     state_options = "".join(
@@ -3767,11 +3905,8 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
         f'<option value="{html.escape(value)}"{" selected" if current_plan == value else ""}>{html.escape(label)}</option>'
         for value, label in supported_plan_options()
     ) + f'<option value="{MANUAL_TARIFF_ID}"{" selected" if current_plan == MANUAL_TARIFF_ID else ""}>{MANUAL_TARIFF_LABEL}</option>'
-    add_on_options = "".join(
-        f'<option value="{html.escape(value)}"{" selected" if tariff_add_on == value else ""}>{html.escape(label)}</option>'
-        for value, label in ADD_ON_OPTIONS
-    )
     rates = getattr(settings, "import_rates", DEFAULT_SETTINGS["import_rates"])
+    previews = tariff_catalog_previews_html()
     return f"""
     <section id="setup-billing" class="report-section setup-section">
       <div class="section-title">
@@ -3782,9 +3917,11 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
         <label><span>State / territory</span><select name="state_or_territory">{state_options}</select></label>
         <label><span>Retailer</span><select name="retailer">{retailer_options}</select></label>
         <label id="setup-tariff"><span>Plan</span><select name="current_plan">{plan_options}</select></label>
-        <label><span>Optional add-on</span><select name="tariff_add_on">{add_on_options}</select></label>
         <label id="setup-billing-cycle"><span>Billing cycle start day</span><input type="number" name="billing_period_start_day" min="1" max="28" value="{settings.billing_period_start_day}" required></label>
-        <fieldset>
+        <div class="catalogue-tariff-previews">
+          {previews}
+        </div>
+        <fieldset class="manual-tariff-fields">
           <legend>Manual tariff</legend>
           <p class="notice">If your retailer or plan is not listed, choose Manual tariff.</p>
           <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="manual_supply_charge_per_day" value="{supply_charge:.6f}"></label>
@@ -3801,13 +3938,47 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     """
 
 
+def tariff_catalog_previews_html() -> str:
+    def rate(value: float) -> str:
+        return f"${value:.4f}/kWh"
+
+    cards = []
+    for plan_id, plan in SUPPORTED_PLANS.items():
+        windows = "".join(f"<li>{html.escape(window)}</li>" for window in plan.tariff_windows)
+        rows = [
+            ("Daily supply charge", f"${plan.supply_charge_per_day:.4f}/day"),
+            ("Export credit", rate(plan.export_credit_rate)),
+            ("Peak rate", rate(plan.import_rates["peak"])),
+            ("Off-peak rate", rate(plan.import_rates["off_peak"])),
+            ("Overnight rate", rate(plan.import_rates["overnight"])),
+            ("Super off-peak / EV window", rate(plan.import_rates["super_off_peak"])),
+        ]
+        cards.append(
+            f"""
+            <article class="tariff-preview-card" data-plan="{html.escape(plan_id)}">
+              <div><span>Catalogue tariff</span><h3>{html.escape(plan.label)}</h3></div>
+              <dl>{"".join(f"<div><dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd></div>" for label, value in rows)}</dl>
+              <div class="tariff-window-list"><span>Tariff windows</span><ul>{windows}</ul></div>
+            </article>
+            """
+        )
+    return "".join(cards)
+
+
 def home_page_html(
     briefing: DailyBriefing,
     goals: Optional[list[GoalProgress]] = None,
     setup: Optional[SetupChecklist] = None,
     glance: Optional[GlanceState] = None,
+    bill_change: Optional[dict] = None,
+    insights: Optional[list[HouseholdInsight]] = None,
+    trends_report: Optional[HouseholdTrendsReport] = None,
 ) -> str:
-    return daily_briefing_html(briefing, goals or [], glance) + setup_progress_card_html(setup)
+    return (
+        daily_briefing_html(briefing, goals or [], glance, insights, trends_report)
+        + bill_change_explanation_html(bill_change, compact=True)
+        + setup_progress_card_html(setup)
+    )
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -3932,6 +4103,87 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
         {metric("Plan savings/loss", signed_money(-plan["difference"]), plan["recommendation"], "good" if plan["savings"] > 0 else "bad" if plan["savings"] < 0 else "neutral")}
       </div>
     </section>
+    """
+
+
+def bill_change_explanation_html(explanation: Optional[dict], compact: bool = False) -> str:
+    if not explanation:
+        return ""
+    if not explanation.get("available"):
+        return f"""
+        <section class="report-section compact-section bill-change-section">
+          <div class="section-title"><div><span class="eyebrow">Bill explanation</span><h2>Why has my bill changed?</h2></div><p>Comparison unavailable</p></div>
+          <p class="notice">{html.escape(str(explanation.get("narrative") or explanation.get("reason") or "Historical comparison is unavailable."))}</p>
+        </section>
+        """
+
+    contributors = explanation.get("contributors") or []
+    positive = explanation.get("positive_changes") or []
+    negative = explanation.get("negative_changes") or []
+    ev = explanation.get("ev_explanation")
+    contributor_rows = "".join(bill_change_contributor_html(item) for item in contributors[:5])
+    if not contributor_rows:
+        contributor_rows = '<p class="notice">No major bill drivers could be separated from the available data.</p>'
+    positive_rows = bill_change_small_list_html(positive[:3], "Money saved")
+    negative_rows = bill_change_small_list_html(negative[:3], "Extra cost")
+    ev_html = ev_bill_explanation_html(ev) if ev else ""
+    metrics = "".join(
+        [
+            metric("Current bill", money(float(explanation["current_bill"])), "Projected current billing period" if compact else "Current billing period", "primary"),
+            metric("Previous bill", money(float(explanation["previous_bill"])), "Previous completed billing period", "cost"),
+            metric("Difference", signed_money(float(explanation["difference"])), f"{explanation.get('confidence', 'Medium')} confidence", "bad" if float(explanation["difference"]) > 0 else "good" if float(explanation["difference"]) < 0 else "neutral"),
+        ]
+    )
+    return f"""
+    <section class="report-section compact-section bill-change-section">
+      <div class="section-title"><div><span class="eyebrow">Bill explanation</span><h2>Why has my bill changed?</h2></div><p>Largest contributors first</p></div>
+      <p class="scenario-note">{html.escape(str(explanation.get("narrative") or ""))}</p>
+      <div class="metrics bill-change-metrics">{metrics}</div>
+      <div class="bill-change-grid">
+        <div class="bill-change-card main"><h3>Largest contributors</h3>{contributor_rows}</div>
+        <div class="bill-change-card"><h3>Positive changes</h3>{positive_rows}</div>
+        <div class="bill-change-card"><h3>Negative changes</h3>{negative_rows}</div>
+      </div>
+      {ev_html}
+      <p class="scenario-note">Contributions are estimates from available billing components and may not add exactly to the bill difference when projections, partial data, or overlapping EV and tariff effects are involved.</p>
+    </section>
+    """
+
+
+def bill_change_contributor_html(item: dict) -> str:
+    impact = float(item.get("impact") or 0.0)
+    tone = "bad" if impact > 0 else "good"
+    return f"""
+    <div class="bill-change-row {tone}">
+      <div><span>{html.escape(str(item.get("category") or "change").replace("_", " ").title())}</span><strong>{html.escape(str(item.get("label") or "Bill change"))}</strong><p>{html.escape(str(item.get("detail") or ""))}</p></div>
+      <strong>{signed_money(impact)}</strong>
+    </div>
+    """
+
+
+def bill_change_small_list_html(items: list[dict], empty_label: str) -> str:
+    if not items:
+        return f'<p class="notice">No clear {html.escape(empty_label.lower())} found in the available comparison.</p>'
+    return "<ul class=\"bill-change-list\">" + "".join(
+        f"<li><span>{html.escape(str(item.get('label') or 'Change'))}</span><strong>{signed_money(float(item.get('impact') or 0.0))}</strong></li>"
+        for item in items
+    ) + "</ul>"
+
+
+def ev_bill_explanation_html(ev: dict) -> str:
+    petrol = ev.get("petrol_equivalent_cost")
+    petrol_text = money(float(petrol)) if petrol is not None else "Not configured"
+    return f"""
+    <div class="bill-change-ev">
+      <div class="chart-heading"><h3>EV charging explanation</h3><span>{html.escape(str(ev.get("source") or "charger data").replace("_", " "))}</span></div>
+      <div class="metrics">
+        {metric("Total EV energy", kwh(float(ev.get("total_energy_kwh") or 0.0)), "Actual charger data", "ev")}
+        {metric("Charging cost", money(float(ev.get("charging_cost") or 0.0)), "Approximate electricity cost", "cost")}
+        {metric("If all Peak", money(float(ev.get("cost_if_all_peak") or 0.0)), "Same energy at Peak rate", "bad")}
+        {metric("Off-peak saving", money(float(ev.get("savings_vs_peak") or 0.0)), "Compared with all-Peak charging", "good")}
+        {metric("Petrol equivalent", petrol_text, "Uses configured vehicle efficiency and fuel price", "supply")}
+      </div>
+    </div>
     """
 
 
@@ -5688,9 +5940,35 @@ def write_html(
         capability_summary = None
         provider_observations = None
         promotion_summary = None
+    compared_trends: list[DailyTrend] = []
+    if comparison:
+        try:
+            period_b = comparison.get("period_b") or {}
+            previous_start = date.fromisoformat(str(period_b.get("start")))
+            previous_end = date.fromisoformat(str(period_b.get("end")))
+            with sqlite3.connect(DB_PATH) as conn:
+                validate_database(conn)
+                compared_trends = load_daily_trends(conn, previous_start, previous_end, settings)
+        except (TypeError, ValueError, FileNotFoundError, RuntimeError, sqlite3.Error):
+            compared_trends = []
     glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
+    )
+    comparison_previous_summary = comparison.get("summary_b") if comparison else None
+    bill_change = financial_engine(household_context).explain_bill_change(
+        billing_summary,
+        comparison_previous_summary,
+        settings,
+        current_bill=glance_projected,
+        previous_bill=(
+            comparison_previous_summary.get("net_cost")
+            if isinstance(comparison_previous_summary, dict)
+            else getattr(comparison_previous_summary, "net_cost", None)
+            if comparison_previous_summary is not None
+            else None
+        ),
+        projected=True,
     )
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
@@ -5856,6 +6134,23 @@ def write_html(
         behaviour=household_behaviour,
     )
     recommendation_presentations = decision_pipeline.recommendations
+    household_insights = HouseholdInsightsEngine().build(
+        trends=trends,
+        current_summary=period_summary,
+        billing_summary=billing_summary,
+        comparison=comparison,
+        projected_bill=glance_projected,
+        recommendations=recommendation_presentations,
+    )
+    household_trends = TrendsEngine().build(
+        current_summary=period_summary,
+        previous_summary=comparison_previous_summary,
+        current_trends=trends,
+        previous_trends=compared_trends,
+        comparison_label=str((comparison or {}).get("period_b", {}).get("label") or "previous period"),
+        insights=household_insights,
+        recommendations=recommendation_presentations,
+    )
     briefing = briefing_engine(household_context).build(
         advisor_explanations,
         local_today(),
@@ -5922,7 +6217,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends)}
   </section>
   <section id="setup" class="page">
     {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
@@ -5935,6 +6230,7 @@ def write_html(
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
     {financial_highlights_html(period_summary, glance_projected, plan, recommendation_presentations)}
+    {bill_change_explanation_html(bill_change)}
     {summary_html(selected_period.label, period_summary, settings)}
     {bill_attribution_html(period_summary, plan, settings)}
     {comparison_html(comparison) if comparison else ""}
@@ -6229,11 +6525,16 @@ def write_html(
     .briefing-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
     .briefing-grid.two-up {{ grid-template-columns:1fr 1fr; }}
     .briefing-card {{ padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .household-insight-card {{ padding:20px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .household-trend-card,.household-record-card {{ padding:20px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .household-record-card {{ background:#f8fbf9; border-color:#cce9dc; }}
+    .household-trend-card > span,.household-record-card > span {{ display:block; color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .briefing-card-heading,.briefing-meta {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
     .briefing-card-heading strong {{ padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
-    .briefing-card h3 {{ margin:13px 0 7px; font-size:20px; letter-spacing:-.035em; }}
-    .briefing-card p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.5; }}
+    .briefing-card h3,.household-insight-card h3,.household-trend-card h3,.household-record-card h3 {{ margin:13px 0 7px; font-size:20px; letter-spacing:-.035em; }}
+    .briefing-card p,.household-insight-card p,.household-trend-card p,.household-record-card p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.5; }}
     .briefing-meta {{ margin-top:16px; padding-top:12px; border-top:1px solid var(--line); }}
+    .household-insight-card .briefing-meta,.household-trend-card .briefing-meta,.household-record-card .briefing-meta {{ align-items:flex-start; flex-wrap:wrap; justify-content:flex-start; }}
     .decision-explanation {{ margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,.08); }}
     .decision-explanation summary {{ cursor:pointer; color:var(--ink); font-size:12px; font-weight:850; }}
     .decision-explanation-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:11px; margin-top:12px; }}
@@ -6443,10 +6744,41 @@ def write_html(
     .setup-task-meta {{ display:grid; grid-template-columns:1fr; gap:8px; align-content:start; }}
     .setup-task-meta div {{ padding:10px; background:rgba(255,255,255,.72); border-radius:11px; }}
     .setup-task-meta strong {{ display:block; margin-top:3px; font-size:13px; }}
-    .setup-config-form {{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:12px; align-items:end; }}
+    .setup-config-form {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:end; }}
     .setup-config-form label span {{ display:block; margin-bottom:5px; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .setup-config-form input,.setup-config-form select,.setup-config-form button {{ width:100%; min-height:42px; padding:9px 11px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
     .setup-config-form button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
+    .catalogue-tariff-previews,.manual-tariff-fields {{ grid-column:1/-1; }}
+    .manual-tariff-fields {{ display:none; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:0; padding:14px; border:1px solid var(--line); border-radius:12px; background:#fff; }}
+    .manual-tariff-fields legend {{ padding:0 6px; color:var(--ink); font-size:12px; font-weight:850; }}
+    .manual-tariff-fields .notice {{ grid-column:1/-1; margin:0; }}
+    .tariff-preview-card {{ display:none; padding:14px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
+    .tariff-preview-card h3 {{ margin:2px 0 10px; }}
+    .tariff-preview-card span,.tariff-window-list span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .tariff-preview-card dl {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:0; }}
+    .tariff-preview-card dl div {{ padding:9px; background:#f8fbf9; border:1px solid var(--line); border-radius:10px; }}
+    .tariff-preview-card dt {{ color:var(--muted); font-size:10px; font-weight:750; }}
+    .tariff-preview-card dd {{ margin:3px 0 0; color:var(--ink); font-size:13px; font-weight:850; }}
+    .tariff-window-list {{ margin-top:10px; }}
+    .tariff-window-list ul {{ margin:6px 0 0 18px; padding:0; color:var(--muted); font-size:12px; }}
+    .bill-change-grid {{ display:grid; grid-template-columns:2fr 1fr 1fr; gap:12px; margin-top:14px; }}
+    .bill-change-card,.bill-change-ev {{ padding:14px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
+    .bill-change-card h3 {{ margin:0 0 10px; font-size:14px; }}
+    .bill-change-row {{ display:grid; grid-template-columns:1fr auto; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); }}
+    .bill-change-row:first-of-type {{ border-top:0; padding-top:0; }}
+    .bill-change-row span,.bill-change-list span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .bill-change-row strong,.bill-change-list strong {{ font-variant-numeric:tabular-nums; }}
+    .bill-change-row p {{ margin:3px 0 0; color:var(--muted); font-size:12px; }}
+    .bill-change-row.good > strong,.bill-change-list li:has(strong:first-child) {{ color:var(--green); }}
+    .bill-change-row.bad > strong {{ color:var(--red); }}
+    .bill-change-list {{ display:grid; gap:8px; margin:0; padding:0; list-style:none; }}
+    .bill-change-list li {{ display:flex; justify-content:space-between; gap:10px; padding:9px; background:#f8fbf9; border:1px solid var(--line); border-radius:10px; }}
+    .bill-change-ev {{ margin-top:12px; }}
+    .setup-config-form:has(select[name="current_plan"] option[value="synergy_home_plan"]:checked) .tariff-preview-card[data-plan="synergy_home_plan"],
+    .setup-config-form:has(select[name="current_plan"] option[value="synergy_ev_add_on"]:checked) .tariff-preview-card[data-plan="synergy_ev_add_on"],
+    .setup-config-form:has(select[name="current_plan"] option[value="previous_flat_or_home_plan"]:checked) .tariff-preview-card[data-plan="previous_flat_or_home_plan"] {{ display:block; }}
+    .setup-config-form:has(select[name="current_plan"] option[value="manual_tariff"]:checked) .catalogue-tariff-previews {{ display:none; }}
+    .setup-config-form:has(select[name="current_plan"] option[value="manual_tariff"]:checked) .manual-tariff-fields {{ display:grid; }}
     .action-grid {{ gap:14px; }} .action-card {{ padding:20px; }}
     .action-card h3,.recommendation-card h3 {{ font-size:19px; letter-spacing:-.03em; }}
     .scenario-card {{ min-height:210px; padding:22px; }} .scenario-card strong {{ font-size:32px; }}
@@ -6457,7 +6789,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

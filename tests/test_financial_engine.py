@@ -78,6 +78,119 @@ class FinancialEngineTests(unittest.TestCase):
             "recommendation",
         })
 
+    def test_bill_change_contributions_are_ranked_by_impact(self):
+        settings = type(
+            "Settings",
+            (),
+            {
+                "import_rates": {"peak": 0.60, "off_peak": 0.30, "overnight": 0.20, "super_off_peak": 0.10},
+                "ev_kwh_per_100km": 16.0,
+                "previous_car_l_per_100km": 8.0,
+                "petrol_price_per_litre": 2.0,
+            },
+        )()
+        previous = {
+            "net_cost": 120.0,
+            "reading_days": 30,
+            "grid_import_kwh": 200.0,
+            "import_cost": 60.0,
+            "supply_cost": 38.0,
+            "export_credit": 10.0,
+            "solar_generated_kwh": 220.0,
+            "ev_charging_source": "ocular_export",
+            "ev_charging_kwh": 20.0,
+            "ev_charging_cost": 4.0,
+            "actual_ev_charging_kwh": 20.0,
+            "actual_ev_charging_cost": 4.0,
+            "buckets": {
+                "peak": {"cost": 20.0},
+                "off_peak": {"cost": 15.0},
+                "overnight": {"cost": 15.0},
+                "super_off_peak": {"cost": 10.0},
+            },
+        }
+        current = {
+            "net_cost": 190.0,
+            "reading_days": 30,
+            "grid_import_kwh": 260.0,
+            "import_cost": 115.0,
+            "supply_cost": 40.0,
+            "export_credit": 6.0,
+            "solar_generated_kwh": 160.0,
+            "ev_charging_source": "ocular_export",
+            "ev_charging_kwh": 80.0,
+            "ev_charging_cost": 36.0,
+            "actual_ev_charging_kwh": 80.0,
+            "actual_ev_charging_cost": 36.0,
+            "buckets": {
+                "peak": {"cost": 55.0},
+                "off_peak": {"cost": 20.0},
+                "overnight": {"cost": 25.0},
+                "super_off_peak": {"cost": 15.0},
+            },
+        }
+
+        explanation = self.engine.explain_bill_change(current, previous, settings)
+        impacts = [abs(item["impact"]) for item in explanation["contributors"]]
+
+        self.assertTrue(explanation["available"])
+        self.assertEqual(impacts, sorted(impacts, reverse=True))
+        self.assertEqual(explanation["contributors"][0]["label"], "Peak usage increased")
+        self.assertIn("EV charging increased", [item["label"] for item in explanation["contributors"]])
+        self.assertGreater(len(explanation["negative_changes"]), 0)
+        self.assertIsNotNone(explanation["ev_explanation"])
+        self.assertAlmostEqual(explanation["ev_explanation"]["cost_if_all_peak"], 48.0)
+        self.assertAlmostEqual(explanation["ev_explanation"]["petrol_equivalent_cost"], 80.0)
+
+    def test_bill_change_narrative_mentions_largest_reasons_and_uncertainty(self):
+        settings = type(
+            "Settings",
+            (),
+            {
+                "import_rates": {"peak": 0.60, "off_peak": 0.30, "overnight": 0.20, "super_off_peak": 0.10},
+                "ev_kwh_per_100km": None,
+                "previous_car_l_per_100km": 8.0,
+                "petrol_price_per_litre": 2.0,
+            },
+        )()
+        previous = {
+            "net_cost": 100.0,
+            "reading_days": 30,
+            "grid_import_kwh": 150.0,
+            "import_cost": 50.0,
+            "supply_cost": 35.0,
+            "export_credit": 8.0,
+            "solar_generated_kwh": 200.0,
+            "ev_charging_source": "estimated",
+            "ev_charging_cost": 0.0,
+            "buckets": {"peak": {"cost": 10.0}, "off_peak": {"cost": 10.0}, "overnight": {"cost": 10.0}, "super_off_peak": {"cost": 20.0}},
+        }
+        current = {
+            "net_cost": 145.0,
+            "reading_days": 8,
+            "grid_import_kwh": 180.0,
+            "import_cost": 80.0,
+            "supply_cost": 38.0,
+            "export_credit": 3.0,
+            "solar_generated_kwh": 120.0,
+            "ev_charging_source": "estimated",
+            "ev_charging_cost": 0.0,
+            "buckets": {"peak": {"cost": 40.0}, "off_peak": {"cost": 10.0}, "overnight": {"cost": 10.0}, "super_off_peak": {"cost": 20.0}},
+        }
+
+        explanation = self.engine.explain_bill_change(current, previous, settings, current_bill=160.0, projected=True)
+
+        self.assertIn("projected to be", explanation["narrative"])
+        self.assertIn("peak usage increased", explanation["narrative"])
+        self.assertIn("Medium confidence", explanation["narrative"])
+        self.assertIsNone(explanation["ev_explanation"])
+
+    def test_bill_change_handles_missing_history(self):
+        explanation = self.engine.explain_bill_change({"net_cost": 50.0}, None, object())
+
+        self.assertFalse(explanation["available"])
+        self.assertIn("previous completed billing period is unavailable", explanation["narrative"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,49 @@
 # Changelog
 
+## TRD-001 - Trends & Records
+
+- Added a reusable Trends Engine that compares current household history with
+  the previous comparison period to produce long-term trend context rather than
+  recommendations or insights.
+- Added personal household records for daily history, including solar
+  generation, lowest cost, export, self-consumption, EV charging, and home
+  energy-use records with previous-record context where available.
+- Added a concise Home "Trends and records" section limited to two trends and
+  one record, with no graphs and homeowner-friendly wording.
+- Exposed trends and records in summary/report data as `household_trends`.
+- Added regression tests for trend direction, record detection, duplicate-topic
+  suppression, insufficient history, and Home display limits.
+
+## INS-001 - Household Insights
+
+- Added a Household Insights observation engine that surfaces interesting
+  household changes without creating recommendations or action items.
+- Added a Home dashboard section for up to three plain-language insights, each
+  showing what changed, the comparison period, why it is interesting,
+  confidence, and supporting values.
+- Generated insights from existing household summaries and daily trends, such
+  as solar changes, export/self-consumption shifts, low-cost streaks, standout
+  solar or cost days, EV cheap-tariff charging, bill projection movement, and
+  lower peak-period cost.
+- Exposed household insights in summary data for inspection while keeping the
+  engine source-agnostic and free of database access.
+- Added regression coverage for insight generation, quiet ordinary-history
+  behaviour, measured EV tariff observations, and the three-insight Home limit.
+
+## FIN-002 - Bill Explainability
+
+- Added Financial Engine bill-change contribution analysis comparing the
+  current projection with the previous completed billing period.
+- Added homeowner-friendly "Why has my bill changed?" sections on Home and
+  Billing pages with ranked contributors, positive changes, negative changes,
+  confidence wording, and uncertainty notes.
+- Added EV-specific bill explanation when actual charger data exists, including
+  EV energy, charging cost, all-Peak comparison, off-peak savings, and optional
+  petrol-equivalent cost from configured vehicle/fuel assumptions.
+- Exposed bill-change explanation data in the dashboard API payload.
+- Added tests for contribution ranking, narrative generation, missing-history
+  handling, and EV-specific explanation output.
+
 ## UX-005 - Trust & Confidence Experience
 
 - Renamed the primary trust view to "Can I trust today's advice?" and made it start with a homeowner confidence summary, available information, missing information, and the effect on advice.
@@ -8,17 +52,30 @@
 - Removed the Recommendation Centre setup task and moved Energy Score review into advice readiness.
 - Added a direct Energy Score explanation anchor with cost, solar, peak usage, overnight usage, and household behaviour breakdowns.
 
+## FIN-001 Follow-up - Tariff Setup Display Fixes
+
+- Hid manual tariff input fields for catalogue tariff selections and show them
+  only when Manual tariff is selected.
+- Added read-only catalogue tariff previews for setup, including supply charge,
+  export credit, import rates, and tariff window notes.
+- Removed the optional add-on dropdown from setup so Synergy EV Add On appears
+  only as a plan option.
+- Differentiated catalogue rates and window descriptions for Synergy Home Plan,
+  Synergy EV Add On, and Previous Flat/Home Plan.
+- Added regression coverage for manual-field visibility, catalogue previews,
+  plan/add-on de-duplication, and catalogue rate/window differences.
+
 ## FIN-001 - Australia Tariff Setup
 
 - Added a static Australia-first tariff catalog for WA/Synergy setup, including
   Synergy Home Plan, Synergy EV Add On, and Previous Flat/Home Plan.
 - Replaced free-text retailer setup with structured state/territory, retailer,
-  plan, optional add-on, and billing cycle start-day fields.
+  plan, and billing cycle start-day fields.
 - Added Manual tariff fallback with explicit import, supply, and export rate
   entry for unsupported retailers or plans.
 - Wired tariff selection through saved settings so billing, recommendations,
   and setup readiness use the selected catalog/manual rates.
-- Added tests for WA/Synergy plan selection, EV add-on normalization, manual
+- Added tests for WA/Synergy plan selection, manual
   tariff fallback, and setup readiness.
 
 ## SY-001 - Product Coherence: Data Sources
