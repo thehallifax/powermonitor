@@ -45,14 +45,15 @@ class MobilePresentationTests(unittest.TestCase):
     def test_imports_page_uses_mobile_friendly_upload_copy(self):
         html = report.imports_page_html(history=[])
 
-        self.assertIn("Choose an Ocular Excel export from your phone, tablet, or Mac.", html)
+        self.assertIn("Choose an Ocular Excel export or Synergy PDF bill from your phone, tablet, or Mac.", html)
         self.assertIn("First-time import guide", html)
         self.assertIn("Preview before saving", html)
         self.assertIn("Troubleshooting uploads", html)
-        self.assertIn("Ocular Excel file", html)
+        self.assertIn("Ocular Excel or Synergy PDF", html)
         self.assertIn("will not auto-refresh", html)
         self.assertIn('class="responsive-table"', html)
         self.assertIn("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", html)
+        self.assertIn("application/pdf", html)
 
     def test_disclosure_panels_can_default_closed_or_open(self):
         closed = report.disclosure_html("Advanced Diagnostics", "Runtime details", "<p>Details</p>")

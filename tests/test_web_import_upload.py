@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR_DIR = PROJECT_ROOT / "collector"
@@ -19,7 +20,28 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import report
 import web
+import import_synergy_bill
 from engine.data_engine import DataEngine
+
+SYNERGY_BILL_TEXT = """
+Synergy Tax Invoice
+Account number: 123 456 789
+Invoice number: INV-2026-0701
+Date of issue: 04 Jul 2026
+Direct debit date: 18 Jul 2026
+Supply address: 44 Example Road, Thornlie WA 6108
+NMI: 8001 2345 678
+Home Plan 06 Jun 2026 to 30 Jun 2026
+Anytime usage 210.50 kWh @ $0.310000 $65.26
+Supply charge 25 days @ $1.292300 $32.31
+EV Add On 01 Jul 2026 to 03 Jul 2026
+Peak usage 12.00 kWh @ $0.538446 $6.46
+Super Off Peak usage 34.00 kWh @ $0.086151 $2.93
+Off peak export 9.00 kWh @ $0.025250 -$0.23
+GST $10.15
+Total bill amount $125.80
+Total amount owing $125.80
+"""
 
 
 class WebImportUploadTests(unittest.TestCase):
@@ -81,6 +103,32 @@ class WebImportUploadTests(unittest.TestCase):
             self.assertIn("That file type is not supported yet", body)
             self.assertIn("Ocular Excel export", body)
             self.assertNotIn(str(self.temp_dir.name), body)
+        finally:
+            stop_server(server, thread)
+
+    def test_web_upload_previews_and_commits_synergy_pdf_bill(self):
+        server, thread, base_url = start_server()
+        try:
+            with patch.object(import_synergy_bill, "extract_text_from_pdf", return_value=SYNERGY_BILL_TEXT):
+                preview = multipart_post(base_url, "/imports/preview", "synergy.pdf", b"%PDF placeholder")
+                self.assertIn("Import preview", preview)
+                self.assertIn("Synergy PDF bill", preview)
+                self.assertIn("INV-2026-0701", preview)
+                self.assertIn("•••789", preview)
+                self.assertNotIn("123 456 789", preview)
+                self.assertNotIn("44 Example Road", preview)
+                job_id = re.search(r'name="job_id" value="([^"]+)"', preview).group(1)
+
+                result = form_post(base_url, "/imports/commit", {"job_id": job_id})
+                self.assertIn("Import complete", result)
+
+            with sqlite3.connect(self.db_path) as conn:
+                latest = DataEngine(connection=conn).get_latest_synergy_bill()
+                history = DataEngine(connection=conn).get_import_history()
+
+            self.assertEqual(latest["invoice_number"], "INV-2026-0701")
+            self.assertEqual(latest["account_number"], "•••789")
+            self.assertEqual(history[0]["source"]["source_id"], "synergy_bill_pdf")
         finally:
             stop_server(server, thread)
 

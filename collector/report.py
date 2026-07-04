@@ -142,8 +142,9 @@ def setup_engine(household_context: HouseholdContext) -> SetupEngine:
 
 def setup_import_sources():
     from import_ocular_export import OcularEVImporter
+    from import_synergy_bill import SynergyBillImporter
 
-    return [OcularEVImporter(DB_PATH).source]
+    return [OcularEVImporter(DB_PATH).source, SynergyBillImporter(DB_PATH).source]
 
 
 def default_household_context() -> HouseholdContext:
@@ -411,6 +412,10 @@ def dashboard_data(
         ),
         projected=True,
     )
+    try:
+        actual_bill_comparison = data_engine().compare_projected_to_latest_synergy_bill(glance_projected)
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        actual_bill_comparison = None
     generated_at = datetime.now().astimezone()
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
@@ -671,6 +676,8 @@ def dashboard_data(
         "tariff_scenario": tariff_scenario(period_summary, settings),
         "plan_comparison": plan,
         "bill_change_explanation": bill_change,
+        "actual_bill_comparison": actual_bill_comparison,
+        "latest_synergy_bill": actual_bill_comparison.get("latest_bill") if actual_bill_comparison else None,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "timeline": display_timeline.as_dict(),
@@ -4315,6 +4322,87 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
     """
 
 
+def actual_synergy_bill_html(comparison: Optional[dict], settings: Settings) -> str:
+    if not comparison:
+        return f"""
+        <section class="report-section compact-section">
+          <div class="section-title"><div><span class="eyebrow">Actual bill</span><h2>Latest Synergy bill</h2></div><p>Retailer reconciliation</p></div>
+          <p class="notice">No Synergy PDF bill has been imported yet. Upload one on the Imports page to compare PowerMonitor's projection with the actual retailer bill.</p>
+        </section>
+        """
+    bill = comparison["latest_bill"]
+    difference = comparison.get("difference")
+    difference_text = signed_money(float(difference)) if difference is not None else "Not available"
+    status_note = (
+        "PowerMonitor projected more than the actual bill."
+        if comparison.get("status") == "projection_higher" else
+        "PowerMonitor projected less than the actual bill."
+        if comparison.get("status") == "projection_lower" else
+        "Projection and actual bill are closely aligned."
+        if comparison.get("status") == "matched" else
+        "Projection comparison is unavailable."
+    )
+    periods = bill.get("periods") or []
+    period_rows = "".join(
+        f"""
+        <div class="completeness-row neutral">
+          <span>{html.escape(str(period.get("plan_name") or "Synergy plan"))}</span>
+          <strong>{html.escape(str(period.get("start_date") or ""))} to {html.escape(str(period.get("end_date") or ""))}</strong>
+          <small>Plan period detected on the bill.</small>
+        </div>
+        """
+        for period in periods
+    ) or '<p class="notice">No plan period was detected on the imported bill.</p>'
+    bucket_rows = bill_bucket_rows_html(bill, settings)
+    warnings = bill.get("warnings") or []
+    warning_html = "".join(f"<li>{html.escape(str(warning))}</li>" for warning in warnings) or "<li>No extraction warnings.</li>"
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Actual bill</span><h2>Latest Synergy bill</h2></div><p>{html.escape(str(bill.get("issue_date") or "Imported bill"))}</p></div>
+      <div class="metrics">
+        {metric("Invoice", str(bill.get("invoice_number") or "n/a"), f"Account {str(bill.get('account_number') or 'masked')}", "primary")}
+        {metric("Actual bill", money(float(comparison.get("actual_bill") or 0.0)), "Total bill amount", "cost")}
+        {metric("Projected bill", money(float(comparison.get("projected_bill") or 0.0)), "PowerMonitor estimate", "supply")}
+        {metric("Difference", difference_text, status_note, "good" if difference is not None and float(difference) >= 0 else "bad")}
+      </div>
+      <div class="system-grid">
+        <div class="system-card"><div class="chart-heading"><h3>Billing periods</h3><span>Plan changes supported</span></div><div class="completeness-grid">{period_rows}</div></div>
+        <div class="system-card"><div class="chart-heading"><h3>Tariff rates detected</h3><span>Bill line items</span></div><div class="completeness-grid">{bucket_rows}</div></div>
+      </div>
+      <details class="evidence-trail"><summary>Extraction notes</summary><ul>{warning_html}</ul></details>
+    </section>
+    """
+
+
+def bill_bucket_rows_html(bill: dict, settings: Settings) -> str:
+    totals = bill.get("totals") or {}
+    buckets = totals.get("usage_by_bucket") or {}
+    configured = {
+        "overnight": settings.import_rates.get("overnight"),
+        "off_peak": settings.import_rates.get("off_peak"),
+        "super_off_peak": settings.import_rates.get("super_off_peak"),
+        "peak": settings.import_rates.get("peak"),
+    }
+    rows = []
+    for bucket, values in buckets.items():
+        rate = values.get("unit_rate") if isinstance(values, dict) else None
+        kwh_value = values.get("kwh") if isinstance(values, dict) else None
+        configured_rate = configured.get(bucket)
+        mismatch = (
+            configured_rate is not None and rate is not None and abs(float(configured_rate) - float(rate)) > 0.0005
+        )
+        rows.append(
+            f"""
+            <div class="completeness-row {'bad' if mismatch else 'good'}">
+              <span>{html.escape(str(bucket).replace("_", " ").title())}</span>
+              <strong>{html.escape(f"{float(kwh_value or 0):.2f} kWh @ ${float(rate or 0):.6f}")}</strong>
+              <small>{html.escape("Configured tariff differs from bill rate." if mismatch else "Matches configured rate or no configured comparison.")}</small>
+            </div>
+            """
+        )
+    return "".join(rows) or '<p class="notice">No usage bucket rates were extracted.</p>'
+
+
 def bill_change_explanation_html(explanation: Optional[dict], compact: bool = False) -> str:
     if not explanation:
         return ""
@@ -6014,30 +6102,30 @@ def imports_page_html(
     )
     import_guidance = """
       <div class="onboarding-steps">
-        <div><span>1</span><strong>Choose source export</strong><p>PowerMonitor currently supports Ocular EV charging history Excel exports.</p></div>
-        <div><span>2</span><strong>Preview before saving</strong><p>The preview checks rows, dates, energy totals, and validation issues before anything is imported.</p></div>
-        <div><span>3</span><strong>Import updates the dashboard</strong><p>Accepted sessions are matched to your household and used in bills, EV analytics, and confidence messaging.</p></div>
+        <div><span>1</span><strong>Choose source export</strong><p>PowerMonitor supports Ocular EV charging history Excel exports and Synergy PDF bills.</p></div>
+        <div><span>2</span><strong>Preview before saving</strong><p>The preview checks rows, bill totals, billing periods, energy totals, and validation issues before anything is imported.</p></div>
+        <div><span>3</span><strong>Import updates the dashboard</strong><p>Accepted sessions and bills are matched to your household and used in bills, EV analytics, and confidence messaging.</p></div>
       </div>
     """
     troubleshooting = """
       <ul class="guidance-list">
-        <li>Use the original `.xlsx` or `.xlsm` export from Ocular where possible.</li>
-        <li>If preview shows validation issues, export the charging history again and retry before committing.</li>
-        <li>Re-importing history is safe: existing sessions are updated rather than duplicated.</li>
+        <li>Use the original `.xlsx` or `.xlsm` export from Ocular, or the original Synergy bill PDF.</li>
+        <li>If preview shows validation issues, export the source file again and retry before committing.</li>
+        <li>Re-importing history is safe: existing sessions are updated and duplicate bills are ignored.</li>
         <li>The main dashboard will not auto-refresh while you are choosing or uploading a file.</li>
       </ul>
     """
 
     return f"""
     <section class="report-section import-panel">
-      <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Choose an Ocular Excel export from your phone, tablet, or Mac.</p></div>
+      <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Choose an Ocular Excel export or Synergy PDF bill from your phone, tablet, or Mac.</p></div>
       {disclosure_html("First-time import guide", "What to upload and what happens next", import_guidance, open_by_default=True, css_class="onboarding-guide")}
       {capability_note}
       {provider_html}
       {observation_html}
       {setup_task_html_block}
       <form class="import-form" method="post" action="/imports/preview" enctype="multipart/form-data">
-        <label><span>Ocular Excel file</span><input type="file" name="import_file" accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" required></label>
+        <label><span>Ocular Excel or Synergy PDF</span><input type="file" name="import_file" accept=".xlsx,.xlsm,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" required></label>
         <button type="submit">Preview import</button>
       </form>
       <p class="notice">The dashboard will not auto-refresh while you are choosing or uploading a file.</p>
@@ -6263,6 +6351,10 @@ def write_html(
         ),
         projected=True,
     )
+    try:
+        actual_bill_comparison = data_engine().compare_projected_to_latest_synergy_bill(glance_projected)
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        actual_bill_comparison = None
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
     overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
@@ -6523,6 +6615,7 @@ def write_html(
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
     {financial_highlights_html(period_summary, glance_projected, plan, recommendation_presentations)}
+    {actual_synergy_bill_html(actual_bill_comparison, settings)}
     {bill_change_explanation_html(bill_change)}
     {summary_html(selected_period.label, period_summary, settings)}
     {bill_attribution_html(period_summary, plan, settings)}

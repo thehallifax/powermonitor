@@ -122,6 +122,16 @@ start day, optional retailer label, and supported tariff plan. Saving that
 local form updates `config/settings.json` and immediately completes the
 Billing Cycle setup task.
 
+The Imports page supports local uploads for:
+
+- Ocular EV charging history Excel exports.
+- Synergy PDF bills for actual bill reconciliation.
+
+Synergy bill imports preview extracted invoice details, billing periods, tariff
+line items, export credits, GST, and bill totals before anything is committed.
+PowerMonitor masks account and NMI identifiers in normal UI/API output and uses
+imported bills to compare projected bills with actual retailer bills.
+
 Runtime logs are written to:
 
 - `logs/collect.log`

@@ -13,6 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import import_ocular_export
+import import_synergy_bill
 import report
 from engine.import_framework import detect_importer
 from engine.models import to_api_safe
@@ -125,6 +126,13 @@ def provider_action_redirect(provider_id: str, action: str, result) -> str:
         }
     )
     return f"/?{query}#system-provider-{provider_id}"
+
+
+def format_money(value) -> str:
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def parse_port(value) -> int:
@@ -288,7 +296,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
             logging.error("POST failed for %s", request.path)
             if request.path.startswith("/imports/"):
-                self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export and try again.", status=400)
+                self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export or Synergy PDF bill and try again.", status=400)
             elif request.path == "/setup/billing-cycle":
                 result_html = self.import_result_html(
                     "Billing cycle not saved",
@@ -518,7 +526,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         importer = detect_importer(upload_path, self.importers())
         if importer is None:
             upload_path.unlink(missing_ok=True)
-            self.send_import_error("That file type is not supported yet. Please choose an Ocular Excel export (.xlsx or .xlsm).", status=400)
+            self.send_import_error("That file type is not supported yet. Please choose an Ocular Excel export or Synergy PDF bill.", status=400)
             return
 
         parsed = importer.parse(upload_path)
@@ -564,7 +572,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         importer = detect_importer(upload_path, self.importers())
         if importer is None:
             engine.update_import_job(job_id, "failed", message="Unsupported import format")
-            self.send_import_error("That uploaded file is not a supported Ocular Excel export. Please upload it again.", status=400)
+            self.send_import_error("That uploaded file is not a supported Ocular Excel export or Synergy PDF bill. Please upload it again.", status=400)
             return
 
         parsed = importer.parse(upload_path)
@@ -617,10 +625,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         field = form["import_file"] if "import_file" in form else None
         if field is None or not getattr(field, "filename", None):
-            raise ValueError("Choose an Ocular Excel file before previewing the import.")
+            raise ValueError("Choose an Ocular Excel file or Synergy PDF bill before previewing the import.")
         content = field.file.read()
         if not content:
-            raise ValueError("That file is empty. Please choose the exported spreadsheet again.")
+            raise ValueError("That file is empty. Please choose the export or bill again.")
         return safe_filename(field.filename), content
 
     def write_upload(self, filename: str, content: bytes) -> Path:
@@ -632,17 +640,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def importers():
-        return [import_ocular_export.OcularEVImporter(report.DB_PATH)]
+        return [
+            import_ocular_export.OcularEVImporter(report.DB_PATH),
+            import_synergy_bill.SynergyBillImporter(report.DB_PATH),
+        ]
 
     def send_import_preview(self, source_name: str, filename: str, preview, job_id: Optional[str]) -> None:
         issues = "".join(
             f"<li>{html.escape(issue.severity.title())}: {html.escape(issue.message)}</li>"
             for issue in preview.issues
         ) or "<li>No validation issues found.</li>"
-        samples = "".join(
-            f"<tr><td>{html.escape(str(item.get('record_number') or ''))}</td><td>{html.escape(str(item.get('start_time') or ''))}</td><td>{float(item.get('energy_kwh') or 0):.2f} kWh</td></tr>"
-            for item in preview.sample_records
-        ) or '<tr><td colspan="3">No sample records available.</td></tr>'
+        if preview.source.source_id == "synergy_bill_pdf":
+            samples = "".join(
+                f"""
+                <tr>
+                  <td>{html.escape(str(item.get('invoice_number') or ''))}</td>
+                  <td>{html.escape(str(item.get('account_number') or ''))}</td>
+                  <td>{html.escape(str(item.get('nmi') or ''))}</td>
+                  <td>{html.escape(str(item.get('issue_date') or ''))}</td>
+                  <td>{html.escape(format_money(item.get('bill_total')))}</td>
+                  <td>{html.escape(format_money(item.get('export_credits')))}</td>
+                  <td>{html.escape(str(item.get('confidence') or '').title())}</td>
+                </tr>
+                """
+                for item in preview.sample_records
+            ) or '<tr><td colspan="7">No bill details available.</td></tr>'
+            sample_heading = "<tr><th>Invoice</th><th>Account</th><th>NMI</th><th>Issue date</th><th>Bill total</th><th>Export credits</th><th>Confidence</th></tr>"
+            summary_text = (
+                f"{html.escape(filename)}: invoice preview is ready, covering "
+                f"{html.escape(str(preview.date_start or 'n/a'))} to {html.escape(str(preview.date_end or 'n/a'))}. "
+                f"Detected usage totals {preview.total_energy_kwh:.2f} kWh."
+            )
+        else:
+            samples = "".join(
+                f"<tr><td>{html.escape(str(item.get('record_number') or ''))}</td><td>{html.escape(str(item.get('start_time') or ''))}</td><td>{float(item.get('energy_kwh') or 0):.2f} kWh</td></tr>"
+                for item in preview.sample_records
+            ) or '<tr><td colspan="3">No sample records available.</td></tr>'
+            sample_heading = "<tr><th>Record</th><th>Start</th><th>Energy</th></tr>"
+            summary_text = (
+                f"{html.escape(filename)}: {preview.valid_records} of {preview.total_records} rows are ready to import, "
+                f"covering {preview.total_energy_kwh:.2f} kWh from {html.escape(str(preview.date_start or 'n/a'))} "
+                f"to {html.escape(str(preview.date_end or 'n/a'))}."
+            )
         commit_form = (
             f"""
             <form class="import-form" method="post" action="/imports/commit">
@@ -659,12 +698,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
   <section class="panel">
     <p class="eyebrow">Import preview</p>
     <h1>{html.escape(source_name)}</h1>
-    <p>{html.escape(filename)}: {preview.valid_records} of {preview.total_records} rows are ready to import, covering {preview.total_energy_kwh:.2f} kWh from {html.escape(str(preview.date_start or 'n/a'))} to {html.escape(str(preview.date_end or 'n/a'))}.</p>
+    <p>{summary_text}</p>
     {commit_form}
     <a class="secondary-link" href="/#imports">Back to Dashboard</a>
   </section>
   <section class="panel"><h2>Validation</h2><ul>{issues}</ul></section>
-  <section class="panel"><h2>Sample</h2><div class="table-scroll"><table><thead><tr><th>Record</th><th>Start</th><th>Energy</th></tr></thead><tbody>{samples}</tbody></table></div></section>
+  <section class="panel"><h2>Extracted details</h2><div class="table-scroll"><table><thead>{sample_heading}</thead><tbody>{samples}</tbody></table></div></section>
 </main></body></html>"""
         self.send_html(content.encode("utf-8"))
 

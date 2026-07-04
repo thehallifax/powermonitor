@@ -400,6 +400,7 @@ class DataEngine:
         DataEngine._ensure_household_state_snapshot_table(conn)
         DataEngine._ensure_state_change_table(conn)
         DataEngine._ensure_notification_tables(conn)
+        DataEngine._ensure_synergy_bill_tables(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -644,6 +645,9 @@ class DataEngine:
             "state_changes",
             "notification_rule_preferences",
             "notification_history",
+            "synergy_bills",
+            "synergy_bill_periods",
+            "synergy_bill_line_items",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -682,6 +686,97 @@ class DataEngine:
             """
             CREATE INDEX IF NOT EXISTS idx_import_jobs_household_created
             ON import_jobs(household_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_synergy_bills_household_issue
+            ON synergy_bills(household_id, issue_date DESC)
+            """
+        )
+
+    @staticmethod
+    def _ensure_synergy_bill_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synergy_bills (
+                bill_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                retailer TEXT NOT NULL,
+                account_last3 TEXT,
+                account_hash TEXT,
+                invoice_number TEXT NOT NULL,
+                issue_date TEXT,
+                due_date TEXT,
+                bill_total REAL,
+                total_amount_owing REAL,
+                opening_balance REAL,
+                supply_address_hash TEXT,
+                nmi_last3 TEXT,
+                nmi_hash TEXT,
+                next_scheduled_read_date TEXT,
+                meter_number_hash TEXT,
+                gst REAL,
+                confidence TEXT NOT NULL,
+                warnings_json TEXT NOT NULL,
+                totals_json TEXT NOT NULL,
+                raw_summary_json TEXT NOT NULL,
+                import_job_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_synergy_bills_household_invoice
+            ON synergy_bills(household_id, retailer, invoice_number)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synergy_bill_periods (
+                period_id TEXT PRIMARY KEY,
+                bill_id TEXT NOT NULL,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                plan_name TEXT,
+                start_date TEXT,
+                end_date TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_synergy_bill_periods_bill
+            ON synergy_bill_periods(household_id, bill_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synergy_bill_line_items (
+                line_item_id TEXT PRIMARY KEY,
+                bill_id TEXT NOT NULL,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                category TEXT NOT NULL,
+                bucket TEXT,
+                description TEXT NOT NULL,
+                plan_name TEXT,
+                period_start TEXT,
+                period_end TEXT,
+                kwh REAL,
+                days INTEGER,
+                unit_rate REAL,
+                amount REAL,
+                raw_text TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_synergy_bill_line_items_bill
+            ON synergy_bill_line_items(household_id, bill_id)
             """
         )
 
@@ -1462,6 +1557,292 @@ class DataEngine:
             return self.get_import_job(job_id)
 
         return self._with_connection(update)
+
+    def import_synergy_bill(
+        self,
+        bill: dict[str, Any],
+        import_job_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+        retailer = str(bill.get("retailer") or "Synergy")
+        invoice_number = str(bill.get("invoice_number") or "").strip()
+        if not invoice_number:
+            raise ValueError("Synergy bill invoice number is required")
+        bill_id = hashlib.sha256(f"{household_id}:{retailer}:{invoice_number}".encode("utf-8")).hexdigest()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+
+        def last3(value: Any) -> Optional[str]:
+            digits = re.sub(r"\D+", "", str(value or ""))
+            return digits[-3:] if digits else None
+
+        def value_hash(value: Any) -> Optional[str]:
+            normalized = re.sub(r"\s+", "", str(value or ""))
+            if not normalized:
+                return None
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        def insert(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_synergy_bill_tables(conn)
+            existing = conn.execute(
+                """
+                SELECT bill_id
+                FROM synergy_bills
+                WHERE household_id = ? AND retailer = ? AND invoice_number = ?
+                """,
+                (household_id, retailer, invoice_number),
+            ).fetchone()
+            if existing:
+                return {"status": "duplicate", "bill_id": existing[0], "invoice_number": invoice_number}
+            redacted_summary = self._redact_synergy_bill_dict(bill)
+            conn.execute(
+                """
+                INSERT INTO synergy_bills (
+                    bill_id,
+                    household_id,
+                    retailer,
+                    account_last3,
+                    account_hash,
+                    invoice_number,
+                    issue_date,
+                    due_date,
+                    bill_total,
+                    total_amount_owing,
+                    opening_balance,
+                    supply_address_hash,
+                    nmi_last3,
+                    nmi_hash,
+                    next_scheduled_read_date,
+                    meter_number_hash,
+                    gst,
+                    confidence,
+                    warnings_json,
+                    totals_json,
+                    raw_summary_json,
+                    import_job_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bill_id,
+                    household_id,
+                    retailer,
+                    last3(bill.get("account_number")),
+                    value_hash(bill.get("account_number")),
+                    invoice_number,
+                    bill.get("issue_date"),
+                    bill.get("due_date"),
+                    bill.get("bill_total"),
+                    bill.get("total_amount_owing"),
+                    bill.get("opening_balance"),
+                    value_hash(bill.get("supply_address")),
+                    last3(bill.get("nmi")),
+                    value_hash(bill.get("nmi")),
+                    bill.get("next_scheduled_read_date"),
+                    value_hash(bill.get("meter_number")),
+                    bill.get("gst"),
+                    str(bill.get("confidence") or "medium"),
+                    json.dumps(bill.get("warnings") or [], sort_keys=True),
+                    json.dumps(bill.get("totals") or {}, sort_keys=True),
+                    json.dumps(redacted_summary, sort_keys=True),
+                    import_job_id,
+                    now,
+                    now,
+                ),
+            )
+            for index, period in enumerate(bill.get("periods") or []):
+                period_id = hashlib.sha256(f"{bill_id}:period:{index}".encode("utf-8")).hexdigest()
+                conn.execute(
+                    """
+                    INSERT INTO synergy_bill_periods (
+                        period_id, bill_id, household_id, plan_name, start_date, end_date, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        period_id,
+                        bill_id,
+                        household_id,
+                        period.get("plan_name"),
+                        period.get("start_date"),
+                        period.get("end_date"),
+                        now,
+                    ),
+                )
+            for index, item in enumerate(bill.get("line_items") or []):
+                line_item_id = hashlib.sha256(f"{bill_id}:line:{index}".encode("utf-8")).hexdigest()
+                conn.execute(
+                    """
+                    INSERT INTO synergy_bill_line_items (
+                        line_item_id,
+                        bill_id,
+                        household_id,
+                        category,
+                        bucket,
+                        description,
+                        plan_name,
+                        period_start,
+                        period_end,
+                        kwh,
+                        days,
+                        unit_rate,
+                        amount,
+                        raw_text,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        line_item_id,
+                        bill_id,
+                        household_id,
+                        item.get("category"),
+                        item.get("bucket"),
+                        item.get("description"),
+                        item.get("plan_name"),
+                        item.get("period_start"),
+                        item.get("period_end"),
+                        item.get("kwh"),
+                        item.get("days"),
+                        item.get("unit_rate"),
+                        item.get("amount"),
+                        item.get("raw_text"),
+                        now,
+                    ),
+                )
+            conn.commit()
+            return {"status": "inserted", "bill_id": bill_id, "invoice_number": invoice_number}
+
+        return self._with_connection(insert)
+
+    @staticmethod
+    def _redact_synergy_bill_dict(bill: dict[str, Any]) -> dict[str, Any]:
+        def masked(value: Any) -> Optional[str]:
+            digits = re.sub(r"\D+", "", str(value or ""))
+            return f"•••{digits[-3:]}" if digits else None
+
+        redacted = dict(bill)
+        redacted["account_number"] = masked(bill.get("account_number"))
+        redacted["nmi"] = masked(bill.get("nmi"))
+        redacted["supply_address"] = None
+        redacted["meter_number"] = None
+        return redacted
+
+    def get_latest_synergy_bill(self) -> Optional[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_synergy_bill_tables(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    bill_id,
+                    retailer,
+                    account_last3,
+                    invoice_number,
+                    issue_date,
+                    due_date,
+                    bill_total,
+                    total_amount_owing,
+                    opening_balance,
+                    nmi_last3,
+                    next_scheduled_read_date,
+                    gst,
+                    confidence,
+                    warnings_json,
+                    totals_json,
+                    import_job_id,
+                    created_at
+                FROM synergy_bills
+                WHERE household_id = ?
+                ORDER BY COALESCE(issue_date, created_at) DESC, created_at DESC
+                LIMIT 1
+                """,
+                (household_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            bill_id = row[0]
+            periods = conn.execute(
+                """
+                SELECT plan_name, start_date, end_date
+                FROM synergy_bill_periods
+                WHERE household_id = ? AND bill_id = ?
+                ORDER BY start_date
+                """,
+                (household_id, bill_id),
+            ).fetchall()
+            items = conn.execute(
+                """
+                SELECT category, bucket, description, plan_name, period_start, period_end, kwh, days, unit_rate, amount
+                FROM synergy_bill_line_items
+                WHERE household_id = ? AND bill_id = ?
+                ORDER BY rowid
+                """,
+                (household_id, bill_id),
+            ).fetchall()
+            return {
+                "bill_id": bill_id,
+                "retailer": row[1],
+                "account_number": f"•••{row[2]}" if row[2] else None,
+                "invoice_number": row[3],
+                "issue_date": row[4],
+                "due_date": row[5],
+                "bill_total": row[6],
+                "total_amount_owing": row[7],
+                "opening_balance": row[8],
+                "nmi": f"•••{row[9]}" if row[9] else None,
+                "next_scheduled_read_date": row[10],
+                "gst": row[11],
+                "confidence": row[12],
+                "warnings": json.loads(row[13] or "[]"),
+                "totals": json.loads(row[14] or "{}"),
+                "import_job_id": row[15],
+                "created_at": row[16],
+                "periods": [
+                    {"plan_name": period[0], "start_date": period[1], "end_date": period[2]}
+                    for period in periods
+                ],
+                "line_items": [
+                    {
+                        "category": item[0],
+                        "bucket": item[1],
+                        "description": item[2],
+                        "plan_name": item[3],
+                        "period_start": item[4],
+                        "period_end": item[5],
+                        "kwh": item[6],
+                        "days": item[7],
+                        "unit_rate": item[8],
+                        "amount": item[9],
+                    }
+                    for item in items
+                ],
+            }
+
+        return self._with_connection(query)
+
+    def compare_projected_to_latest_synergy_bill(self, projected_bill: Optional[float]) -> Optional[dict[str, Any]]:
+        bill = self.get_latest_synergy_bill()
+        if not bill:
+            return None
+        actual = bill.get("bill_total")
+        if actual is None or projected_bill is None:
+            difference = None
+        else:
+            difference = float(projected_bill) - float(actual)
+        return {
+            "latest_bill": bill,
+            "projected_bill": projected_bill,
+            "actual_bill": actual,
+            "difference": difference,
+            "status": (
+                "projection_higher" if difference is not None and difference > 0.01 else
+                "projection_lower" if difference is not None and difference < -0.01 else
+                "matched" if difference is not None else
+                "comparison_unavailable"
+            ),
+        }
 
     def persist_provider_observations(
         self,

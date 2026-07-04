@@ -1,5 +1,21 @@
 # Changelog
 
+## BILL-001 - Synergy PDF Bill Importer
+
+- Added a Synergy PDF bill importer that extracts invoice metadata, masked
+  account/NMI details, billing periods, plan sections, usage/export buckets,
+  unit rates, supply charges, GST, and bill totals.
+- Added structured bill persistence for Synergy bill headers, plan periods, and
+  line items with duplicate invoice protection.
+- Extended the Imports flow to preview and commit Synergy PDF bills alongside
+  Ocular charging exports.
+- Added a Bills & Tariffs reconciliation panel showing the latest actual
+  Synergy bill, projected-vs-actual comparison, detected tariff rates, plan
+  changes, extraction warnings, and rate mismatches.
+- Added regression coverage for Synergy bill parsing, multiple plan periods,
+  EV Add On buckets, export credits, supply charges, GST, masking, preview
+  before commit, duplicate invoice handling, and projected-vs-actual comparison.
+
 ## Bugfix - SolarEdge Zero-Day Diagnostics and Local Day Mapping
 
 - Normalized SolarEdge measurement timestamps to the household's AWST day
