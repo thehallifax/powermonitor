@@ -335,7 +335,21 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
             imports = []
 
             def fetch_with_recovery(collection_day, temp_path):
-                temp_path.write_text('{"measurements": []}', encoding="utf-8")
+                temp_path.write_text(
+                    json.dumps(
+                        {
+                            "measurements": [
+                                {
+                                    "measurementTime": f"{collection_day.isoformat()}T09:00:00+08:00",
+                                    "production": 1000,
+                                    "consumption": 500,
+                                    "productionDistribution": {"productionToGrid": 400},
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 return "200", 24, "credential_refresh"
 
             def import_day(temp_path):
@@ -345,7 +359,9 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
                     "data received 24; "
                     "time range imported 2026-07-04T00:00:00+08:00 to 2026-07-04T23:45:00+08:00; "
                     "records imported 12; "
+                    "records updated 0; "
                     "duplicates ignored 12; "
+                    "zero payload rows skipped 0; "
                     "observations promoted 0\n"
                     "Imported 12 readings"
                 )
@@ -370,9 +386,97 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertEqual(summary["imported_or_updated"], 48)
         self.assertEqual(summary["data_received"], 96)
         self.assertEqual(summary["duplicates_skipped"], 48)
+        self.assertEqual(summary["zero_payload_skipped"], 0)
         self.assertEqual(len(summary["day_summaries"]), 4)
+        self.assertEqual(summary["day_summaries"][-1]["production_kwh_sum"], 0.25)
+        self.assertEqual(summary["day_summaries"][-1]["export_kwh_sum"], 0.1)
+        self.assertFalse(summary["day_summaries"][-1]["all_rows_zero"])
         self.assertEqual(summary["auth_paths"], ["credential_refresh"])
         self.assertTrue(summary["report_regenerated"])
+
+    def test_payload_diagnostics_reports_zero_payloads_and_ranges(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "measurements": [
+                            {
+                                "measurementTime": "2026-07-03T09:00:00+08:00",
+                                "production": 1000,
+                                "consumption": 0,
+                                "productionDistribution": {"productionToGrid": 500},
+                            },
+                            {
+                                "measurementTime": "2026-07-03T09:15:00+08:00",
+                                "production": 0,
+                                "consumption": 0,
+                                "productionDistribution": {"productionToGrid": 0},
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            diagnostics = collect_today.payload_diagnostics(path, collect_today.date(2026, 7, 3))
+
+        self.assertEqual(diagnostics["requested_date"], "2026-07-03")
+        self.assertEqual(diagnostics["api_date_range_sent"], "2026-07-03")
+        self.assertEqual(diagnostics["measurement_count"], 2)
+        self.assertEqual(diagnostics["first_measurement_time"], "2026-07-03T09:00:00+08:00")
+        self.assertEqual(diagnostics["last_measurement_time"], "2026-07-03T09:15:00+08:00")
+        self.assertEqual(diagnostics["production_kwh_sum"], 0.25)
+        self.assertEqual(diagnostics["export_kwh_sum"], 0.125)
+        self.assertFalse(diagnostics["all_rows_zero"])
+
+    def test_payload_diagnostics_marks_all_zero_payload(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "measurements": [
+                            {
+                                "measurementTime": "2026-07-03T09:00:00+08:00",
+                                "production": 0,
+                                "consumption": 0,
+                                "productionDistribution": {"productionToGrid": 0},
+                                "consumptionDistribution": {"consumptionFromGrid": 0},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            diagnostics = collect_today.payload_diagnostics(path, collect_today.date(2026, 7, 3))
+
+        self.assertEqual(diagnostics["measurement_count"], 1)
+        self.assertEqual(diagnostics["production_kwh_sum"], 0.0)
+        self.assertEqual(diagnostics["export_kwh_sum"], 0.0)
+        self.assertTrue(diagnostics["all_rows_zero"])
+
+    def test_validate_response_uses_awst_local_day(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "measurements": [
+                            {
+                                "measurementTime": "2026-07-02T16:15:00Z",
+                                "production": 1000,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            measurements = collect_today.validate_response(path, collect_today.date(2026, 7, 3))
+
+        self.assertEqual(measurements, 1)
 
     def test_solaredge_collection_backfill_is_at_least_four_days(self):
         with patch.object(collect_today, "PROJECT_ROOT", Path("/missing/project")):

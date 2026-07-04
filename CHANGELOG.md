@@ -1,5 +1,18 @@
 # Changelog
 
+## Bugfix - SolarEdge Zero-Day Diagnostics and Local Day Mapping
+
+- Normalized SolarEdge measurement timestamps to the household's AWST day
+  before validation, import, and report summary date filtering.
+- Added per-day SolarEdge fetch diagnostics for requested date, API date range,
+  measurement range, production/export totals, and all-zero payload detection.
+- Prevented zero-only SolarEdge payloads from overwriting existing non-zero
+  readings while still allowing later non-zero payloads to repair zero rows.
+- Surfaced imported/updated, duplicate, and zero-payload skipped counts through
+  collection and reconnect diagnostics.
+- Added regression coverage for AWST local-day mapping, zero-payload overwrite
+  protection, zero-row repair, and collection payload diagnostics.
+
 ## Bugfix - SolarEdge Catch-Up Collection Window
 
 - Changed SolarEdge collection to request at least a four-day catch-up window:

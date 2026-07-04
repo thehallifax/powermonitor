@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,6 +36,7 @@ TEMP_OUTFILE = OUTFILE.with_suffix(".json.tmp")
 LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
 SITE_ID = os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID", "4457399")
 REFRESH_SCRIPT = PROJECT_ROOT / "collector" / "refresh_solaredge_session.py"
+LOCAL_TIMEZONE = ZoneInfo("Australia/Perth")
 
 
 class AuthenticationFailure(RuntimeError):
@@ -221,6 +223,7 @@ class SolarEdgeAdapter:
             "requested_start_date": summary.get("requested_start_date"),
             "requested_end_date": summary.get("requested_end_date"),
             "duplicates_skipped": int(summary.get("duplicates_skipped") or 0),
+            "zero_payload_skipped": int(summary.get("zero_payload_skipped") or 0),
             "data_received": int(summary.get("data_received") or 0),
             "http_status": status,
             "data_retrieved": success and measurements > 0,
@@ -336,7 +339,7 @@ def validate_response(path: Path, expected_day: date) -> int:
         if not isinstance(timestamp, str):
             raise ValueError(f"SolarEdge measurement {index} has no valid measurementTime")
         try:
-            measurement_time = datetime.fromisoformat(timestamp)
+            measurement_time = parse_measurement_time(timestamp)
         except ValueError as exc:
             raise ValueError(f"SolarEdge measurement {index} has an invalid measurementTime") from exc
 
@@ -350,6 +353,72 @@ def validate_response(path: Path, expected_day: date) -> int:
     if not usable_measurements:
         raise ValueError("SolarEdge response contains no usable power values")
     return len(measurements)
+
+
+def parse_measurement_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=LOCAL_TIMEZONE)
+    return parsed.astimezone(LOCAL_TIMEZONE)
+
+
+def watts_to_kwh_15min(value) -> float:
+    if value is None:
+        return 0.0
+    return float(value) * 0.25 / 1000.0
+
+
+def payload_diagnostics(path: Path, requested_day: date) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "requested_date": requested_day.isoformat(),
+            "api_date_range_sent": requested_day.isoformat(),
+            "measurement_count": 0,
+            "first_measurement_time": None,
+            "last_measurement_time": None,
+            "production_kwh_sum": 0.0,
+            "export_kwh_sum": 0.0,
+            "all_rows_zero": True,
+        }
+    measurements = data.get("measurements") if isinstance(data, dict) else []
+    if not isinstance(measurements, list):
+        measurements = []
+    timestamps = [
+        str(item.get("measurementTime"))
+        for item in measurements
+        if isinstance(item, dict) and item.get("measurementTime")
+    ]
+    production_kwh = 0.0
+    export_kwh = 0.0
+    non_zero = False
+    for measurement in measurements:
+        if not isinstance(measurement, dict):
+            continue
+        production_kwh += watts_to_kwh_15min(measurement.get("production"))
+        production_dist = measurement.get("productionDistribution") or {}
+        if isinstance(production_dist, dict):
+            export_kwh += watts_to_kwh_15min(production_dist.get("productionToGrid"))
+        if any(
+            abs(float(measurement.get(key) or 0)) > 0.000001
+            for key in ("production", "consumption", "import", "export")
+        ):
+            non_zero = True
+        for dist_key in ("productionDistribution", "consumptionDistribution"):
+            dist = measurement.get(dist_key) or {}
+            if isinstance(dist, dict) and any(abs(float(value or 0)) > 0.000001 for value in dist.values()):
+                non_zero = True
+    return {
+        "requested_date": requested_day.isoformat(),
+        "api_date_range_sent": requested_day.isoformat(),
+        "measurement_count": len(measurements),
+        "first_measurement_time": min(timestamps) if timestamps else None,
+        "last_measurement_time": max(timestamps) if timestamps else None,
+        "production_kwh_sum": round(production_kwh, 3),
+        "export_kwh_sum": round(export_kwh, 3),
+        "all_rows_zero": not non_zero,
+    }
 
 
 def fetch_with_session_recovery(current_day: date, output_path: Path) -> tuple[str, int, str]:
@@ -483,18 +552,27 @@ def parse_import_summary(importer_message: str) -> dict[str, int]:
         "data_received": 0,
         "imported_or_updated": 0,
         "duplicates_skipped": 0,
+        "zero_payload_skipped": 0,
         "observations_promoted": 0,
     }
     patterns = {
         "data_received": r"data received\s+(\d+)",
-        "imported_or_updated": r"records imported\s+(\d+)",
+        "imported": r"records imported\s+(\d+)",
+        "updated": r"records updated\s+(\d+)",
         "duplicates_skipped": r"duplicates ignored\s+(\d+)",
+        "zero_payload_skipped": r"zero payload rows skipped\s+(\d+)",
         "observations_promoted": r"observations promoted\s+(\d+)",
     }
+    parsed = {}
     for key, pattern in patterns.items():
         match = re.search(pattern, importer_message or "", re.IGNORECASE)
         if match:
-            summary[key] = int(match.group(1))
+            parsed[key] = int(match.group(1))
+    summary["imported_or_updated"] = parsed.get("imported", 0) + parsed.get("updated", 0)
+    summary["duplicates_skipped"] = parsed.get("duplicates_skipped", 0)
+    summary["zero_payload_skipped"] = parsed.get("zero_payload_skipped", 0)
+    summary["observations_promoted"] = parsed.get("observations_promoted", 0)
+    summary["data_received"] = parsed.get("data_received", 0)
     if not summary["imported_or_updated"]:
         match = re.search(r"Imported\s+(\d+)\s+readings", importer_message or "", re.IGNORECASE)
         if match:
@@ -583,6 +661,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
     total_imported = 0
     total_received = 0
     total_duplicates = 0
+    total_zero_payload_skipped = 0
     failures = []
     auth_paths = set()
     day_summaries = []
@@ -593,6 +672,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         log_solaredge_action(action, stage="fetch", data_fetch_attempted=True, day=collection_day)
         try:
             _status, measurement_count, auth_path = fetch_with_session_recovery(collection_day, temp_outfile)
+            payload_summary = payload_diagnostics(temp_outfile, collection_day)
             auth_paths.add(auth_path)
             log_solaredge_action(
                 action,
@@ -601,8 +681,14 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
                 data_fetch_attempted=True,
                 import_attempted=True,
                 requested_date_range=f"{start_day} to {current_day}",
+                api_date_range_sent=payload_summary["api_date_range_sent"],
                 measurements=measurement_count,
                 day=collection_day,
+                first_measurement_time=payload_summary["first_measurement_time"],
+                last_measurement_time=payload_summary["last_measurement_time"],
+                production_kwh_sum=payload_summary["production_kwh_sum"],
+                export_kwh_sum=payload_summary["export_kwh_sum"],
+                all_rows_zero=payload_summary["all_rows_zero"],
             )
             imported_count, importer_message = import_day(temp_outfile)
             import_summary = parse_import_summary(importer_message)
@@ -627,28 +713,38 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         total_imported += imported_or_updated
         total_received += import_summary["data_received"] or measurement_count
         total_duplicates += import_summary["duplicates_skipped"]
+        total_zero_payload_skipped += import_summary["zero_payload_skipped"]
         day_summaries.append(
             {
                 "date": collection_day.isoformat(),
+                "api_date_range_sent": payload_summary["api_date_range_sent"],
                 "measurements_returned": measurement_count,
+                "first_measurement_time": payload_summary["first_measurement_time"],
+                "last_measurement_time": payload_summary["last_measurement_time"],
+                "production_kwh_sum": payload_summary["production_kwh_sum"],
+                "export_kwh_sum": payload_summary["export_kwh_sum"],
+                "all_rows_zero": payload_summary["all_rows_zero"],
                 "data_received": import_summary["data_received"] or measurement_count,
                 "imported_or_updated": imported_or_updated,
                 "duplicates_skipped": import_summary["duplicates_skipped"],
+                "zero_payload_skipped": import_summary["zero_payload_skipped"],
             }
         )
         logging.info(
-            "Collection succeeded for %s with %d measurements, %d imported/updated, %d duplicates skipped; importer: %s",
+            "Collection succeeded for %s with %d measurements, %d imported/updated, %d duplicates skipped, %d zero payload rows skipped; diagnostics=%s; importer: %s",
             collection_day,
             measurement_count,
             imported_or_updated,
             import_summary["duplicates_skipped"],
+            import_summary["zero_payload_skipped"],
+            payload_summary,
             importer_message or "no output",
         )
         if importer_message:
             print(importer_message)
 
     logging.info(
-        "SolarEdge recent collection finished: range %s to %s; %d/%d days succeeded, %d failed, %d measurements validated, %d readings imported/updated, %d duplicates skipped",
+        "SolarEdge recent collection finished: range %s to %s; %d/%d days succeeded, %d failed, %d measurements validated, %d readings imported/updated, %d duplicates skipped, %d zero payload rows skipped",
         start_day,
         current_day,
         succeeded,
@@ -657,6 +753,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         total_measurements,
         total_imported,
         total_duplicates,
+        total_zero_payload_skipped,
     )
 
     if not succeeded:
@@ -674,7 +771,8 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         f"fetched {succeeded}/{backfill_days} days; "
         f"validated {total_measurements} measurements; "
         f"imported/updated {total_imported}; "
-        f"skipped duplicates {total_duplicates}"
+        f"skipped duplicates {total_duplicates}; "
+        f"skipped zero payload rows {total_zero_payload_skipped}"
     )
     if failed:
         print(f"Partial collection: {failed}/{backfill_days} days failed; see {LOG_PATH}")
@@ -695,6 +793,8 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         measurements=total_measurements,
         imported_or_updated=total_imported,
         duplicates_skipped=total_duplicates,
+        zero_payload_skipped=total_zero_payload_skipped,
+        day_summaries=day_summaries,
     )
     return {
         "succeeded": succeeded,
@@ -708,6 +808,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         "imported_or_updated": total_imported,
         "data_received": total_received,
         "duplicates_skipped": total_duplicates,
+        "zero_payload_skipped": total_zero_payload_skipped,
         "day_summaries": day_summaries,
         "auth_paths": sorted(auth_paths),
         "report_regenerated": True,

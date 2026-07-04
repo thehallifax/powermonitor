@@ -3,10 +3,12 @@ import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 DEFAULT_HOUSEHOLD_ID = "default_household"
+LOCAL_TIMEZONE = ZoneInfo("Australia/Perth")
 
 RATES = {
     "super_off_peak": 0.086151,
@@ -39,6 +41,17 @@ def watts_to_kwh_15min(value):
         return 0.0
 
     return float(value) * 0.25 / 1000.0
+
+
+def parse_measurement_time(value):
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=LOCAL_TIMEZONE)
+    return parsed.astimezone(LOCAL_TIMEZONE)
+
+
+def is_non_zero_reading(*values):
+    return any(abs(float(value or 0)) > 0.000001 for value in values)
 
 
 def main():
@@ -89,7 +102,9 @@ def main():
 
     received = 0
     imported = 0
+    updated = 0
     duplicates_ignored = 0
+    zero_payload_skipped = 0
     imported_times = []
 
     for m in data.get("measurements", []):
@@ -100,7 +115,8 @@ def main():
         if not ts:
             continue
 
-        dt = datetime.fromisoformat(ts)
+        dt = parse_measurement_time(ts)
+        normalized_ts = dt.isoformat()
 
         bucket = bucket_for_time(dt)
 
@@ -124,12 +140,63 @@ def main():
         grid_to_home_kwh = watts_to_kwh_15min(grid_to_home_w)
 
         import_cost = grid_to_home_kwh * RATES[bucket]
+        incoming_non_zero = is_non_zero_reading(
+            production_kwh,
+            consumption_kwh,
+            solar_to_home_kwh,
+            solar_to_grid_kwh,
+            grid_to_home_kwh,
+        )
 
         cur.execute(
-            "SELECT 1 FROM readings WHERE household_id = ? AND measurement_time = ?",
-            (DEFAULT_HOUSEHOLD_ID, ts),
+            """
+            SELECT production_kwh, consumption_kwh, solar_to_home_kwh, solar_to_grid_kwh, grid_to_home_kwh
+            FROM readings
+            WHERE household_id = ? AND measurement_time = ?
+            """,
+            (DEFAULT_HOUSEHOLD_ID, normalized_ts),
         )
-        if cur.fetchone():
+        existing = cur.fetchone()
+        if existing:
+            existing_non_zero = is_non_zero_reading(*existing)
+            if existing_non_zero and not incoming_non_zero:
+                zero_payload_skipped += 1
+                continue
+            if not existing_non_zero and incoming_non_zero:
+                cur.execute("""
+                UPDATE readings
+                SET tariff_bucket = ?,
+                    production_w = ?,
+                    consumption_w = ?,
+                    solar_to_home_w = ?,
+                    solar_to_grid_w = ?,
+                    grid_to_home_w = ?,
+                    production_kwh = ?,
+                    consumption_kwh = ?,
+                    solar_to_home_kwh = ?,
+                    solar_to_grid_kwh = ?,
+                    grid_to_home_kwh = ?,
+                    import_cost = ?
+                WHERE household_id = ? AND measurement_time = ?
+                """, (
+                    bucket,
+                    production_w,
+                    consumption_w,
+                    solar_to_home_w,
+                    solar_to_grid_w,
+                    grid_to_home_w,
+                    production_kwh,
+                    consumption_kwh,
+                    solar_to_home_kwh,
+                    solar_to_grid_kwh,
+                    grid_to_home_kwh,
+                    import_cost,
+                    DEFAULT_HOUSEHOLD_ID,
+                    normalized_ts,
+                ))
+                updated += 1
+                imported_times.append(dt)
+                continue
             duplicates_ignored += 1
             continue
 
@@ -158,7 +225,7 @@ def main():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             DEFAULT_HOUSEHOLD_ID,
-            ts,
+            normalized_ts,
             bucket,
 
             production_w,
@@ -195,10 +262,13 @@ def main():
         f"data received {received}; "
         f"time range imported {start_time} to {end_time}; "
         f"records imported {imported}; "
+        f"records updated {updated}; "
         f"duplicates ignored {duplicates_ignored}; "
+        f"zero payload rows skipped {zero_payload_skipped}; "
         f"observations promoted {observations_promoted}"
     )
     print(f"Imported {imported} readings")
+    print(f"Updated {updated} readings")
 
     conn.close()
 
