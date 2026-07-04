@@ -340,11 +340,19 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
 
             def import_day(temp_path):
                 imports.append(temp_path.name)
-                return 24, "Imported 24 readings"
+                return 12, (
+                    "SolarEdge import complete: "
+                    "data received 24; "
+                    "time range imported 2026-07-04T00:00:00+08:00 to 2026-07-04T23:45:00+08:00; "
+                    "records imported 12; "
+                    "duplicates ignored 12; "
+                    "observations promoted 0\n"
+                    "Imported 12 readings"
+                )
 
             with patch.object(collect_today, "OUTFILE", output_path), \
                 patch.object(collect_today, "TEMP_OUTFILE", output_path.with_suffix(".json.tmp")), \
-                patch.object(collect_today, "load_collection_backfill_days", return_value=1), \
+                patch.object(collect_today, "load_collection_backfill_days", return_value=4), \
                 patch.object(collect_today, "fetch_with_session_recovery", side_effect=fetch_with_recovery) as fetch_mock, \
                 patch.object(collect_today, "import_day", side_effect=import_day), \
                 patch.object(collect_today, "record_success"), \
@@ -352,12 +360,23 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
                 patch.object(collect_today, "log_solaredge_action"):
                 summary = collect_today.collect_recent(action="scheduled_collection")
 
-        self.assertEqual(fetch_mock.call_count, 1)
-        self.assertEqual(imports, [f"latest-{collect_today.date.today().isoformat()}.json.tmp"])
-        self.assertEqual(summary["measurements"], 24)
-        self.assertEqual(summary["imported"], 24)
+        self.assertEqual(fetch_mock.call_count, 4)
+        self.assertEqual(len(imports), 4)
+        self.assertEqual(imports[-1], f"latest-{collect_today.date.today().isoformat()}.json.tmp")
+        self.assertEqual(summary["days_checked"], 4)
+        self.assertEqual(summary["days_fetched"], 4)
+        self.assertEqual(summary["measurements"], 96)
+        self.assertEqual(summary["imported"], 48)
+        self.assertEqual(summary["imported_or_updated"], 48)
+        self.assertEqual(summary["data_received"], 96)
+        self.assertEqual(summary["duplicates_skipped"], 48)
+        self.assertEqual(len(summary["day_summaries"]), 4)
         self.assertEqual(summary["auth_paths"], ["credential_refresh"])
         self.assertTrue(summary["report_regenerated"])
+
+    def test_solaredge_collection_backfill_is_at_least_four_days(self):
+        with patch.object(collect_today, "PROJECT_ROOT", Path("/missing/project")):
+            self.assertEqual(collect_today.load_collection_backfill_days(), 4)
 
     def test_main_runs_scheduled_collection_without_legacy_refresh_wrapper(self):
         with patch.object(collect_today, "setup_logging"), \

@@ -215,6 +215,13 @@ class SolarEdgeAdapter:
             "response_time_ms": duration_ms,
             "measurements": measurements,
             "imported": imported,
+            "imported_or_updated": int(summary.get("imported_or_updated") or imported),
+            "days_checked": int(summary.get("days_checked") or 0),
+            "days_fetched": int(summary.get("days_fetched") or 0),
+            "requested_start_date": summary.get("requested_start_date"),
+            "requested_end_date": summary.get("requested_end_date"),
+            "duplicates_skipped": int(summary.get("duplicates_skipped") or 0),
+            "data_received": int(summary.get("data_received") or 0),
             "http_status": status,
             "data_retrieved": success and measurements > 0,
             "report_regenerated": bool(summary.get("report_regenerated")),
@@ -285,7 +292,7 @@ def setup_logging() -> None:
 
 def load_collection_backfill_days() -> int:
     settings_path = PROJECT_ROOT / "config" / "settings.json"
-    default = 7
+    default = 4
     if not settings_path.exists():
         return default
     try:
@@ -299,7 +306,7 @@ def load_collection_backfill_days() -> int:
     except (TypeError, ValueError):
         logging.warning("Invalid collection_backfill_days; using default backfill window")
         days = default
-    return max(1, min(days, 7))
+    return max(4, min(days, 7))
 
 
 def validate_response(path: Path, expected_day: date) -> int:
@@ -471,6 +478,30 @@ def import_day(json_path: Path) -> tuple[int, str]:
     return imported_count, importer_message
 
 
+def parse_import_summary(importer_message: str) -> dict[str, int]:
+    summary = {
+        "data_received": 0,
+        "imported_or_updated": 0,
+        "duplicates_skipped": 0,
+        "observations_promoted": 0,
+    }
+    patterns = {
+        "data_received": r"data received\s+(\d+)",
+        "imported_or_updated": r"records imported\s+(\d+)",
+        "duplicates_skipped": r"duplicates ignored\s+(\d+)",
+        "observations_promoted": r"observations promoted\s+(\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, importer_message or "", re.IGNORECASE)
+        if match:
+            summary[key] = int(match.group(1))
+    if not summary["imported_or_updated"]:
+        match = re.search(r"Imported\s+(\d+)\s+readings", importer_message or "", re.IGNORECASE)
+        if match:
+            summary["imported_or_updated"] = int(match.group(1))
+    return summary
+
+
 def generate_report() -> None:
     try:
         subprocess.run(
@@ -550,8 +581,11 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
     failed = 0
     total_measurements = 0
     total_imported = 0
+    total_received = 0
+    total_duplicates = 0
     failures = []
     auth_paths = set()
+    day_summaries = []
 
     for collection_day in days_to_fetch:
         temp_outfile = OUTFILE.with_name(f"latest-{collection_day.isoformat()}.json.tmp")
@@ -566,10 +600,12 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
                 auth_path=auth_path,
                 data_fetch_attempted=True,
                 import_attempted=True,
+                requested_date_range=f"{start_day} to {current_day}",
                 measurements=measurement_count,
                 day=collection_day,
             )
             imported_count, importer_message = import_day(temp_outfile)
+            import_summary = parse_import_summary(importer_message)
             temp_outfile.replace(OUTFILE)
         except AuthenticationFailure:
             temp_outfile.unlink(missing_ok=True)
@@ -587,23 +623,40 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
 
         succeeded += 1
         total_measurements += measurement_count
-        total_imported += imported_count or measurement_count
+        imported_or_updated = import_summary["imported_or_updated"] or imported_count
+        total_imported += imported_or_updated
+        total_received += import_summary["data_received"] or measurement_count
+        total_duplicates += import_summary["duplicates_skipped"]
+        day_summaries.append(
+            {
+                "date": collection_day.isoformat(),
+                "measurements_returned": measurement_count,
+                "data_received": import_summary["data_received"] or measurement_count,
+                "imported_or_updated": imported_or_updated,
+                "duplicates_skipped": import_summary["duplicates_skipped"],
+            }
+        )
         logging.info(
-            "Collection succeeded for %s with %d measurements; importer: %s",
+            "Collection succeeded for %s with %d measurements, %d imported/updated, %d duplicates skipped; importer: %s",
             collection_day,
             measurement_count,
+            imported_or_updated,
+            import_summary["duplicates_skipped"],
             importer_message or "no output",
         )
         if importer_message:
             print(importer_message)
 
     logging.info(
-        "SolarEdge recent collection finished: %d/%d days succeeded, %d failed, %d measurements validated, %d readings imported",
+        "SolarEdge recent collection finished: range %s to %s; %d/%d days succeeded, %d failed, %d measurements validated, %d readings imported/updated, %d duplicates skipped",
+        start_day,
+        current_day,
         succeeded,
         backfill_days,
         failed,
         total_measurements,
         total_imported,
+        total_duplicates,
     )
 
     if not succeeded:
@@ -617,8 +670,11 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         message = f"Partial collection: {failed}/{backfill_days} days failed; {succeeded}/{backfill_days} days imported"
     record_success(total_measurements, message)
     print(
-        f"Collection complete: fetched {succeeded}/{backfill_days} days, "
-        f"validated {total_measurements} measurements"
+        f"Collection complete: requested {start_day} to {current_day}; "
+        f"fetched {succeeded}/{backfill_days} days; "
+        f"validated {total_measurements} measurements; "
+        f"imported/updated {total_imported}; "
+        f"skipped duplicates {total_duplicates}"
     )
     if failed:
         print(f"Partial collection: {failed}/{backfill_days} days failed; see {LOG_PATH}")
@@ -633,14 +689,26 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
         import_attempted=True,
         report_regeneration_attempted=True,
         result="success",
+        requested_date_range=f"{start_day} to {current_day}",
+        days_checked=backfill_days,
+        days_fetched=succeeded,
         measurements=total_measurements,
-        imported=total_imported,
+        imported_or_updated=total_imported,
+        duplicates_skipped=total_duplicates,
     )
     return {
         "succeeded": succeeded,
         "failed": failed,
+        "days_checked": backfill_days,
+        "days_fetched": succeeded,
+        "requested_start_date": start_day.isoformat(),
+        "requested_end_date": current_day.isoformat(),
         "measurements": total_measurements,
         "imported": total_imported,
+        "imported_or_updated": total_imported,
+        "data_received": total_received,
+        "duplicates_skipped": total_duplicates,
+        "day_summaries": day_summaries,
         "auth_paths": sorted(auth_paths),
         "report_regenerated": True,
     }

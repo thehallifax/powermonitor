@@ -1,5 +1,18 @@
 # Changelog
 
+## Bugfix - SolarEdge Catch-Up Collection Window
+
+- Changed SolarEdge collection to request at least a four-day catch-up window:
+  today plus the previous three days.
+- Kept SolarEdge imports idempotent by relying on the importer duplicate check
+  and surfacing skipped duplicate counts in collection diagnostics.
+- Added collection diagnostics for requested date range, days checked/fetched,
+  measurements returned, imported/updated count, and skipped duplicates.
+- Passed catch-up diagnostics through SolarEdge reconnect/provider result
+  details.
+- Added regression coverage for the four-day catch-up window and aggregated
+  importer diagnostics.
+
 ## Bugfix - SolarEdge Explicit Login Submit Path
 
 - Changed the explicit `login.solaredge.com` path to use the field handles
