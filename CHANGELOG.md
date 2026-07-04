@@ -1,5 +1,20 @@
 # Changelog
 
+## Bugfix - SolarEdge Explicit Login Submit Path
+
+- Changed the explicit `login.solaredge.com` path to use the field handles
+  returned by successful visible waits instead of re-discovering fields through
+  the generic selector path.
+- Ensured username and password fill immediately leads to the account submit
+  routine, with no generic username-missing fallback after explicit waits
+  succeed.
+- Added clear failure handling for explicit fields filled but submit not
+  attempted versus submitted credentials that remain on the login page.
+- Extended safe debug metadata with `explicit_fields_filled` and
+  `submit_attempted`.
+- Added regression coverage for the current debug scenario where explicit
+  waits succeed and submit must still run.
+
 ## Bugfix - SolarEdge Account Sign In Button
 
 - Changed `login.solaredge.com` submission to locate the Sign in button

@@ -274,6 +274,13 @@ class FakeAccountButtonLocator(FakeSolarEdgeLoginLocator):
 FakeSolarEdgeLoginPage.locator = lambda self, selector: FakeSolarEdgeLoginLocator(self, selector)
 
 
+class FakeWaitOnlySolarEdgeLoginPage(FakeSolarEdgeLoginPage):
+    def selector_count(self, selector):
+        if selector in {"input[name='idpEmail']", 'input[name="idpEmail"]'}:
+            return 1
+        return 0
+
+
 class FakeSitePage(FakeLoginPage):
     def __init__(self, site_id="4457399", direct_navigation=True, has_site_row=True):
         super().__init__(selectors={"text=/\\bSites\\b/i", "text=/Site ID/i"})
@@ -448,6 +455,24 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertEqual(metadata["url_before_submit"], "https://login.solaredge.com/login")
         self.assertEqual(metadata["url_after_submit"], "https://monitoring.solaredge.com/solaredge-web/p/sites")
 
+    def test_solaredge_explicit_wait_success_submits_without_generic_rediscovery(self):
+        page = FakeWaitOnlySolarEdgeLoginPage()
+
+        with patch.object(refresh_solaredge_session, "wait_for_login_fields", side_effect=AssertionError("generic discovery used")):
+            success, metadata = refresh_solaredge_session.explicit_login_solaredge(
+                page,
+                "user@example.com",
+                "redaction-fixture-password",
+            )
+
+        self.assertTrue(success)
+        self.assertTrue(metadata["explicit_username_wait_success"])
+        self.assertTrue(metadata["explicit_password_wait_success"])
+        self.assertTrue(metadata["explicit_fields_filled"])
+        self.assertTrue(metadata["submit_attempted"])
+        self.assertTrue(metadata["account_sign_in_button_clicked"])
+        self.assertNotIn("idpEmail", page.clicks)
+
     def test_solaredge_login_dot_solaredge_staying_on_page_reports_sign_in_failure(self):
         with TemporaryDirectory() as directory:
             debug_dir = Path(directory) / "debug"
@@ -466,6 +491,8 @@ class SolarEdgeRecoveryTests(unittest.TestCase):
         self.assertTrue(metadata["password_form_found"])
         self.assertTrue(metadata["account_sign_in_button_found"])
         self.assertTrue(metadata["account_sign_in_button_clicked"])
+        self.assertTrue(metadata["explicit_fields_filled"])
+        self.assertTrue(metadata["submit_attempted"])
         self.assertEqual(metadata["url_before_submit"], "https://login.solaredge.com/login")
         self.assertEqual(metadata["url_after_submit"], "https://login.solaredge.com/login")
 

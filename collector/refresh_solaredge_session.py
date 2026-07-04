@@ -359,6 +359,8 @@ def login_failure_message(
         f"explicit_login_host_path_used={bool(extra.get('explicit_login_host_path_used'))}; "
         f"explicit_username_wait_success={bool(extra.get('explicit_username_wait_success'))}; "
         f"explicit_password_wait_success={bool(extra.get('explicit_password_wait_success'))}; "
+        f"explicit_fields_filled={bool(extra.get('explicit_fields_filled'))}; "
+        f"submit_attempted={bool(extra.get('submit_attempted'))}; "
         f"visible_email_input_count={int(extra.get('visible_email_input_count') or 0)}; "
         f"visible_password_input_count={int(extra.get('visible_password_input_count') or 0)}; "
         f"sign_in_button_count={int(extra.get('sign_in_button_count') or 0)}; "
@@ -372,6 +374,22 @@ def sign_in_submit_failure_message(page, metadata: dict) -> str:
     debug_path = save_login_debug(page, "sign-in did not continue", allow_screenshot=True, extra=metadata)
     return (
         "SolarEdge sign-in failed or did not continue after credentials were submitted. "
+        f"title={safe_page_title(page)!r}; "
+        f"hostname={page_hostname(page)!r}; "
+        f"password_form_found={bool(metadata.get('password_form_found'))}; "
+        f"account_sign_in_button_found={bool(metadata.get('account_sign_in_button_found'))}; "
+        f"account_sign_in_button_clicked={bool(metadata.get('account_sign_in_button_clicked'))}; "
+        f"enter_submit_used={bool(metadata.get('enter_submit_used'))}; "
+        f"url_before_submit={metadata.get('url_before_submit') or ''}; "
+        f"url_after_submit={metadata.get('url_after_submit') or ''}; "
+        f"debug={debug_path}"
+    )
+
+
+def sign_in_button_failure_message(page, metadata: dict) -> str:
+    debug_path = save_login_debug(page, "sign-in button could not be submitted", allow_screenshot=True, extra=metadata)
+    return (
+        "SolarEdge sign-in button could not be submitted. "
         f"title={safe_page_title(page)!r}; "
         f"hostname={page_hostname(page)!r}; "
         f"password_form_found={bool(metadata.get('password_form_found'))}; "
@@ -569,6 +587,7 @@ def password_container(password_field):
 
 
 def submit_account_sign_in(page, password_field, metadata: dict) -> None:
+    metadata["submit_attempted"] = False
     metadata["password_form_found"] = False
     metadata["account_sign_in_button_found"] = False
     metadata["account_sign_in_button_clicked"] = False
@@ -582,6 +601,7 @@ def submit_account_sign_in(page, password_field, metadata: dict) -> None:
         button, count = click_button_inside(form, "button, input[type='submit'], [role='button']")
         metadata["sign_in_button_count"] = count
         if button is not None:
+            metadata["submit_attempted"] = True
             metadata["account_sign_in_button_found"] = True
             metadata["account_sign_in_button_clicked"] = True
             metadata["clicked_sign_in_selector"] = "password_form button"
@@ -597,6 +617,7 @@ def submit_account_sign_in(page, password_field, metadata: dict) -> None:
         )
         metadata["sign_in_button_count"] = max(int(metadata.get("sign_in_button_count") or 0), count)
         if button is not None:
+            metadata["submit_attempted"] = True
             metadata["account_sign_in_button_found"] = True
             metadata["account_sign_in_button_clicked"] = True
             metadata["clicked_sign_in_selector"] = "password_container Sign in"
@@ -606,6 +627,7 @@ def submit_account_sign_in(page, password_field, metadata: dict) -> None:
 
     try:
         password_field.press("Enter")
+        metadata["submit_attempted"] = True
         metadata["enter_submit_used"] = True
         metadata["clicked_sign_in_selector"] = "password_field Enter"
         wait_after_sign_in_submit(page)
@@ -617,6 +639,7 @@ def submit_account_sign_in(page, password_field, metadata: dict) -> None:
 
     try:
         page.keyboard.press("Enter")
+        metadata["submit_attempted"] = True
         metadata["enter_submit_used"] = True
         metadata["clicked_sign_in_selector"] = "page.keyboard Enter"
         wait_after_sign_in_submit(page)
@@ -664,6 +687,8 @@ def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, 
         "visible_password_input_count": 0,
         "sign_in_button_count": 0,
         "clicked_sign_in_selector": "",
+        "explicit_fields_filled": False,
+        "submit_attempted": False,
         "password_form_found": False,
         "account_sign_in_button_found": False,
         "account_sign_in_button_clicked": False,
@@ -675,14 +700,14 @@ def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, 
         return False, metadata
 
     try:
-        page.wait_for_selector('input[name="username"][type="email"]', state="visible", timeout=30000)
+        username_field = page.wait_for_selector('input[name="username"][type="email"]', state="visible", timeout=30000)
         metadata["explicit_username_wait_success"] = True
     except Exception:
         metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
         return False, metadata
 
     try:
-        page.wait_for_selector('input[name="password"][type="password"]', state="visible", timeout=30000)
+        password_field = page.wait_for_selector('input[name="password"][type="password"]', state="visible", timeout=30000)
         metadata["explicit_password_wait_success"] = True
     except Exception:
         metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
@@ -691,14 +716,18 @@ def explicit_login_solaredge(page, username: str, password: str) -> tuple[bool, 
 
     metadata["visible_email_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
     metadata["visible_password_input_count"] = visible_selector_count(page, LOGIN_SOLAREDGE_PASSWORD_SELECTORS)
-    username_field = find_first(page, LOGIN_SOLAREDGE_USERNAME_SELECTORS)
-    password_field = find_first(page, LOGIN_SOLAREDGE_PASSWORD_SELECTORS)
     if username_field is None or password_field is None:
         return False, metadata
 
-    username_field.fill(username)
-    password_field.fill(password)
+    try:
+        username_field.fill(username)
+        password_field.fill(password)
+        metadata["explicit_fields_filled"] = True
+    except Exception:
+        return False, metadata
     submit_account_sign_in(page, password_field, metadata)
+    if not metadata["submit_attempted"]:
+        raise RefreshError(sign_in_button_failure_message(page, metadata))
     if is_solaredge_login_host(page):
         raise RefreshError(sign_in_submit_failure_message(page, metadata))
     return True, metadata
