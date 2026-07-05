@@ -48,6 +48,19 @@ Total bill amount $125.80
 Total amount owing $125.80
 """
 
+SYNERGY_FALLBACK_TEXT = """
+Synergy Tax Invoice Account number 000 000 120Invoice number 2320007761Date of issue 09 Jun 2026
+Opening balance $11.48 CR Total amount owing $516.99
+Supply address 44 Example Road Thornlie WA 6108NMI 800000000006748Next scheduled read date 04 Aug 2026
+Meter number 0620092066Supply period
+Home Plan (A1) tariff 03 Apr 2026 - 30 Apr 2026 Residential Anytime consumption 162.1100 kWh 29.3273c $47.54
+Distributed Energy Buyback Peak 269.8100 kWh 2.2500c -$6.07
+EV Add on 01 May 2026 - 05 Jun 2026 Peak Charges 157.2950 kWh 48.9496c $77.00 Off Peak Charges 298.2940 kWh 21.5378c $64.25
+Overnight Charges 471.6910 kWh 17.6219c $83.12 Super Off Peak Charge 228.6390 kWh 7.8319c $17.91
+Distributed Energy Buyback Off Peak 240.4000 kWh 2.2500c -$5.41
+Supply charge 36 days 117.47c $42.29 Plus GST $48.04 Total bill amount $528.47
+"""
+
 
 class SynergyBillImportTests(unittest.TestCase):
     def test_parse_synergy_pdf_text_structure_with_multiple_plan_periods(self):
@@ -167,6 +180,52 @@ class SynergyBillImportTests(unittest.TestCase):
             "PDF text extraction failed; install pypdf/pdfminer or provide a text-readable PDF.",
             str(raised.exception),
         )
+
+    def test_fallback_layout_real_bill_shape_extracts_invoice_totals_and_ev_add_on(self):
+        bill = parse_synergy_bill_text(SYNERGY_FALLBACK_TEXT)
+        data = bill.as_dict(redacted=True)
+        totals = data["totals"]
+
+        self.assertEqual(bill.retailer, "Synergy")
+        self.assertEqual(bill.invoice_number, "2320007761")
+        self.assertEqual(bill.issue_date, "2026-06-09")
+        self.assertEqual(bill.bill_total, 528.47)
+        self.assertEqual(bill.total_amount_owing, 516.99)
+        self.assertEqual(bill.opening_balance, -11.48)
+        self.assertEqual(bill.next_scheduled_read_date, "2026-08-04")
+        self.assertEqual(bill.meter_number, "0620092066")
+        self.assertEqual(bill.nmi, "800000000006748")
+        self.assertEqual(data["account_number"], "•••120")
+        self.assertEqual(data["nmi"], "•••748")
+        self.assertEqual(len(bill.periods), 2)
+        self.assertEqual(bill.periods[0]["plan_name"], "Home Plan (A1) tariff")
+        self.assertEqual(bill.periods[0]["start_date"], "2026-04-03")
+        self.assertEqual(bill.periods[0]["end_date"], "2026-04-30")
+        self.assertEqual(bill.periods[1]["plan_name"], "EV Add on")
+        self.assertEqual(bill.periods[1]["start_date"], "2026-05-01")
+        self.assertEqual(bill.periods[1]["end_date"], "2026-06-05")
+        self.assertAlmostEqual(totals["usage_by_bucket"]["peak"]["kwh"], 157.2950)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["peak"]["unit_rate"], 0.489496)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["peak"]["amount"], 77.00)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["off_peak"]["kwh"], 298.2940)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["off_peak"]["unit_rate"], 0.215378)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["off_peak"]["amount"], 64.25)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["overnight"]["kwh"], 471.6910)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["overnight"]["unit_rate"], 0.176219)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["overnight"]["amount"], 83.12)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["super_off_peak"]["kwh"], 228.6390)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["super_off_peak"]["unit_rate"], 0.078319)
+        self.assertAlmostEqual(totals["usage_by_bucket"]["super_off_peak"]["amount"], 17.91)
+        self.assertAlmostEqual(totals["supply_charge"], 42.29)
+        self.assertAlmostEqual(totals["gst"], 48.04)
+        self.assertAlmostEqual(totals["export_credits"], -11.48)
+
+    def test_fallback_layout_classifies_buyback_as_export_credit(self):
+        bill = parse_synergy_bill_text(SYNERGY_FALLBACK_TEXT)
+        buyback_items = [item for item in bill.line_items if "buyback" in item.description.lower()]
+
+        self.assertEqual({item.category for item in buyback_items}, {"export_credit"})
+        self.assertEqual({item.bucket for item in buyback_items}, {"peak_export", "off_peak_export"})
 
 
 def create_readings(conn):

@@ -971,7 +971,15 @@ def load_actual_ev_sessions(
     return data_engine(conn).get_ev_sessions(start, end, sources=sources)
 
 
-def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
+def completed_ev_session(session: dict) -> bool:
+    return float(session.get("energy_kwh") or 0) > 0 and bool(session.get("end_time"))
+
+
+def ev_session_analytics(
+    sessions: list[dict],
+    settings: Settings,
+    ignored_incomplete_sessions: int = 0,
+) -> dict:
     if not sessions:
         return {
             "available": False,
@@ -980,6 +988,11 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
             "insights": {},
             "recommendations": [],
             "sessions": [],
+            "ignored_incomplete_sessions": ignored_incomplete_sessions,
+            "ignored_incomplete_message": (
+                "Ocular may only export completed sessions, so today's active charge may appear after the next export."
+                if ignored_incomplete_sessions else ""
+            ),
         }
 
     total_kwh = sum(session["energy_kwh"] for session in sessions)
@@ -1036,6 +1049,12 @@ def ev_session_analytics(sessions: list[dict], settings: Settings) -> dict:
         },
         "recommendations": [],
         "sessions": history,
+        "ignored_incomplete_sessions": ignored_incomplete_sessions,
+        "ignored_incomplete_message": (
+            f"{ignored_incomplete_sessions} zero-kWh or incomplete charger session"
+            f"{'' if ignored_incomplete_sessions == 1 else 's'} ignored. Ocular may only export completed sessions."
+            if ignored_incomplete_sessions else ""
+        ),
     }
 
 
@@ -1092,8 +1111,10 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     actual_ev_breakdown = empty_ev_breakdown()
     actual_ev_partial = False
     actual_source = "estimated"
-    actual_sessions = load_actual_ev_sessions(conn, start, end, settings)
-    analytics = ev_session_analytics(actual_sessions, settings)
+    raw_actual_sessions = load_actual_ev_sessions(conn, start, end, settings)
+    actual_sessions = [session for session in raw_actual_sessions if completed_ev_session(session)]
+    ignored_incomplete_sessions = len(raw_actual_sessions) - len(actual_sessions)
+    analytics = ev_session_analytics(actual_sessions, settings, ignored_incomplete_sessions)
     if actual_sessions:
         actual_source = actual_sessions[0]["source"]
         actual_ev_charging = sum(session["energy_kwh"] for session in actual_sessions)
@@ -1885,12 +1906,17 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
             """
         )
 
+    ignored_notice = (
+        f'<p class="notice">{html.escape(str(analytics.get("ignored_incomplete_message") or ""))}</p>'
+        if analytics.get("ignored_incomplete_message") else ""
+    )
     return f"""
     <section class="report-section ev-session-section">
       <div class="section-title">
         <div><span class="eyebrow">EV charging</span><h2>Actual charging sessions</h2></div>
         <p>{len(sessions)} sessions <span>·</span> {kwh(total_kwh)}</p>
       </div>
+      {ignored_notice}
       <div class="metrics ev-overview-metrics">{overview_cards}</div>
       <div class="ev-session-grid">
         <div class="ev-session-card">
@@ -4555,6 +4581,7 @@ def solar_page_html(summary: Summary, recommendations: list) -> str:
 def ev_source_status_html(summary: Summary, settings: Settings) -> str:
     source = summary.ev_charging_source
     configured = settings.ev_data_source
+    ignored = int((summary.ev_session_analytics or {}).get("ignored_incomplete_sessions") or 0)
     if source == "ocular_export":
         title = "Using Ocular charging history"
         body = "Complete Ocular sessions are available for this period. Costs are calculated from exact session times and delivered energy."
@@ -4566,10 +4593,17 @@ def ev_source_status_html(summary: Summary, settings: Settings) -> str:
     else:
         title = "Using estimated EV fallback"
         body = (
-            f"No actual Ocular or HA OCPP sessions were found for this period. "
+            "No completed charger sessions imported for today yet. "
+            if summary.start == summary.end == local_today()
+            else "No completed Ocular or HA OCPP sessions were found for this period. "
+        )
+        body += (
             f"PowerMonitor is estimating overnight EV charging above {settings.ev_baseline_watts:.0f} W. "
+            "Ocular may only export completed sessions, so today's active charge may appear after the next export. "
             "Import Ocular history with: python3 collector/import_ocular_export.py /path/to/export.xlsx"
         )
+        if ignored:
+            body += f" {ignored} zero-kWh or incomplete imported session row was ignored."
         tone = "red"
     return f"""
     <section class="source-status {tone}">
@@ -4582,10 +4616,20 @@ def ev_source_status_html(summary: Summary, settings: Settings) -> str:
 def ev_page_html(summary: Summary, settings: Settings) -> str:
     warning = ""
     if not summary.ev_session_analytics.get("available"):
+        warning_title = (
+            "No completed charger sessions imported for today yet"
+            if summary.start == summary.end == local_today()
+            else "Actual session data unavailable"
+        )
+        warning_body = (
+            "Ocular may only export completed sessions, so today's active charge may appear after the next export. PowerMonitor is using the overnight fallback estimate where applicable."
+            if summary.start == summary.end == local_today()
+            else EV_ESTIMATE_CAVEAT
+        )
         warning = f"""
         <section class="auth-alert">
-          <div class="auth-alert-heading"><div><span>EV data warning</span><h2>Actual session data unavailable</h2></div></div>
-          <p>{html.escape(EV_ESTIMATE_CAVEAT)}</p>
+          <div class="auth-alert-heading"><div><span>EV data warning</span><h2>{html.escape(warning_title)}</h2></div></div>
+          <p>{html.escape(warning_body)}</p>
           <ol>
             <li>Export all charging history from the Ocular app.</li>
             <li>Run <code>python3 collector/import_ocular_export.py /path/to/export.xlsx</code>.</li>

@@ -42,18 +42,101 @@ PDF_EXTRACTION_ERROR = "PDF text extraction failed; install pypdf/pdfminer or pr
 
 BUCKET_ALIASES = {
     "anytime": "anytime",
+    "residential anytime consumption": "anytime",
     "peak": "peak",
+    "peak charges": "peak",
     "off peak": "off_peak",
     "off-peak": "off_peak",
+    "off peak charges": "off_peak",
+    "off-peak charges": "off_peak",
     "super off peak": "super_off_peak",
     "super off-peak": "super_off_peak",
+    "super off peak charge": "super_off_peak",
+    "super off peak charges": "super_off_peak",
+    "super off-peak charge": "super_off_peak",
+    "super off-peak charges": "super_off_peak",
     "overnight": "overnight",
+    "overnight charges": "overnight",
+    "distributed energy buyback peak": "peak_export",
+    "distributed energy buyback off peak": "off_peak_export",
+    "distributed energy buyback off-peak": "off_peak_export",
     "peak export": "peak_export",
     "off peak export": "off_peak_export",
     "off-peak export": "off_peak_export",
 }
 IMPORT_BUCKETS = {"anytime", "peak", "off_peak", "super_off_peak", "overnight"}
 EXPORT_BUCKETS = {"peak_export", "off_peak_export"}
+SYNERGY_LINE_LABELS = (
+    "Account number",
+    "Invoice number",
+    "Date of issue",
+    "Payment due",
+    "Direct debit date",
+    "Due date",
+    "Opening balance",
+    "Previous balance",
+    "Supply address",
+    "NMI",
+    "Next scheduled read date",
+    "Next read date",
+    "Meter number",
+    "Supply period",
+    "Home Plan (A1) tariff",
+    "Home Plan",
+    "EV Add on",
+    "EV Add On",
+    "Residential Anytime consumption",
+    "Peak Charges",
+    "Off Peak Charges",
+    "Overnight Charges",
+    "Super Off Peak Charge",
+    "Super Off Peak Charges",
+    "Distributed Energy Buyback Peak",
+    "Distributed Energy Buyback Off Peak",
+    "Supply charge",
+    "Plus GST",
+    "GST",
+    "Total amount owing",
+    "Total bill amount",
+    "Total amount due",
+    "Total due",
+    "Amount owing",
+)
+FIELD_BOUNDARIES = (
+    "Account number",
+    "Invoice number",
+    "Date of issue",
+    "Payment due",
+    "Direct debit date",
+    "Due date",
+    "Opening balance",
+    "Previous balance",
+    "Supply address",
+    "NMI",
+    "Next scheduled read date",
+    "Next read date",
+    "Meter number",
+    "Supply period",
+    "Total amount owing",
+    "Total bill amount",
+    "Total amount due",
+    "Total due",
+    "Amount owing",
+    "Home Plan (A1) tariff",
+    "Home Plan",
+    "EV Add on",
+    "EV Add On",
+    "Residential Anytime consumption",
+    "Peak Charges",
+    "Off Peak Charges",
+    "Overnight Charges",
+    "Super Off Peak Charge",
+    "Distributed Energy Buyback Peak",
+    "Distributed Energy Buyback Off Peak",
+    "Supply charge",
+    "Plus GST",
+    "GST",
+)
 
 
 @dataclass
@@ -148,12 +231,25 @@ def identifier_hash(value: Optional[str]) -> Optional[str]:
 
 def normalize_text(text: str) -> str:
     text = text.replace("\u00a0", " ")
+    text = re.sub(r"(?<=[0-9A-Za-z)])(?=(?:Date of issue|Invoice number|Supply period|Supply address|Next scheduled read date|Meter number|NMI|Total amount owing|Total bill amount|Plus GST|GST)\b)", " ", text)
     text = re.sub(r"[ \t]+", " ", text)
+    for label in sorted(SYNERGY_LINE_LABELS, key=len, reverse=True):
+        text = re.sub(rf"(?<!^)(?<!\n)\b{re.escape(label)}\b", f"\n{label}", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bOff\s*\nPeak Charges\b", "Off Peak Charges", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bSuper Off\s*\nPeak Charge", "Super Off Peak Charge", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bDistributed Energy Buyback Off\s*\nPeak\b", "Distributed Energy Buyback Off Peak", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bTotal\s*\nAmount owing\b", "Total amount owing", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bPlus\s*\nGST\b", "Plus GST", text, flags=re.IGNORECASE)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
 def parse_date(value: str) -> Optional[str]:
     raw = str(value or "").strip().replace(".", "")
+    match = re.search(r"(\d{1,2}/\d{1,2}/\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}-\d{2}-\d{2})", raw)
+    if match:
+        raw = match.group(1)
     formats = ("%d/%m/%Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d")
     for fmt in formats:
         try:
@@ -190,6 +286,44 @@ def first_match(patterns: list[str], text: str, flags=re.IGNORECASE) -> Optional
     return None
 
 
+def bounded_value(label: str, text: str, boundaries: tuple[str, ...] = FIELD_BOUNDARIES) -> Optional[str]:
+    boundary_pattern = "|".join(re.escape(item) for item in boundaries if item.lower() != label.lower())
+    match = re.search(
+        rf"\b{re.escape(label)}\b\s*[:#]?\s*(?P<value>.*?)(?=\s*(?:{boundary_pattern})\b|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+    value = re.sub(r"\s+", " ", match.group("value")).strip(" :-")
+    return value or None
+
+
+def first_bounded_value(labels: list[str], text: str) -> Optional[str]:
+    for label in labels:
+        value = bounded_value(label, text)
+        if value:
+            return value
+    return None
+
+
+def clean_identifier(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    match = re.search(r"[A-Z0-9][A-Z0-9 \-]*", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return re.sub(r"\s+", " ", match.group(0)).strip()
+
+
+def first_money_after(label: str, text: str) -> Optional[float]:
+    value = bounded_value(label, text)
+    if not value:
+        return None
+    match = re.search(r"(-?\$?\(?\d[\d,]*\.\d{2}\)?\s*(?:cr|credit)?)", value, re.IGNORECASE)
+    return parse_money(match.group(1)) if match else None
+
+
 def parse_period_line(line: str) -> Optional[dict[str, str]]:
     match = re.search(
         r"(?P<plan>.+?)\s+(?P<start>\d{1,2}[ /][A-Za-z]{3,9}[ /]\d{4}|\d{1,2}/\d{1,2}/\d{4})\s*(?:to|-|–)\s*(?P<end>\d{1,2}[ /][A-Za-z]{3,9}[ /]\d{4}|\d{1,2}/\d{1,2}/\d{4})",
@@ -221,23 +355,28 @@ def parse_line_item(line: str, current_period: Optional[dict[str, str]]) -> Opti
     bucket = canonical_bucket(compact)
     money_match = re.search(r"(-?\$?\(?\d[\d,]*\.\d{2}\)?\s*(?:cr|credit)?)\s*$", compact, re.IGNORECASE)
     amount = parse_money(money_match.group(1)) if money_match else None
-    rate_match = re.search(r"(?:@|x)\s*\$?(\d+\.\d+)", compact, re.IGNORECASE)
-    unit_rate = parse_number(rate_match.group(1)) if rate_match else None
+    cents_rate_match = re.search(r"(\d+(?:\.\d+)?)\s*c\b", compact, re.IGNORECASE)
+    dollar_rate_match = re.search(r"(?:@|x)\s*\$?(\d+\.\d+)", compact, re.IGNORECASE)
+    if cents_rate_match:
+        unit_rate = float(cents_rate_match.group(1)) / 100
+    else:
+        unit_rate = parse_number(dollar_rate_match.group(1)) if dollar_rate_match else None
     kwh_match = re.search(r"([\d,]+(?:\.\d+)?)\s*kWh\b", compact, re.IGNORECASE)
     kwh = parse_number(kwh_match.group(1)) if kwh_match else None
     day_match = re.search(r"(\d+)\s*days?\b", compact, re.IGNORECASE)
     days = int(day_match.group(1)) if day_match else None
 
     category = None
-    if bucket in IMPORT_BUCKETS:
-        category = "import_usage"
-    elif bucket in EXPORT_BUCKETS or "buyback" in compact.lower() or "export" in compact.lower():
+    lowered = compact.lower()
+    if bucket in EXPORT_BUCKETS or "buyback" in lowered or "export" in lowered:
         category = "export_credit"
-    elif "supply" in compact.lower() and days is not None:
+    elif bucket in IMPORT_BUCKETS:
+        category = "import_usage"
+    elif "supply charge" in lowered and (days is not None or amount is not None):
         category = "supply_charge"
     elif re.search(r"\bgst\b", compact, re.IGNORECASE):
         category = "gst"
-    elif amount is not None and ("balance" in compact.lower() or "credit" in compact.lower()):
+    elif amount is not None and ("balance" in lowered or "credit" in lowered):
         category = "balance"
 
     if category is None:
@@ -264,29 +403,34 @@ def parse_synergy_bill_text(text: str) -> SynergyBill:
     if "synergy" not in text.lower():
         bill.warnings.append("The bill text does not clearly identify Synergy.")
 
-    bill.account_number = first_match([
-        r"Account\s+number\s*[:#]?\s*([A-Z0-9 \-]+)",
-        r"Account\s*[:#]\s*([A-Z0-9 \-]+)",
-    ], text)
-    bill.invoice_number = first_match([
-        r"Invoice\s+number\s*[:#]?\s*([A-Z0-9 \-]+)",
-        r"Tax\s+invoice\s*[:#]?\s*([A-Z0-9 \-]+)",
-    ], text)
-    bill.issue_date = parse_date(first_match([r"Date\s+of\s+issue\s*[:#]?\s*([0-9A-Za-z/ ]{8,20})", r"Issue\s+date\s*[:#]?\s*([0-9A-Za-z/ ]{8,20})"], text) or "")
-    bill.due_date = parse_date(first_match([r"(?:Payment\s+due|Direct\s+debit\s+date|Due\s+date)\s*[:#]?\s*([0-9A-Za-z/ ]{8,20})"], text) or "")
-    bill.bill_total = parse_money(first_match([r"Total\s+bill\s+amount\s*[:#]?\s*(-?\$?[\d,]+\.\d{2})", r"Bill\s+total\s*[:#]?\s*(-?\$?[\d,]+\.\d{2})"], text) or "")
-    bill.total_amount_owing = parse_money(first_match([r"Total\s+amount\s+owing\s*[:#]?\s*(-?\$?[\d,]+\.\d{2})", r"Amount\s+owing\s*[:#]?\s*(-?\$?[\d,]+\.\d{2})"], text) or "")
-    bill.opening_balance = parse_money(first_match([r"Opening\s+balance\s*[:#]?\s*(-?\$?[\d,]+\.\d{2}(?:\s*CR)?)", r"Previous\s+balance\s*[:#]?\s*(-?\$?[\d,]+\.\d{2}(?:\s*CR)?)"], text) or "")
-    bill.supply_address = first_match([r"Supply\s+address\s*[:#]?\s*(.+)", r"Supply\s+at\s*[:#]?\s*(.+)"], text)
-    bill.nmi = first_match([r"\bNMI\s*[:#]?\s*([0-9A-Z ]{8,20})"], text)
-    bill.next_scheduled_read_date = parse_date(first_match([r"Next\s+scheduled\s+read\s+date\s*[:#]?\s*([0-9A-Za-z/ ]{8,20})", r"Next\s+read\s+date\s*[:#]?\s*([0-9A-Za-z/ ]{8,20})"], text) or "")
-    bill.meter_number = first_match([r"Meter\s+number\s*[:#]?\s*([0-9A-Z \-]+)"], text)
+    bill.account_number = clean_identifier(first_bounded_value(["Account number", "Account"], text))
+    bill.invoice_number = clean_identifier(first_bounded_value(["Invoice number", "Tax invoice"], text))
+    bill.issue_date = parse_date(first_bounded_value(["Date of issue", "Issue date"], text) or "")
+    bill.due_date = parse_date(first_bounded_value(["Payment due", "Direct debit date", "Due date"], text) or "")
+    bill.bill_total = (
+        first_money_after("Total bill amount", text)
+        or first_money_after("Total amount due", text)
+        or first_money_after("Total due", text)
+        or parse_money(first_match([r"\bTotal\b\s*(-?\$?[\d,]+\.\d{2})"], text) or "")
+    )
+    bill.total_amount_owing = (
+        first_money_after("Total amount owing", text)
+        or first_money_after("Amount owing", text)
+    )
+    bill.opening_balance = (
+        first_money_after("Opening balance", text)
+        or first_money_after("Previous balance", text)
+    )
+    bill.supply_address = first_bounded_value(["Supply address", "Supply at"], text)
+    bill.nmi = clean_identifier(first_bounded_value(["NMI"], text))
+    bill.next_scheduled_read_date = parse_date(first_bounded_value(["Next scheduled read date", "Next read date"], text) or "")
+    bill.meter_number = clean_identifier(first_bounded_value(["Meter number"], text))
 
     current_period = None
     for raw_line in text.splitlines():
         line = raw_line.strip()
         period = parse_period_line(line)
-        if period and any(marker in line.lower() for marker in ("home", "ev", "plan", "tariff")):
+        if period and any(marker in line.lower() for marker in ("home", "ev", "plan", "tariff", "supply period")):
             current_period = period
             bill.periods.append(period)
             continue

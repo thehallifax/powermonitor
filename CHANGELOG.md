@@ -1,5 +1,21 @@
 # Changelog
 
+## Bugfix - Synergy Fallback Parser and Ocular Same-Day EV Handling
+
+- Improved Synergy PDF fallback parsing when pure-Python extraction loses table
+  layout by normalizing joined labels and charge lines before extraction.
+- Added label-bounded field extraction so invoice, account, meter, and NMI
+  values stop at the next Synergy bill label.
+- Corrected Distributed Energy Buyback classification as export credit and
+  added EV Add On bucket/rate/amount extraction for fallback text.
+- Ignored zero-kWh or incomplete Ocular sessions for actual EV totals while
+  preserving completed historical sessions.
+- Updated EV page wording so same-day active/incomplete Ocular exports use the
+  fallback estimate and explain that completed sessions may appear after the
+  next export.
+- Added regression coverage for real-shaped Synergy fallback text, export
+  credits, EV Add On buckets, and Ocular same-day/mixed-session handling.
+
 ## Bugfix - Synergy PDF Python Extraction Fallback
 
 - Removed the hard dependency on the system `pdftotext` command for Synergy
