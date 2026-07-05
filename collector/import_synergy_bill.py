@@ -9,6 +9,7 @@ SQLite directly.
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -37,6 +38,7 @@ SOURCE = ImportSource(
     supported_extensions=(".pdf",),
     description="Synergy retailer bill PDF used for actual bill reconciliation.",
 )
+PDF_EXTRACTION_ERROR = "PDF text extraction failed; install pypdf/pdfminer or provide a text-readable PDF."
 
 BUCKET_ALIASES = {
     "anytime": "anytime",
@@ -334,24 +336,58 @@ def bill_totals(bill: SynergyBill) -> dict[str, Any]:
     }
 
 
-def extract_text_from_pdf(path: Path) -> str:
-    try:
-        from pypdf import PdfReader  # type: ignore
+def extract_text_with_pdftotext(path: Path) -> str:
+    completed = subprocess.run(
+        ["pdftotext", "-layout", str(path), "-"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
 
-        reader = PdfReader(str(path))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception:
-        pass
-    try:
-        completed = subprocess.run(
-            ["pdftotext", "-layout", str(path), "-"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return completed.stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("Could not extract text from the Synergy PDF bill.") from exc
+
+def extract_text_with_pypdf(path: Path) -> str:
+    from pypdf import PdfReader  # type: ignore
+
+    reader = PdfReader(str(path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def extract_text_with_pdfminer(path: Path) -> str:
+    from pdfminer.high_level import extract_text  # type: ignore
+
+    return extract_text(str(path))
+
+
+def extract_text_from_pdf(path: Path) -> str:
+    failures: list[str] = []
+    if shutil.which("pdftotext"):
+        try:
+            text = extract_text_with_pdftotext(path)
+            if text.strip():
+                return text
+            failures.append("pdftotext returned no readable text")
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"pdftotext failed: {exc.__class__.__name__}")
+    else:
+        failures.append("pdftotext is unavailable")
+
+    for label, extractor in (
+        ("pypdf", extract_text_with_pypdf),
+        ("pdfminer", extract_text_with_pdfminer),
+    ):
+        try:
+            text = extractor(path)
+            if text.strip():
+                return text
+            failures.append(f"{label} returned no readable text")
+        except ImportError:
+            failures.append(f"{label} is not installed")
+        except Exception as exc:
+            failures.append(f"{label} failed: {exc.__class__.__name__}")
+
+    detail = "; ".join(failures)
+    raise ValueError(f"{PDF_EXTRACTION_ERROR} Details: {detail}")
 
 
 class SynergyBillImporter:

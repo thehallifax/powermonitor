@@ -1,5 +1,17 @@
 # Changelog
 
+## Bugfix - Synergy PDF Python Extraction Fallback
+
+- Removed the hard dependency on the system `pdftotext` command for Synergy
+  bill imports.
+- Added pure-Python PDF text extraction fallbacks using `pypdf` first and
+  `pdfminer.six` second when `pdftotext` is unavailable or returns no text.
+- Improved extraction failure wording to explain that `pypdf`/`pdfminer` or a
+  text-readable PDF is required.
+- Documented the Python PDF dependency in setup instructions.
+- Added regression coverage proving Synergy imports work when `pdftotext` is
+  unavailable.
+
 ## BILL-001 - Synergy PDF Bill Importer
 
 - Added a Synergy PDF bill importer that extracts invoice metadata, masked

@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 import sys
@@ -12,6 +13,7 @@ if str(COLLECTOR_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import collector.import_synergy_bill as import_synergy_bill
 from collector.import_synergy_bill import SynergyBillImporter, mask_identifier, parse_synergy_bill_text
 from engine.data_engine import DataEngine
 
@@ -124,6 +126,47 @@ class SynergyBillImportTests(unittest.TestCase):
         self.assertAlmostEqual(comparison["projected_bill"], 120.0)
         self.assertAlmostEqual(comparison["difference"], -5.80)
         self.assertEqual(comparison["status"], "projection_lower")
+
+    def test_pdf_import_uses_pure_python_when_pdftotext_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bill.pdf"
+            path.write_bytes(b"%PDF placeholder")
+
+            with patch.object(import_synergy_bill.shutil, "which", return_value=None), \
+                patch.object(import_synergy_bill, "extract_text_with_pypdf", return_value=SYNERGY_BILL_TEXT), \
+                patch.object(import_synergy_bill, "extract_text_with_pdftotext") as pdftotext:
+                text = import_synergy_bill.extract_text_from_pdf(path)
+
+        self.assertIn("INV-2026-0701", text)
+        pdftotext.assert_not_called()
+
+    def test_pdf_import_falls_back_to_pdfminer_when_pypdf_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bill.pdf"
+            path.write_bytes(b"%PDF placeholder")
+
+            with patch.object(import_synergy_bill.shutil, "which", return_value=None), \
+                patch.object(import_synergy_bill, "extract_text_with_pypdf", side_effect=ImportError("missing pypdf")), \
+                patch.object(import_synergy_bill, "extract_text_with_pdfminer", return_value=SYNERGY_BILL_TEXT):
+                text = import_synergy_bill.extract_text_from_pdf(path)
+
+        self.assertIn("INV-2026-0701", text)
+
+    def test_pdf_import_reports_clear_failure_when_all_extractors_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bill.pdf"
+            path.write_bytes(b"%PDF placeholder")
+
+            with patch.object(import_synergy_bill.shutil, "which", return_value=None), \
+                patch.object(import_synergy_bill, "extract_text_with_pypdf", side_effect=ImportError("missing pypdf")), \
+                patch.object(import_synergy_bill, "extract_text_with_pdfminer", side_effect=ImportError("missing pdfminer")):
+                with self.assertRaises(ValueError) as raised:
+                    import_synergy_bill.extract_text_from_pdf(path)
+
+        self.assertIn(
+            "PDF text extraction failed; install pypdf/pdfminer or provide a text-readable PDF.",
+            str(raised.exception),
+        )
 
 
 def create_readings(conn):

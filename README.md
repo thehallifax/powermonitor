@@ -26,11 +26,20 @@ For the broader product direction, see `docs/VISION.md`.
 ## Setup
 
 1. Use Python 3.9 or newer.
-2. Configure SolarEdge with username/email and password through Provider
+2. Install the optional PDF extractor used for Synergy bill imports:
+
+   ```sh
+   python3 -m pip install pypdf
+   ```
+
+   `pdfminer.six` is also supported as a pure-Python fallback. The importer can
+   use the system `pdftotext` command when it is already installed, but
+   Homebrew/poppler is not required.
+3. Configure SolarEdge with username/email and password through Provider
    Management, or use the manual cookie fallback described below.
-3. Keep cookies and credentials private. They are ignored by `.gitignore` and must not be
+4. Keep cookies and credentials private. They are ignored by `.gitignore` and must not be
    printed or committed.
-4. Ensure the SQLite database is at `data/power.sqlite`.
+5. Ensure the SQLite database is at `data/power.sqlite`.
 
 Scripts resolve the project directory from their own location, so they work
 from any current directory.
@@ -131,6 +140,9 @@ Synergy bill imports preview extracted invoice details, billing periods, tariff
 line items, export credits, GST, and bill totals before anything is committed.
 PowerMonitor masks account and NMI identifiers in normal UI/API output and uses
 imported bills to compare projected bills with actual retailer bills.
+PDF text extraction uses `pdftotext` when available, otherwise it falls back to
+the pure-Python `pypdf` or `pdfminer.six` packages installed in the project
+environment.
 
 Runtime logs are written to:
 
