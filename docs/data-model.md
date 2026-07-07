@@ -68,6 +68,20 @@ Home Assistant, and Modbus should implement their own measurement provider and
 register it with `MeasurementProviderRegistry`; analytics should not need
 provider-specific branches for those integrations.
 
+## Home Profile
+
+The Home Profile is the provider-independent description of the household. It is
+stored locally in `config/home_profile.json` and captures user-declared facts
+such as state/region, retailer, tariff, solar, battery, EV, charger, household
+monitoring, and Home Assistant availability.
+
+The Home Profile is not a measurement source. It should be used as durable
+household context for setup, capability detection, simulations,
+recommendations, and future Home Intelligence. It must not contain credentials,
+cookies, tokens, account numbers, NMI values, or raw measurements.
+
+See `docs/home-profile.md` for persistence details and compatibility rules.
+
 ## Confidence Rules
 
 Confidence is attached to recommendations and scenario results.

@@ -36,7 +36,20 @@ meter, MQTT, and Home Assistant integrations contained within their provider
 implementation instead of leaking vendor-specific branches into reports or
 recommendations.
 
-For the broader product direction, see `docs/VISION.md`.
+For the broader product direction, see `VISION.md`.
+
+## Home Profile
+
+PowerMonitor has a local Home Profile at `config/home_profile.json`. The Home
+Profile describes the household independently of measurement providers: region,
+retailer, current tariff, solar, battery, EV, charger, household monitoring, and
+Home Assistant availability.
+
+This profile is the foundation for setup guidance, capability detection,
+simulations, recommendations, and future Home Intelligence. It is separate from
+provider credentials and measurements, and it should not contain cookies,
+tokens, account numbers, NMI values, or raw energy readings. See
+`docs/home-profile.md` for the model and persistence boundary.
 
 ## Setup
 

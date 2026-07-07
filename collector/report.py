@@ -35,6 +35,7 @@ from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.energy_timeline import EnergyTimeline, EnergyTimelineEngine
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
+from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
 from engine.household_state_engine import HouseholdStateEngine
 from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
 from engine.measurement_framework import MeasurementType, measurement_totals
@@ -92,6 +93,7 @@ DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
 LOG_PATH = PROJECT_ROOT / "logs" / "report.log"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
+HOME_PROFILE_PATH = DEFAULT_HOME_PROFILE_PATH
 COLLECT_LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
@@ -269,6 +271,7 @@ class Settings:
     ev_odometer_km: Optional[float]
     car_comparison_enabled: bool
     recommendation_thresholds: dict
+    home_profile: HomeProfile
 
 
 @dataclass
@@ -961,6 +964,7 @@ def load_settings() -> Settings:
         recommendation_thresholds={
             key: float(value) for key, value in raw["recommendation_thresholds"].items()
         },
+        home_profile=load_home_profile(HOME_PROFILE_PATH, settings=raw),
     )
     if settings.supply_charge_per_day < 0 or settings.export_credit_rate < 0:
         raise ValueError("Supply charge and export credit rate cannot be negative")
