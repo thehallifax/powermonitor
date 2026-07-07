@@ -74,6 +74,7 @@ from .models import (
     to_api_safe,
 )
 from .recommendation_engine import RecommendationEngine
+from .sungrow_provider import SungrowApiError, SungrowMeasurementProvider
 
 __all__ = [
     "Confidence",
@@ -147,6 +148,8 @@ __all__ = [
     "PromotionResult",
     "PromotionState",
     "SolarAdvisor",
+    "SungrowApiError",
+    "SungrowMeasurementProvider",
     "generate_decisions",
     "generate_ev_session_decisions",
     "to_api_safe",

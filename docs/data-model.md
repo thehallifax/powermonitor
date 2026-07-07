@@ -29,6 +29,8 @@ Current implementation:
   is not registered in `DataEngine` by default yet.
 - GoodWe is available as an opt-in local inverter measurement provider, but is
   not registered in `DataEngine` by default yet.
+- Sungrow is available as an opt-in local inverter measurement provider, but
+  is not registered in `DataEngine` by default yet.
 - `DataEngine` owns registry creation and measurement retrieval.
 - Report generation consumes universal measurements for the main period
   summary aggregation.
