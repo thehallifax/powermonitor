@@ -22,6 +22,19 @@ default can borrow non-secret context from `config/settings.json`, such as
 state/region, retailer, and current plan, but it does not write anything back
 unless explicit save functionality is called.
 
+## CLI Setup Wizard
+
+Run the local CLI wizard to create or update the profile:
+
+```sh
+python3 collector/setup_home_profile.py
+```
+
+The wizard shows existing values as defaults. Press Enter to keep a shown
+default, or leave optional fields blank to skip them. It stores declared home
+facts only; it does not configure SolarEdge, Home Assistant, Ocular, or any
+other live provider.
+
 ## Fields
 
 The initial profile captures:

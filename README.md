@@ -51,6 +51,15 @@ provider credentials and measurements, and it should not contain cookies,
 tokens, account numbers, NMI values, or raw energy readings. See
 `docs/home-profile.md` for the model and persistence boundary.
 
+Create or update the profile with the local CLI wizard:
+
+```sh
+python3 collector/setup_home_profile.py
+```
+
+The wizard stores declared home facts only. It does not configure live
+providers or change dashboard behaviour.
+
 ## Setup
 
 1. Use Python 3.9 or newer. PowerMonitor is tested for Python 3.14
