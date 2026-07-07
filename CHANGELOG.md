@@ -1,5 +1,19 @@
 # Changelog
 
+## INSIGHT-001 - Energy Timeline
+
+- Added an Energy Timeline engine that turns existing daily readings and EV
+  sessions into homeowner-friendly events.
+- Detects solar start/end, peak solar production, grid export start/end,
+  mostly solar-powered periods, grid import resuming, tariff window starts,
+  likely EV charging from fallback demand, actual EV session start/end,
+  highest usage intervals, and low/high cost periods where data exists.
+- Added a compact Home Energy Timeline section capped at six event cards with
+  a lightweight show-more list for additional events.
+- Exposed `energy_timeline` in the dashboard summary payload.
+- Added regression coverage for event detection, missing-data suppression,
+  Home presentation capping, and dashboard serialization.
+
 ## INF-002 - Python 3.14 Runtime Compatibility
 
 - Removed the deprecated `cgi` dependency from the local web server upload path

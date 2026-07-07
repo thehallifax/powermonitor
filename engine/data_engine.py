@@ -34,6 +34,13 @@ from .models import (
     HouseholdMembership,
     TimelineEntry,
 )
+from .measurement_framework import (
+    MeasurementCapability,
+    MeasurementProviderRegistry,
+    MeasurementType,
+    SolarEdgeMeasurementProvider,
+    UniversalMeasurement,
+)
 from .notification_engine import (
     NotificationChannel,
     NotificationDeliveryState,
@@ -1081,15 +1088,52 @@ class DataEngine:
             "solar_exported_kwh": sum(row["solar_to_grid_kwh"] for row in solar_rows),
         }
 
-    def get_grid_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
+    def get_measurement_provider_registry(self, start: date, end: date) -> MeasurementProviderRegistry:
+        """Return source-agnostic measurement providers for the selected period."""
+
+        rows = self._reading_rows(start, end)
+        return MeasurementProviderRegistry([SolarEdgeMeasurementProvider(rows)])
+
+    def get_measurements(
+        self,
+        start: date,
+        end: date,
+        measurement_types: Optional[list[MeasurementType]] = None,
+    ) -> list[UniversalMeasurement]:
+        return self.get_measurement_provider_registry(start, end).measurements(start, end, measurement_types)
+
+    def get_measurement_capabilities(self, start: date, end: date) -> dict[str, list[dict[str, Any]]]:
+        return {
+            provider_id: [capability.as_dict() for capability in capabilities]
+            for provider_id, capabilities in self.get_measurement_provider_registry(start, end).capabilities().items()
+        }
+
+    def _reading_rows(self, start: date, end: date) -> list[dict[str, Any]]:
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()
         household_id = self._active_household_id()
 
         def query(conn):
+            present = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+
+            def column(name: str, default: str = "0") -> str:
+                return name if name in present else f"{default} AS {name}"
+
             rows = conn.execute(
-                """
-                SELECT measurement_time, tariff_bucket, grid_to_home_w, grid_to_home_kwh
+                f"""
+                SELECT
+                    measurement_time,
+                    tariff_bucket,
+                    {column("production_w")},
+                    {column("consumption_w")},
+                    {column("solar_to_home_w")},
+                    {column("solar_to_grid_w")},
+                    {column("grid_to_home_w")},
+                    production_kwh,
+                    {column("consumption_kwh")},
+                    solar_to_home_kwh,
+                    solar_to_grid_kwh,
+                    grid_to_home_kwh
                 FROM readings
                 WHERE household_id = ?
                   AND measurement_time >= ? AND measurement_time < ?
@@ -1101,41 +1145,57 @@ class DataEngine:
                 {
                     "measurement_time": row[0],
                     "tariff_bucket": row[1],
-                    "grid_to_home_w": float(row[2] or 0),
-                    "grid_to_home_kwh": float(row[3] or 0),
+                    "production_w": float(row[2] or 0),
+                    "consumption_w": float(row[3] or 0),
+                    "solar_to_home_w": float(row[4] or 0),
+                    "solar_to_grid_w": float(row[5] or 0),
+                    "grid_to_home_w": float(row[6] or 0),
+                    "production_kwh": float(row[7] or 0),
+                    "consumption_kwh": float(row[8] or 0),
+                    "solar_to_home_kwh": float(row[9] or 0),
+                    "solar_to_grid_kwh": float(row[10] or 0),
+                    "grid_to_home_kwh": float(row[11] or 0),
                 }
                 for row in rows
             ]
 
         return self._with_connection(query)
+
+    def get_grid_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
+        measurements = self.get_measurements(start, end, [MeasurementType.GRID_IMPORT])
+        return [
+            {
+                "measurement_time": measurement.timestamp,
+                "tariff_bucket": measurement.attributes.get("tariff_bucket"),
+                "grid_to_home_w": float(measurement.attributes.get("power_w") or 0),
+                "grid_to_home_kwh": float(measurement.value or 0),
+            }
+            for measurement in measurements
+        ]
 
     def get_solar_intervals(self, start: date, end: date) -> list[dict[str, Any]]:
-        start_text = start.isoformat()
-        end_exclusive = (end + timedelta(days=1)).isoformat()
-        household_id = self._active_household_id()
-
-        def query(conn):
-            rows = conn.execute(
-                """
-                SELECT measurement_time, production_kwh, solar_to_home_kwh, solar_to_grid_kwh
-                FROM readings
-                WHERE household_id = ?
-                  AND measurement_time >= ? AND measurement_time < ?
-                ORDER BY measurement_time
-                """,
-                (household_id, start_text, end_exclusive),
-            ).fetchall()
-            return [
+        measurements = self.get_measurements(
+            start,
+            end,
+            [MeasurementType.SOLAR_GENERATION, MeasurementType.GRID_EXPORT],
+        )
+        by_time: dict[str, dict[str, Any]] = {}
+        for measurement in measurements:
+            row = by_time.setdefault(
+                measurement.timestamp,
                 {
-                    "measurement_time": row[0],
-                    "production_kwh": float(row[1] or 0),
-                    "solar_to_home_kwh": float(row[2] or 0),
-                    "solar_to_grid_kwh": float(row[3] or 0),
-                }
-                for row in rows
-            ]
-
-        return self._with_connection(query)
+                    "measurement_time": measurement.timestamp,
+                    "production_kwh": 0.0,
+                    "solar_to_home_kwh": 0.0,
+                    "solar_to_grid_kwh": 0.0,
+                },
+            )
+            if measurement.measurement_type == MeasurementType.SOLAR_GENERATION:
+                row["production_kwh"] = float(measurement.value or 0)
+                row["solar_to_home_kwh"] = float(measurement.attributes.get("solar_used_kwh") or 0)
+            elif measurement.measurement_type == MeasurementType.GRID_EXPORT:
+                row["solar_to_grid_kwh"] = float(measurement.value or 0)
+        return [by_time[key] for key in sorted(by_time)]
 
     def get_ev_sessions(
         self,
@@ -3629,6 +3689,7 @@ class DataEngine:
                 ).fetchall()
                 observation_counts = {row[0]: int(row[1]) for row in observation_rows}
 
+            measurement_sources = _measurement_capability_sources(SolarEdgeMeasurementProvider([]).capabilities())
             reading_count = int(reading_row[0] or 0)
             grid_kwh = float(reading_row[1] or 0)
             solar_kwh = sum(float(reading_row[index] or 0) for index in (2, 3, 4))
@@ -3645,7 +3706,7 @@ class DataEngine:
                     "solar",
                     "Solar",
                     present=solar_kwh > 0,
-                    source="provider:solaredge",
+                    source=measurement_sources.get(MeasurementType.SOLAR_GENERATION, "provider:solaredge"),
                     confidence="High" if solar_kwh > 0 else "Medium",
                     reason=(
                         f"Detected {solar_kwh:.2f} kWh of solar production/export readings. {_observation_count_note(observation_counts, 'daily_summary')}"
@@ -3680,7 +3741,7 @@ class DataEngine:
                     "grid_smart_meter",
                     "Grid / smart meter",
                     present=reading_count > 0 and grid_kwh >= 0,
-                    source="provider:smart_meter_readings",
+                    source=measurement_sources.get(MeasurementType.GRID_IMPORT, "provider:smart_meter_readings"),
                     confidence="High" if reading_count else "Medium",
                     reason=(
                         f"Detected {reading_count} household interval readings. {_observation_count_note(observation_counts, 'interval_history')}"
@@ -3857,6 +3918,17 @@ def _observation_count_note(counts: dict[str, int], capability: str) -> str:
     if count <= 0:
         return ""
     return f"{count} source reading{'s' if count != 1 else ''} recorded."
+
+
+def _measurement_capability_sources(
+    capabilities: list[MeasurementCapability],
+    provider_id: str = "solaredge",
+) -> dict[MeasurementType, str]:
+    return {
+        capability.measurement_type: f"measurement:{provider_id}:{capability.measurement_type.value}"
+        for capability in capabilities
+        if capability.available
+    }
 
 
 def freshness_from_latest(latest_measurement: Optional[str], today: date) -> Freshness:

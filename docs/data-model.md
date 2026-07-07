@@ -11,6 +11,55 @@ analytics.
   caring whether a value came from SolarEdge, Ocular, Home Assistant, or a
   future source.
 
+## Universal Measurement Framework
+
+The Universal Measurement Framework is the provider-neutral foundation between
+connectors/importers and analytics. A `MeasurementProvider` exposes
+`UniversalMeasurement` records instead of vendor-specific payloads. A
+`MeasurementProviderRegistry` can load one or more providers and report which
+measurement capabilities are available so downstream features can adapt without
+hardcoded assumptions.
+
+Current implementation:
+
+- SolarEdge is the first measurement provider.
+- SolarEdge measurements are mapped from the existing normalized `readings`
+  table, preserving current import/report behaviour.
+- `DataEngine` owns registry creation and measurement retrieval.
+- Report generation consumes universal measurements for the main period
+  summary aggregation.
+- Provider IDs are unique. Duplicate provider registration fails fast so
+  analytics can safely identify source provenance.
+- The minimal provider contract is `provider_id`, `provider_name`,
+  `capabilities()`, and `measurements(start, end)`.
+
+Universal measurement types:
+
+- `solar_generation`
+- `household_consumption`
+- `grid_import`
+- `grid_export`
+- `battery_charge`
+- `battery_discharge`
+- `tariff_data`
+
+Every measurement carries metadata:
+
+- `provider_id`
+- `source`
+- `timestamp`
+- `quality`: `measured`, `calculated`, `estimated`, or `unknown`
+- optional source record/import identifiers
+
+Provider capability reporting uses the same measurement type names plus unit,
+quality, availability, and a note where useful. `MeasurementProviderRegistry`
+can report supported and missing measurement types directly; downstream engines
+should use those helpers instead of inspecting provider-specific internals.
+Future providers such as Fronius, GoodWe, Sungrow, Enphase, Shelly EM, MQTT,
+Home Assistant, and Modbus should implement their own measurement provider and
+register it with `MeasurementProviderRegistry`; analytics should not need
+provider-specific branches for those integrations.
+
 ## Confidence Rules
 
 Confidence is attached to recommendations and scenario results.
@@ -262,4 +311,3 @@ Source fields:
 
 - `source`: usually `powermonitor_scenario_engine`
 - `source_confidence`
-

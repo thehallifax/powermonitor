@@ -32,10 +32,12 @@ from engine.decision_engine import (
 )
 from engine.decision_pipeline import build_decision_pipeline_output
 from engine.efficiency_advisor import EfficiencyAdvisor
+from engine.energy_timeline import EnergyTimeline, EnergyTimelineEngine
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
 from engine.household_state_engine import HouseholdStateEngine
 from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
+from engine.measurement_framework import MeasurementType, measurement_totals
 from engine.trends_engine import HouseholdTrendsReport, TrendsEngine
 from engine.models import (
     Account,
@@ -336,6 +338,37 @@ def trend_to_dict(trend: DailyTrend) -> dict:
     return result
 
 
+def load_energy_timeline_readings(conn: sqlite3.Connection, day: date) -> list[dict]:
+    engine = data_engine(conn)
+    grid_rows = {row["measurement_time"]: row for row in engine.get_grid_intervals(day, day)}
+    solar_rows = {row["measurement_time"]: row for row in engine.get_solar_intervals(day, day)}
+    timestamps = sorted(set(grid_rows) | set(solar_rows))
+    return [
+        {
+            "measurement_time": timestamp,
+            "tariff_bucket": grid_rows.get(timestamp, {}).get("tariff_bucket"),
+            "production_kwh": float(solar_rows.get(timestamp, {}).get("production_kwh") or 0.0),
+            "solar_to_home_kwh": float(solar_rows.get(timestamp, {}).get("solar_to_home_kwh") or 0.0),
+            "solar_to_grid_kwh": float(solar_rows.get(timestamp, {}).get("solar_to_grid_kwh") or 0.0),
+            "grid_to_home_w": float(grid_rows.get(timestamp, {}).get("grid_to_home_w") or 0.0),
+            "grid_to_home_kwh": float(grid_rows.get(timestamp, {}).get("grid_to_home_kwh") or 0.0),
+        }
+        for timestamp in timestamps
+    ]
+
+
+def build_energy_timeline(conn: sqlite3.Connection, day: date, settings: Settings, now: Optional[datetime] = None) -> EnergyTimeline:
+    readings = load_energy_timeline_readings(conn, day)
+    sessions = [session for session in load_actual_ev_sessions(conn, day, day, settings) if completed_ev_session(session)]
+    return EnergyTimelineEngine().build(
+        day=day,
+        readings=readings,
+        ev_sessions=sessions,
+        settings=settings,
+        now=now or datetime.now(LOCAL_TIMEZONE),
+    )
+
+
 def local_today() -> date:
     return datetime.now(LOCAL_TIMEZONE).date()
 
@@ -441,6 +474,7 @@ def dashboard_data(
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         compared_trends = load_daily_trends(conn, compared.start, compared.end, settings)
+        energy_timeline = build_energy_timeline(conn, current_day, settings, now=datetime.now(LOCAL_TIMEZONE))
         health = health_data(conn, current_day, settings)
         capability_summary = context_engine.get_household_capability_summary(current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings, household_context)
@@ -752,6 +786,7 @@ def dashboard_data(
         "ev_session_analytics": period_summary.ev_session_analytics,
         "daily_trends": [trend_to_dict(trend) for trend in trends],
         "household_insights": [insight.as_dict() for insight in household_insights],
+        "energy_timeline": energy_timeline.as_dict(),
         "household_trends": household_trends.as_dict(),
         "tariff_scenario": tariff_scenario(period_summary, settings),
         "plan_comparison": plan,
@@ -1141,53 +1176,42 @@ def ev_session_analytics(
 
 
 def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
-    start_text = start.isoformat()
-    end_exclusive = (end + timedelta(days=1)).isoformat()
-    import_cost_expression, cost_params = cost_sql(settings)
-    household_id = data_engine(conn)._active_household_id()
-    row = conn.execute(
-        f"""
-        SELECT
-            COUNT(*),
-            COUNT(DISTINCT substr(measurement_time, 1, 10)),
-            COALESCE(SUM(grid_to_home_kwh), 0),
-            COALESCE(SUM({import_cost_expression}), 0),
-            COALESCE(SUM(production_kwh), 0),
-            COALESCE(SUM(solar_to_home_kwh), 0),
-            COALESCE(SUM(solar_to_grid_kwh), 0),
-            COALESCE(SUM(
-                CASE WHEN tariff_bucket = 'overnight'
-                     THEN MAX(COALESCE(grid_to_home_w, 0) - ?, 0) * 0.25 / 1000.0
-                     ELSE 0 END
-            ), 0)
-        FROM readings
-        WHERE household_id = ?
-          AND measurement_time >= ? AND measurement_time < ?
-        """,
-        (*cost_params, settings.ev_baseline_watts, household_id, start_text, end_exclusive),
-    ).fetchone()
-
+    measurements = data_engine(conn).get_measurements(start, end)
+    totals = measurement_totals(measurements)
+    interval_timestamps = {
+        measurement.timestamp
+        for measurement in measurements
+        if measurement.measurement_type == MeasurementType.GRID_IMPORT
+    }
     buckets = {
         bucket: {"kwh": 0.0, "cost": 0.0}
         for bucket in BUCKET_ORDER
     }
-    for bucket, kwh in conn.execute(
-        """
-        SELECT tariff_bucket, COALESCE(SUM(grid_to_home_kwh), 0)
-        FROM readings
-        WHERE household_id = ?
-          AND measurement_time >= ? AND measurement_time < ?
-        GROUP BY tariff_bucket
-        """,
-        (household_id, start_text, end_exclusive),
-    ):
+    estimated_ev_charging = 0.0
+    for measurement in measurements:
+        if measurement.measurement_type != MeasurementType.GRID_IMPORT:
+            continue
+        bucket = str(measurement.attributes.get("tariff_bucket") or "")
+        kwh = float(measurement.value or 0.0)
         buckets.setdefault(bucket, {"kwh": 0.0, "cost": 0.0})
-        buckets[bucket] = {
-            "kwh": float(kwh),
-            "cost": float(kwh) * settings.import_rates.get(bucket, 0),
-        }
+        buckets[bucket]["kwh"] += kwh
+        buckets[bucket]["cost"] += kwh * settings.import_rates.get(bucket, 0)
+        if bucket == "overnight":
+            power_w = float(measurement.attributes.get("power_w") or 0.0)
+            interval_minutes = float(measurement.attributes.get("interval_minutes") or 15)
+            estimated_ev_charging += max(power_w - settings.ev_baseline_watts, 0) * interval_minutes / 60 / 1000
 
-    intervals, reading_days, grid_import, import_cost, generated, used, exported, estimated_ev_charging = row
+    intervals = len(interval_timestamps)
+    reading_days = len({timestamp[:10] for timestamp in interval_timestamps})
+    grid_import = totals[MeasurementType.GRID_IMPORT]
+    import_cost = sum(bucket["cost"] for bucket in buckets.values())
+    generated = totals[MeasurementType.SOLAR_GENERATION]
+    used = sum(
+        float(measurement.attributes.get("solar_used_kwh") or 0.0)
+        for measurement in measurements
+        if measurement.measurement_type == MeasurementType.SOLAR_GENERATION
+    )
+    exported = totals[MeasurementType.GRID_EXPORT]
     actual_ev_charging = None
     actual_ev_cost = None
     actual_ev_breakdown = empty_ev_breakdown()
@@ -1483,52 +1507,58 @@ def comparison_data(period_a: Period, period_b: Period, settings: Settings) -> d
 def load_daily_trends(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[DailyTrend]:
-    import_cost_expression, cost_params = cost_sql(settings)
-    household_id = data_engine(conn)._active_household_id()
-    rows = conn.execute(
-        f"""
-        SELECT
-            substr(measurement_time, 1, 10) AS day,
-            COALESCE(SUM(grid_to_home_kwh), 0),
-            COALESCE(SUM(production_kwh), 0),
-            COALESCE(SUM(solar_to_grid_kwh), 0),
-            COALESCE(SUM({import_cost_expression}), 0),
-            COALESCE(SUM(
-                CASE WHEN tariff_bucket = 'overnight'
-                     THEN MAX(COALESCE(grid_to_home_w, 0) - ?, 0) * 0.25 / 1000.0
-                     ELSE 0 END
-            ), 0)
-        FROM readings
-        WHERE household_id = ?
-          AND measurement_time >= ? AND measurement_time < ?
-        GROUP BY day
-        ORDER BY day
-        """,
-        (*cost_params, settings.ev_baseline_watts, household_id, start.isoformat(), (end + timedelta(days=1)).isoformat()),
-    ).fetchall()
+    measurements = data_engine(conn).get_measurements(start, end)
+    rows: dict[str, dict[str, float]] = {}
+    for measurement in measurements:
+        day_text = measurement.timestamp[:10]
+        row = rows.setdefault(
+            day_text,
+            {
+                "grid_import": 0.0,
+                "generated": 0.0,
+                "exported": 0.0,
+                "import_cost": 0.0,
+                "ev_charging": 0.0,
+            },
+        )
+        if measurement.measurement_type == MeasurementType.GRID_IMPORT:
+            kwh = float(measurement.value or 0.0)
+            bucket = str(measurement.attributes.get("tariff_bucket") or "")
+            row["grid_import"] += kwh
+            row["import_cost"] += kwh * settings.import_rates.get(bucket, 0)
+            if bucket == "overnight":
+                power_w = float(measurement.attributes.get("power_w") or 0.0)
+                interval_minutes = float(measurement.attributes.get("interval_minutes") or 15)
+                row["ev_charging"] += max(power_w - settings.ev_baseline_watts, 0) * interval_minutes / 60 / 1000
+        elif measurement.measurement_type == MeasurementType.SOLAR_GENERATION:
+            row["generated"] += float(measurement.value or 0.0)
+        elif measurement.measurement_type == MeasurementType.GRID_EXPORT:
+            row["exported"] += float(measurement.value or 0.0)
+
     trends = []
     actual_ev_totals = data_engine(conn).get_daily_ev_session_totals(
         start,
         end,
         sources=actual_ev_sources(settings),
     )
-    for day_text, grid_import, generated, exported, import_cost, ev_charging in rows:
-        ev_value = float(ev_charging)
+    for day_text in sorted(rows):
+        row = rows[day_text]
+        ev_value = float(row["ev_charging"])
         ev_source = "estimated"
         actual_ev = actual_ev_totals.get(day_text)
         if actual_ev and float(actual_ev.get("energy_kwh") or 0) > 0:
             ev_value = float(actual_ev["energy_kwh"])
             ev_source = actual_ev["source"]
-        export_credit = float(exported) * settings.export_credit_rate
+        export_credit = float(row["exported"]) * settings.export_credit_rate
         trends.append(
             DailyTrend(
                 day=date.fromisoformat(day_text),
-                grid_import_kwh=float(grid_import),
-                solar_generated_kwh=float(generated),
-                solar_exported_kwh=float(exported),
-                import_cost=float(import_cost),
+                grid_import_kwh=float(row["grid_import"]),
+                solar_generated_kwh=float(row["generated"]),
+                solar_exported_kwh=float(row["exported"]),
+                import_cost=float(row["import_cost"]),
                 export_credit=export_credit,
-                net_cost=float(import_cost) + settings.supply_charge_per_day - export_credit,
+                net_cost=float(row["import_cost"]) + settings.supply_charge_per_day - export_credit,
                 ev_charging_kwh=ev_value,
                 ev_charging_source=ev_source,
             )
@@ -3421,6 +3451,7 @@ def daily_briefing_html(
     insights: Optional[list[HouseholdInsight]] = None,
     trends_report: Optional[HouseholdTrendsReport] = None,
     health: Optional[dict] = None,
+    energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
     action_items = dedupe_briefing_items([*briefing.top_priorities, *briefing.items_to_watch])
     positive_items = dedupe_briefing_items(briefing.positive_outcomes)
@@ -3434,6 +3465,7 @@ def daily_briefing_html(
     <section class="report-section briefing-section">
       {home_assistant_hero_html(briefing)}
       {home_status_strip_html(briefing, glance, health)}
+      {energy_timeline_home_html(energy_timeline)}
       {actions}
       {secondary}
       {household_insights_html(insights or [])}
@@ -3444,6 +3476,60 @@ def daily_briefing_html(
       </section>
       {goal_progress}
     </section>
+    """
+
+
+def energy_timeline_home_html(timeline: Optional[EnergyTimeline], limit: int = 6) -> str:
+    if not timeline or not timeline.events:
+        return """
+      <section class="briefing-block energy-timeline-block">
+        <div class="section-title"><div><span class="eyebrow">Today so far</span><h2>No energy events detected yet.</h2></div></div>
+        <p class="notice">PowerMonitor will show a daily event timeline here once today's readings contain enough activity.</p>
+      </section>
+        """
+    visible = timeline.events[:limit]
+    hidden = timeline.events[limit:]
+    cards = "".join(energy_timeline_event_card(event) for event in visible)
+    hidden_rows = "".join(
+        f"<li><time>{html.escape(event.local_time)}</time> {html.escape(event.title)}</li>"
+        for event in hidden
+    )
+    more = (
+        f"""
+        <details class="energy-timeline-more">
+          <summary>Show {len(hidden)} more event{'s' if len(hidden) != 1 else ''}</summary>
+          <ul>{hidden_rows}</ul>
+        </details>
+        """
+        if hidden else ""
+    )
+    progress = "Still in progress" if timeline.is_in_progress else "Complete day"
+    return f"""
+      <section class="briefing-block energy-timeline-block">
+        <div class="section-title"><div><span class="eyebrow">What happened today?</span><h2>Energy timeline</h2></div><p>{html.escape(progress)}</p></div>
+        <p class="scenario-note">{html.escape(timeline.summary)}</p>
+        <div class="energy-timeline-list">{cards}</div>
+        {more}
+      </section>
+    """
+
+
+def energy_timeline_event_card(event) -> str:
+    values = "".join(
+        f"<small>{html.escape(str(label))}: {html.escape(str(value))}</small>"
+        for label, value in (getattr(event, "supporting_values", {}) or {}).items()
+    )
+    confidence = getattr(event, "confidence", "")
+    confidence_html = f"<small>{html.escape(str(confidence).title())} confidence</small>" if confidence else ""
+    return f"""
+      <article class="energy-timeline-card">
+        <time>{html.escape(str(getattr(event, "local_time", "")))}</time>
+        <div>
+          <h3><span>{html.escape(str(getattr(event, "icon", "") or "•"))}</span>{html.escape(str(getattr(event, "title", "")))}</h3>
+          <p>{html.escape(str(getattr(event, "explanation", "")))}</p>
+          <div class="briefing-meta">{confidence_html}{values}</div>
+        </div>
+      </article>
     """
 
 
@@ -4297,9 +4383,10 @@ def home_page_html(
     insights: Optional[list[HouseholdInsight]] = None,
     trends_report: Optional[HouseholdTrendsReport] = None,
     health: Optional[dict] = None,
+    energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
     return (
-        daily_briefing_html(briefing, goals or [], glance, insights, trends_report, health)
+        daily_briefing_html(briefing, goals or [], glance, insights, trends_report, health, energy_timeline)
         + bill_change_explanation_html(bill_change, compact=True)
         + setup_progress_card_html(setup)
     )
@@ -6112,6 +6199,7 @@ def system_page_html(
     notification_history: Optional[dict] = None,
     provider_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
+    energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -6483,6 +6571,7 @@ def write_html(
     overnight_baseload_watts: Optional[float] = None,
     provider_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
+    energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -6546,6 +6635,13 @@ def write_html(
         actual_bill_comparison = None
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
+    if energy_timeline is None:
+        try:
+            with sqlite3.connect(DB_PATH) as timeline_conn:
+                validate_database(timeline_conn)
+                energy_timeline = build_energy_timeline(timeline_conn, local_today(), settings, now=generated_dt)
+        except (FileNotFoundError, RuntimeError, sqlite3.Error):
+            energy_timeline = EnergyTimelineEngine().build(day=local_today(), readings=[], settings=settings, now=generated_dt)
     overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
@@ -6791,7 +6887,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline)}
   </section>
   <section id="setup" class="page">
     {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
@@ -7080,6 +7176,15 @@ def write_html(
     .home-status-tile.amber {{ background:#fffaf0; border-color:#eeddb0; }}
     .home-status-tile.red {{ background:#fff5f3; border-color:#f0cec8; }}
     .home-change-block .notice {{ margin:0; }}
+    .energy-timeline-list {{ display:grid; grid-template-columns:1fr; gap:10px; }}
+    .energy-timeline-card {{ display:grid; grid-template-columns:64px 1fr; gap:14px; align-items:start; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .energy-timeline-card time {{ padding-top:3px; color:var(--ink); font-size:17px; font-weight:850; letter-spacing:0; font-variant-numeric:tabular-nums; }}
+    .energy-timeline-card h3 {{ display:flex; gap:9px; align-items:center; margin:0 0 5px; font-size:17px; letter-spacing:0; }}
+    .energy-timeline-card h3 span {{ width:22px; flex:0 0 22px; text-align:center; }}
+    .energy-timeline-card p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.45; }}
+    .energy-timeline-card .briefing-meta {{ margin-top:8px; justify-content:flex-start; flex-wrap:wrap; }}
+    .energy-timeline-more {{ margin-top:10px; }}
+    .energy-timeline-more summary {{ cursor:pointer; color:var(--accent); font-weight:800; }}
     .energy-score-card {{ display:grid; grid-template-columns:180px 1fr; gap:18px; padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .energy-score-main {{ display:grid; align-content:center; min-height:150px; padding:18px; color:#fff; background:linear-gradient(135deg,#111816,#2d6b52); border-radius:18px; }}
     .energy-score-main span,.energy-score-main small,.energy-score-factors span {{ font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
@@ -7584,6 +7689,7 @@ def build_live_html(
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         health = health_data(conn, current_day, settings)
+        energy_timeline = build_energy_timeline(conn, current_day, settings, now=datetime.now(LOCAL_TIMEZONE))
         all_recommendations = load_recommendations(conn, selected_summary, settings)
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
@@ -7616,6 +7722,7 @@ def build_live_html(
         overnight_baseload_watts=overnight_baseload_watts,
         provider_flash=provider_flash,
         runtime_check=runtime_check,
+        energy_timeline=energy_timeline,
     )
 
 

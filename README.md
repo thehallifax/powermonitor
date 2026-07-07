@@ -21,6 +21,21 @@ collection, Home Assistant OCPP import, and Ocular Excel import. The report,
 scenario, and recommendation engines are source-agnostic and work from the
 internal models documented in `docs/data-model.md`.
 
+PowerMonitor now uses a Universal Measurement Framework as the provider-neutral
+layer below analytics. Providers expose standardized measurements such as solar
+generation, household consumption, grid import/export, future battery
+charge/discharge, and future tariff data. Each measurement carries provider,
+timestamp, and data-quality metadata. SolarEdge is the first implementation and
+maps the existing normalized `readings` data into this framework so existing
+reports and analytics continue to work while future providers can be added
+behind the same abstraction.
+
+Provider IDs are unique, and each provider advertises capabilities through the
+registry before analytics request measurements. This keeps future inverter,
+meter, MQTT, and Home Assistant integrations contained within their provider
+implementation instead of leaking vendor-specific branches into reports or
+recommendations.
+
 For the broader product direction, see `docs/VISION.md`.
 
 ## Setup
