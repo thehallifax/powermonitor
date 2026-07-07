@@ -25,6 +25,8 @@ Current implementation:
 - SolarEdge is the first measurement provider.
 - SolarEdge measurements are mapped from the existing normalized `readings`
   table, preserving current import/report behaviour.
+- Fronius is available as an opt-in local Solar API measurement provider, but
+  is not registered in `DataEngine` by default yet.
 - `DataEngine` owns registry creation and measurement retrieval.
 - Report generation consumes universal measurements for the main period
   summary aggregation.

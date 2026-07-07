@@ -16,6 +16,7 @@ from .decision_engine import (
 )
 from .decision_pipeline import DecisionPipeline, DecisionPipelineOutput
 from .efficiency_advisor import EfficiencyAdvisor
+from .fronius_provider import FroniusApiError, FroniusMeasurementProvider
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
 from .goals_engine import GoalsEngine
@@ -107,6 +108,8 @@ __all__ = [
     "FinancialImpact",
     "FinancialEngine",
     "Forecast",
+    "FroniusApiError",
+    "FroniusMeasurementProvider",
     "Freshness",
     "Goal",
     "GoalProgress",
