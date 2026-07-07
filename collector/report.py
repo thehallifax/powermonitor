@@ -2278,6 +2278,52 @@ def recommendations_html(recommendations: list) -> str:
     """
 
 
+def best_next_action_html(
+    *,
+    title: str,
+    action: str,
+    reason: str,
+    impact: str = "",
+    confidence: str = "",
+) -> str:
+    detail_rows = "".join(
+        row
+        for row in (
+            f"<div><span>Why this matters</span><strong>{html.escape(trust_wording(reason))}</strong></div>" if reason else "",
+            f"<div><span>Financial impact</span><strong>{html.escape(trust_wording(impact))}</strong></div>" if impact else "",
+            f"<div><span>Confidence</span><strong>{html.escape(confidence)}</strong></div>" if confidence else "",
+        )
+        if row
+    )
+    return f"""
+    <section class="report-section compact-section best-next-action-section">
+      <div class="section-title"><div><span class="eyebrow">Best Next Action</span><h2>{html.escape(title)}</h2></div></div>
+      <div class="decision-grid">
+        <div><span>What should I do?</span><strong>{html.escape(trust_wording(action))}</strong></div>
+        {detail_rows}
+      </div>
+    </section>
+    """
+
+
+def recommendation_best_next_action_html(recommendations: list, empty_action: str, empty_reason: str) -> str:
+    if recommendations:
+        item = sorted(recommendations, key=recommendation_sort_key)[0]
+        return best_next_action_html(
+            title=recommendation_title(item),
+            action=recommendation_action(item),
+            reason=recommendation_why(item),
+            impact=recommendation_impact(item),
+            confidence=f"{recommendation_confidence(item)} confidence",
+        )
+    return best_next_action_html(
+        title="Nothing specific needs action right now.",
+        action=empty_action,
+        reason=empty_reason,
+        confidence="PowerMonitor will update this when household data supports a specific recommendation.",
+    )
+
+
 def hero_html(
     period_summary: Summary,
     generated_at: str,
@@ -2529,20 +2575,15 @@ def period_controls_html(selected: Period) -> str:
 def nav_html() -> str:
     pages = (
         ("home", "Home"),
-        ("setup", "Setup"),
-        ("glance", "Glance"),
-        ("recommendations", "Recommendations"),
-        ("bills", "Bills & Tariffs"),
+        ("bills", "Bills"),
         ("solar", "Solar"),
-        ("ev", "EV Charging"),
-        ("whatif", "What If?"),
-        ("timeline", "Timeline"),
-        ("analytics", "Analytics"),
-        ("imports", "Imports"),
-        ("system", "System"),
+        ("ev", "EV"),
+        ("whatif", "Decisions"),
+        ("analytics", "History"),
+        ("system", "Settings"),
     )
     return (
-        '<div class="mobile-shortcuts"><a href="#home">Home</a><a href="#glance">Glance</a><a href="#setup">Setup</a><a href="#system">System</a></div>'
+        '<div class="mobile-shortcuts"><a href="#home">Home</a><a href="#bills">Bills</a><a href="#whatif">Decisions</a><a href="#system">Settings</a></div>'
         '<nav class="top-nav" aria-label="Dashboard pages">'
         + "".join(f'<a href="#{page_id}">{html.escape(label)}</a>' for page_id, label in pages)
         + "</nav>"
@@ -3353,8 +3394,8 @@ def timeline_html(timeline: DecisionTimeline) -> str:
     if not timeline.entries:
         return """
         <section class="report-section timeline-section">
-          <div class="section-title"><div><span class="eyebrow">Decision timeline</span><h2>No timeline yet</h2></div></div>
-          <p class="notice">PowerMonitor has not recorded any timeline events for this period.</p>
+          <div class="section-title"><div><span class="eyebrow">Household timeline</span><h2>No important changes recorded yet.</h2></div></div>
+          <p class="notice">Once PowerMonitor has enough history, this page will show the decisions, bill changes, and household events worth remembering.</p>
         </section>
         """
     rows = []
@@ -3367,7 +3408,7 @@ def timeline_html(timeline: DecisionTimeline) -> str:
         impact = (
             f'<small>{html.escape(entry.financial_impact)}</small>'
             if entry.financial_impact
-            else "<small>Financial impact not quantified</small>"
+            else "<small>Financial impact unavailable</small>"
         )
         sources = ", ".join(customer_source(source) for source in entry.evidence_sources) if entry.evidence_sources else "No sources"
         kind = customer_label(friendly_label(entry.event_type))
@@ -3391,10 +3432,10 @@ def timeline_html(timeline: DecisionTimeline) -> str:
     return f"""
     <section class="report-section timeline-section">
       <div class="section-title">
-        <div><span class="eyebrow">Decision timeline</span><h2>Household memory</h2></div>
+        <div><span class="eyebrow">Household timeline</span><h2>What changed, and why it mattered</h2></div>
         <p>{len(timeline.entries)} events</p>
       </div>
-      <p class="scenario-note">Grouped by day so important household changes are easier to scan.</p>
+      <p class="scenario-note">Start here to see the household events and recommendations PowerMonitor considered worth remembering.</p>
       <div class="timeline-list">{''.join(rows)}</div>
     </section>
     """
@@ -4033,7 +4074,7 @@ def setup_progress_card_html(setup: Optional[SetupChecklist]) -> str:
         return """
         <section class="setup-progress-card complete">
           <div><span>First-time setup</span><h3>PowerMonitor is ready to help.</h3><p>You can add optional services later for more detailed advice.</p></div>
-          <a href="#setup">Review setup</a>
+          <a href="#setup">Review settings</a>
         </section>
         """
     remaining = "".join(
@@ -4162,7 +4203,7 @@ def setup_page_html(
         conflict_notice = """
         <section class="setup-progress-card">
         <div><span>Data connection</span><h3>Two sources disagree.</h3><p>Review provider configuration before relying on this data.</p></div>
-          <a href="#system">Review System</a>
+          <a href="#system">Review Settings</a>
         </section>
         """
     notification_notice = ""
@@ -4378,7 +4419,7 @@ def list_items_plain(items: list[str]) -> str:
 
 def first_recommendation_next_step(setup: SetupChecklist, settings: Optional[Settings]) -> str:
     if settings and settings.ev_setup_choice == "ocular_import":
-        return "Fastest path to a useful first recommendation: upload an Ocular charging export on the Imports page."
+        return "Fastest path to a useful first recommendation: upload an Ocular charging export in Settings."
     if settings and settings.solar_setup_choice in {"solaredge", "home_assistant"}:
         return "Fastest path to a useful first recommendation: connect your solar service or add recent readings."
     if setup.progress.remaining_tasks:
@@ -4573,7 +4614,7 @@ def actual_synergy_bill_html(comparison: Optional[dict], settings: Settings) -> 
         return f"""
         <section class="report-section compact-section">
           <div class="section-title"><div><span class="eyebrow">Bill reconciliation</span><h2>How close was PowerMonitor?</h2></div><p>Retailer reconciliation</p></div>
-          <p class="notice">No Synergy PDF bill has been imported yet. Upload one on the Imports page to compare PowerMonitor's projection with the actual retailer bill.</p>
+          <p class="notice">No Synergy PDF bill has been imported yet. Upload one in Settings to compare PowerMonitor's projection with the actual retailer bill.</p>
         </section>
         """
     bill = comparison.get("latest_bill") or {}
@@ -4762,8 +4803,26 @@ def financial_highlights_html(summary: Summary, projected_bill_value: float, pla
         if plan.get("savings", 0) < 0
         else "No plan gap detected"
     )
-    top_action = recommendation_action(recommendations[0]) if recommendations else "No savings recommendation is active right now."
+    top_recommendation = recommendations[0] if recommendations else None
+    top_action = recommendation_action(top_recommendation) if top_recommendation else "No savings recommendation is active right now."
+    best_action = (
+        best_next_action_html(
+            title=recommendation_title(top_recommendation),
+            action=top_action,
+            reason=recommendation_why(top_recommendation),
+            impact=recommendation_impact(top_recommendation),
+            confidence=f"{recommendation_confidence(top_recommendation)} confidence",
+        )
+        if top_recommendation
+        else best_next_action_html(
+            title="No bill action is needed right now.",
+            action="Review the bill estimate below and check back when new readings or imports arrive.",
+            reason="PowerMonitor has not found a bill or tariff recommendation that needs attention.",
+            confidence="Current recommendation check",
+        )
+    )
     return f"""
+    {best_action}
     <section class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Financial overview</span><h2>Start here</h2></div><p>Current bill, projection, and next opportunity</p></div>
       <div class="metrics">
@@ -4812,10 +4871,15 @@ def solar_page_html(summary: Summary, recommendations: list) -> str:
             metric("Export percentage", f"{summary.solar_export_pct:.1f}%", "Generation exported", "export"),
         ]
     )
-    rec_html = recommendations_html(solar_recs) if solar_recs else '<p class="notice">No solar-specific recommendation is active for this period.</p>'
+    rec_html = recommendations_html(solar_recs) if solar_recs else '<p class="notice">No solar-specific recommendation is active for this period. Keep using daytime solar where practical and review this page when new readings arrive.</p>'
     return f"""
+    {recommendation_best_next_action_html(
+        solar_recs,
+        "No solar-specific action is needed right now.",
+        "Solar generation and self-consumption are still shown below so you can understand how much solar stayed in the home.",
+    )}
     <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Solar</span><h2>Generation and self-consumption</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">Solar detail</span><h2>Generation and self-consumption</h2></div><p>Supporting metrics</p></div>
       <div class="metrics">{cards}</div>
     </section>
     {rec_html}
@@ -4882,6 +4946,13 @@ def ev_page_html(summary: Summary, settings: Settings) -> str:
         </section>
         """
     return f"""
+    {best_next_action_html(
+        title="Use actual charger history when available.",
+        action="Import completed Ocular sessions or connect Home Assistant charger data when you want more confident EV cost advice.",
+        reason="EV recommendations are most useful when PowerMonitor can see completed charging sessions, tariff timing, and delivered energy.",
+        impact=money(summary.ev_charging_cost),
+        confidence="Actual sessions available" if summary.ev_session_analytics.get("available") else "Using fallback estimate",
+    )}
     {ev_source_status_html(summary, settings)}
     {actual_ev_card_html(summary, settings)}
     {ev_session_analytics_html(summary, settings)}
@@ -5048,7 +5119,7 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
         return """
     <div class="system-card">
       <div class="chart-heading"><h3>Available providers</h3><span>Not loaded</span></div>
-      <p class="notice">Provider guidance is not available in this report. Check System again after the dashboard refreshes.</p>
+      <p class="notice">Provider guidance is not available in this report. Check Settings again after the dashboard refreshes.</p>
     </div>
     """
     rows = []
@@ -5534,7 +5605,7 @@ def provider_management_html(provider_management: Optional[ProviderManager], pro
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Your Data Sources</h3><span>{len(rows)} active</span></div>
-      <p class="scenario-note">These are the household sources PowerMonitor can use today. Optional integrations live in Setup until you connect them.</p>
+      <p class="scenario-note">These are the household sources PowerMonitor can use today. Optional integrations live in Settings until you connect them.</p>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No household data sources are connected yet.</p>'}</div>
     </div>
     """
@@ -5602,8 +5673,8 @@ def provider_observations_diagnostics_html(summary: Optional[dict]) -> str:
     if not summary:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider observations</h3><span>Not available yet</span></div>
-      <p class="notice">No provider observation summary is available for diagnostics.</p>
+      <div class="chart-heading"><h3>Source reading details</h3><span>Not available yet</span></div>
+      <p class="notice">No source reading summary is available for troubleshooting.</p>
     </div>
     """
     rows = []
@@ -5619,8 +5690,8 @@ def provider_observations_diagnostics_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Provider observations</h3><span>{int(summary.get("count") or 0)} recent</span></div>
-      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No provider observations recorded yet.</p>'}</div>
+      <div class="chart-heading"><h3>Source reading details</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="completeness-grid">{''.join(rows) or '<p class="notice">No source readings recorded yet.</p>'}</div>
     </div>
     """
 
@@ -6038,7 +6109,7 @@ def state_changes_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>State Changes</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="chart-heading"><h3>Recent household changes</h3><span>{int(summary.get("count") or 0)} recent</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No material household state changes recorded yet.</p>'}</div>
     </div>
     """
@@ -6064,7 +6135,7 @@ def notification_readiness_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Notification Readiness</h3><span>{int(summary.get("ready_count") or 0)} ready / {int(summary.get("count") or 0)} candidates</span></div>
+      <div class="chart-heading"><h3>Notification checks</h3><span>{int(summary.get("ready_count") or 0)} ready / {int(summary.get("count") or 0)} candidates</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No notification candidates are ready.</p>'}</div>
     </div>
     """
@@ -6088,7 +6159,7 @@ def notification_preferences_html(preferences: Optional[dict]) -> str:
     )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Notification Preferences</h3><span>Local only</span></div>
+      <div class="chart-heading"><h3>Notification settings</h3><span>Local only</span></div>
       <div class="config-grid">{row_html}</div>
     </div>
     """
@@ -6112,7 +6183,7 @@ def notification_history_html(summary: Optional[dict]) -> str:
         )
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Notification History</h3><span>{int(summary.get("count") or 0)} recent</span></div>
+      <div class="chart-heading"><h3>Notification history</h3><span>{int(summary.get("count") or 0)} recent</span></div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No notification history recorded yet.</p>'}</div>
     </div>
     """
@@ -6193,8 +6264,8 @@ def runtime_check_html(runtime_check: Optional[dict]) -> str:
     if not runtime_check:
         return """
         <div class="system-card">
-          <div class="chart-heading"><h3>Runtime diagnostics</h3><span>Unavailable</span></div>
-          <p class="notice">Runtime environment details are not available for this report.</p>
+          <div class="chart-heading"><h3>Local environment details</h3><span>Unavailable</span></div>
+          <p class="notice">Local environment details are not available for this report.</p>
         </div>
         """
     rows = [
@@ -6217,7 +6288,7 @@ def runtime_check_html(runtime_check: Optional[dict]) -> str:
     warnings = f"<ul>{warning_rows}</ul>" if warning_rows else "<p>No runtime setup warnings detected.</p>"
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Runtime diagnostics</h3><span>Python environment</span></div>
+      <div class="chart-heading"><h3>Local environment details</h3><span>Python environment</span></div>
       <div class="config-grid">{row_html}</div>
       <details class="evidence-trail"><summary>Runtime setup warnings</summary>{warnings}</details>
     </div>
@@ -6312,7 +6383,7 @@ def system_page_html(
     """
     return f"""
     <section id="system-collector" class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">System</span><h2>Can I trust today's advice?</h2></div><p>Start with whether the current guidance is based on enough household information.</p></div>
+      <div class="section-title"><div><span class="eyebrow">Settings</span><h2>Can I trust today's advice?</h2></div><p>Start with whether the current guidance is based on enough household information.</p></div>
       {system_trust_summary_html(provider_management, summary)}
       {system_action_needed_html(setup, provider_management)}
       {confidence_section_html(summary, settings, provider_observations)}
@@ -6441,8 +6512,34 @@ def imports_page_html(
         <li>The main dashboard will not auto-refresh while you are choosing or uploading a file.</li>
       </ul>
     """
+    if setup_tasks:
+        next_task = next((task for task in setup_tasks if task.status != "complete" and task.status != "future"), None)
+    else:
+        next_task = None
+    if next_task:
+        import_action = best_next_action_html(
+            title=next_task.title,
+            action=next_task.action_label,
+            reason=next_task.rationale,
+            confidence="Setup guidance",
+        )
+    elif history:
+        import_action = best_next_action_html(
+            title="Recent imports are available.",
+            action="Review the latest import status below, then return to Home for updated guidance.",
+            reason="Successful imports improve bill explanations, EV charging costs, and confidence messaging.",
+            confidence="Import history found",
+        )
+    else:
+        import_action = best_next_action_html(
+            title="Start with the file that answers your next question.",
+            action="Upload an Ocular export for EV charging costs, or a Synergy bill PDF to compare PowerMonitor with the retailer bill.",
+            reason="Imports are optional, but they make recommendations more specific when live data is limited.",
+            confidence="No import history yet",
+        )
 
     return f"""
+    {import_action}
     <section class="report-section import-panel">
       <div class="section-title"><div><span class="eyebrow">Imports</span><h2>Upload household data</h2></div><p>Choose an Ocular Excel export or Synergy PDF bill from your phone, tablet, or Mac.</p></div>
       {disclosure_html("First-time import guide", "What to upload and what happens next", import_guidance, open_by_default=True, css_class="onboarding-guide")}
@@ -6458,7 +6555,7 @@ def imports_page_html(
       {disclosure_html("Troubleshooting uploads", "Formats, validation, and safe re-imports", troubleshooting, css_class="onboarding-guide")}
     </section>
     <section class="report-section import-panel compact-section">
-      <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">History</span><h2>Recent import jobs</h2></div><p>Use this only to confirm whether an upload worked.</p></div>
       <table class="responsive-table">
         <thead><tr><th>Created</th><th>Source</th><th>File</th><th>Status</th><th>Message</th><th>Readings</th></tr></thead>
         <tbody>{rows}</tbody>
@@ -6568,7 +6665,7 @@ def scenario_analysis_html(analysis: dict) -> str:
         """
     return f"""
     <section class="report-section scenario-section">
-      <div class="section-title"><div><span class="eyebrow">What If?</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
+      <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
       {insights_html}
     </section>
@@ -6940,14 +7037,14 @@ def write_html(
   </section>
   <section id="home" class="page">
     {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline)}
-  </section>
-  <section id="setup" class="page">
-    {page_heading_html("Finish household setup", "Complete the few configuration items PowerMonitor needs to explain your bill clearly.")}
-    {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management)}
-  </section>
-  <section id="recommendations" class="page">
-    {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.")}
-    {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
+    <div id="recommendations">
+      {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.")}
+      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
+    </div>
+    <div id="timeline">
+      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.")}
+      {timeline_html(display_timeline)}
+    </div>
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -6968,24 +7065,23 @@ def write_html(
     {ev_page_html(period_summary, settings)}
   </section>
   <section id="whatif" class="page">
-    {page_heading_html("What should I change?", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
+    {page_heading_html("Decisions", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
     {whatif_page_html(scenarios, plan, recommendation_presentations)}
   </section>
-  <section id="timeline" class="page">
-    {page_heading_html("What has happened over time?", "A household history of decisions, outcomes, confidence, and evidence.")}
-    {timeline_html(display_timeline)}
-  </section>
   <section id="analytics" class="page">
-    {page_heading_html("What patterns exist?", "Daily trends, historical comparison, and larger analytical detail.")}
+    {page_heading_html("History", "Daily trends, historical comparison, and larger analytical detail.")}
     {trends_html(trends, settings)}
     {comparison_html(comparison) if comparison else ""}
   </section>
-  <section id="imports" class="page">
-    {page_heading_html("Upload household data", "Preview and import supported local household exports.")}
-    {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
-  </section>
   <section id="system" class="page">
-    {page_heading_html("Can I trust today's advice?", "Provider status, confidence, household data limits, and privacy-safe diagnostics.")}
+    {page_heading_html("Settings", "Setup, imports, provider status, confidence, and privacy-safe diagnostics.")}
+    <div id="setup">
+      {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management)}
+    </div>
+    <div id="imports">
+      {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}
+      {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
+    </div>
     {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check)}
   </section>
 """
@@ -7042,6 +7138,8 @@ def write_html(
     .mobile-shortcuts {{ display:none; }}
     .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
     body:has(.page:target) #home,
+    body:has(#setup:target) #home,
+    body:has(#imports:target) #home,
     body:has(#setup-billing:target) #home,
     body:has(#setup-billing-cycle:target) #home,
     body:has(#setup-tariff:target) #home,
@@ -7051,11 +7149,15 @@ def write_html(
     body:has(#energy-score-explanation:target) #home,
     body:has([id^="system-provider-"]:target) #home {{ display:none; }}
     body:has(#home:target) #home,
+    body:has(#recommendations:target) #home,
+    body:has(#timeline:target) #home,
     body:has(#home-goals:target) #home,
     body:has(#energy-score-explanation:target) #home,
-    body:has(#setup-billing:target) #setup,
-    body:has(#setup-billing-cycle:target) #setup,
-    body:has(#setup-tariff:target) #setup,
+    body:has(#setup:target) #system,
+    body:has(#imports:target) #system,
+    body:has(#setup-billing:target) #system,
+    body:has(#setup-billing-cycle:target) #system,
+    body:has(#setup-tariff:target) #system,
     body:has(#system-collector:target) #system,
     body:has(#system-live-data:target) #system,
     body:has(#system-data-quality:target) #system,
@@ -7441,24 +7543,24 @@ def write_html(
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
-    body:has(#setup:target) .top-nav a[href="#setup"],
-    body:has(#glance:target) .top-nav a[href="#glance"],
-    body:has(#recommendations:target) .top-nav a[href="#recommendations"],
+    body:has(#glance:target) .top-nav a[href="#home"],
+    body:has(#recommendations:target) .top-nav a[href="#home"],
     body:has(#bills:target) .top-nav a[href="#bills"],
     body:has(#solar:target) .top-nav a[href="#solar"],
     body:has(#ev:target) .top-nav a[href="#ev"],
     body:has(#whatif:target) .top-nav a[href="#whatif"],
-    body:has(#timeline:target) .top-nav a[href="#timeline"],
+    body:has(#timeline:target) .top-nav a[href="#home"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
-    body:has(#imports:target) .top-nav a[href="#imports"],
+    body:has(#imports:target) .top-nav a[href="#system"],
     body:has(#system:target) .top-nav a[href="#system"],
     body:has(#system-collector:target) .top-nav a[href="#system"],
     body:has(#system-live-data:target) .top-nav a[href="#system"],
     body:has(#system-data-quality:target) .top-nav a[href="#system"],
     body:has([id^="system-provider-"]:target) .top-nav a[href="#system"],
-    body:has(#setup-billing:target) .top-nav a[href="#setup"],
-    body:has(#setup-billing-cycle:target) .top-nav a[href="#setup"],
-    body:has(#setup-tariff:target) .top-nav a[href="#setup"],
+    body:has(#setup:target) .top-nav a[href="#system"],
+    body:has(#setup-billing:target) .top-nav a[href="#system"],
+    body:has(#setup-billing-cycle:target) .top-nav a[href="#system"],
+    body:has(#setup-tariff:target) .top-nav a[href="#system"],
     body:has(#energy-score-explanation:target) .top-nav a[href="#home"],
     body:has(#home-goals:target) .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
