@@ -1,5 +1,23 @@
 # Changelog
 
+## INF-002 - Python 3.14 Runtime Compatibility
+
+- Removed the deprecated `cgi` dependency from the local web server upload path
+  and replaced it with Python 3.14-compatible multipart parsing.
+- Added runtime diagnostics for the active Python executable, project venv
+  status, Playwright/Chromium, pypdf, pdftotext, project root, database path,
+  and web bind address.
+- Exposed runtime diagnostics under System Advanced Diagnostics and logged the
+  runtime check at web startup.
+- Added a LaunchAgent generator that writes collector, web, and OCPP plists
+  using the project virtual environment Python instead of `/usr/bin/python3`.
+- Improved missing Playwright setup wording for automatic SolarEdge sign-in.
+- Documented Python 3.14 support, venv setup, required Python packages,
+  Playwright Chromium install, LaunchAgent reload, and active Python
+  verification.
+- Added regression coverage for multipart parsing, form field handling,
+  runtime diagnostics, and LaunchAgent interpreter selection.
+
 ## BILL-002 - Bill Reconciliation Engine
 
 - Added a reusable Bill Reconciliation Engine that compares imported Synergy

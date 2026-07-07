@@ -963,7 +963,9 @@ def refresh() -> None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
-        raise RefreshError("Playwright is not installed for this Python environment") from exc
+        raise RefreshError(
+            "Automatic SolarEdge sign-in is unavailable because Playwright is not installed in the active Python environment."
+        ) from exc
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)

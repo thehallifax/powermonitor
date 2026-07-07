@@ -3,6 +3,7 @@ import html
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -61,6 +62,7 @@ from engine.provider_manager import ProviderManager, build_provider_management
 from engine.provider_entity_mapping import load_provider_mapping_record
 from engine.provider_runtime import ProviderRuntime
 from engine.recommendation_adapter import RecommendationPresentation
+from engine.runtime_diagnostics import runtime_diagnostics
 from engine.solar_advisor import SolarAdvisor
 from engine.setup_engine import SetupEngine
 from engine.tariff_catalog import (
@@ -338,6 +340,34 @@ def local_today() -> date:
     return datetime.now(LOCAL_TIMEZONE).date()
 
 
+def runtime_check_data() -> dict:
+    try:
+        host, port = web_bind_for_runtime_check()
+    except Exception:
+        host, port = None, None
+    return runtime_diagnostics(
+        project_root=PROJECT_ROOT,
+        database_path=DB_PATH,
+        web_host=host,
+        web_port=port,
+    )
+
+
+def web_bind_for_runtime_check() -> tuple[str, int]:
+    config = {}
+    if SETTINGS_PATH.exists():
+        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            web_server = raw.get("web_server") if isinstance(raw.get("web_server"), dict) else {}
+            config = {
+                "host": web_server.get("host") or raw.get("web_host"),
+                "port": web_server.get("port") or raw.get("web_port"),
+            }
+    host = os.environ.get("POWMONITOR_HOST") or config.get("host") or "0.0.0.0"
+    raw_port = os.environ.get("POWMONITOR_PORT") or config.get("port") or 8765
+    return str(host), int(raw_port)
+
+
 def latest_bill_period_bounds(bill: dict) -> tuple[Optional[date], Optional[date]]:
     starts = []
     ends = []
@@ -465,6 +495,7 @@ def dashboard_data(
             actual_bill_comparison = None
             bill_reconciliation_summary = {"latest": None, "history": [], "average_absolute_variance": None}
     generated_at = datetime.now().astimezone()
+    runtime_check = runtime_check_data()
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
         settings=settings,
@@ -688,6 +719,7 @@ def dashboard_data(
         "providers": provider_management.as_dict(),
         "provider_runtime": provider_runtime.as_dict(),
         "runtime": provider_runtime.as_dict(),
+        "runtime_check": runtime_check,
         "household_state": household_state.as_dict(),
         "household_behaviour": household_behaviour.as_dict(),
         "household_anomalies": household_anomalies,
@@ -6019,6 +6051,41 @@ def live_data_help_html(health: dict, summary: Summary) -> str:
     """
 
 
+def runtime_check_html(runtime_check: Optional[dict]) -> str:
+    if not runtime_check:
+        return """
+        <div class="system-card">
+          <div class="chart-heading"><h3>Runtime diagnostics</h3><span>Unavailable</span></div>
+          <p class="notice">Runtime environment details are not available for this report.</p>
+        </div>
+        """
+    rows = [
+        ("Python version", runtime_check.get("python_version")),
+        ("Python executable", runtime_check.get("executable")),
+        ("Project .venv", "Yes" if runtime_check.get("running_in_project_venv") else "No"),
+        ("Playwright", "Available" if runtime_check.get("playwright_available") else "Missing"),
+        ("Playwright Chromium", "Available" if runtime_check.get("playwright_chromium_available") else "Missing"),
+        ("pypdf", "Available" if runtime_check.get("pypdf_available") else "Missing"),
+        ("pdftotext", "Available" if runtime_check.get("pdftotext_available") else "Not found"),
+        ("Project root", runtime_check.get("project_root")),
+        ("Database", runtime_check.get("database_path")),
+        ("Web bind", f"{runtime_check.get('web_host') or 'unknown'}:{runtime_check.get('web_port') or 'unknown'}"),
+    ]
+    row_html = "".join(
+        f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'n/a'))}</strong></div>"
+        for label, value in rows
+    )
+    warning_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in runtime_check.get("warnings") or [])
+    warnings = f"<ul>{warning_rows}</ul>" if warning_rows else "<p>No runtime setup warnings detected.</p>"
+    return f"""
+    <div class="system-card">
+      <div class="chart-heading"><h3>Runtime diagnostics</h3><span>Python environment</span></div>
+      <div class="config-grid">{row_html}</div>
+      <details class="evidence-trail"><summary>Runtime setup warnings</summary>{warnings}</details>
+    </div>
+    """
+
+
 def system_page_html(
     health: dict,
     settings: Settings,
@@ -6044,6 +6111,7 @@ def system_page_html(
     notification_preferences: Optional[dict] = None,
     notification_history: Optional[dict] = None,
     provider_flash: Optional[dict] = None,
+    runtime_check: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -6075,6 +6143,7 @@ def system_page_html(
         {collector_body}
       </div>
       {provider_observations_diagnostics_html(provider_observations)}
+      {runtime_check_html(runtime_check)}
       {provider_runtime_html(provider_runtime)}
       {provider_registry_html(provider_registry)}
       {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
@@ -6413,6 +6482,7 @@ def write_html(
     glance_only: bool = False,
     overnight_baseload_watts: Optional[float] = None,
     provider_flash: Optional[dict] = None,
+    runtime_check: Optional[dict] = None,
 ) -> str:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
@@ -6429,6 +6499,7 @@ def write_html(
         include_billing_period=selected_period.kind == "current_billing_period",
     )
     billing_summary = billing_summary or period_summary
+    runtime_check = runtime_check or runtime_check_data()
     household_context = report_household_context()
     try:
         html_data_engine = data_engine()
@@ -6767,7 +6838,7 @@ def write_html(
   </section>
   <section id="system" class="page">
     {page_heading_html("Can I trust today's advice?", "Provider status, confidence, household data limits, and privacy-safe diagnostics.")}
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check)}
   </section>
 """
     )
@@ -7526,6 +7597,7 @@ def build_live_html(
         )
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
+    runtime_check = runtime_check_data()
     return write_html(
         today_summary,
         selected_summary,
@@ -7543,6 +7615,7 @@ def build_live_html(
         glance_only=glance_only,
         overnight_baseload_watts=overnight_baseload_watts,
         provider_flash=provider_flash,
+        runtime_check=runtime_check,
     )
 
 

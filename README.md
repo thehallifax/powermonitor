@@ -25,21 +25,39 @@ For the broader product direction, see `docs/VISION.md`.
 
 ## Setup
 
-1. Use Python 3.9 or newer.
-2. Install the optional PDF extractor used for Synergy bill imports:
+1. Use Python 3.9 or newer. PowerMonitor is tested for Python 3.14
+   compatibility.
+2. Create and use the project virtual environment so manual runs and
+   LaunchAgents use the same Python packages:
 
    ```sh
-   python3 -m pip install pypdf
+   python3 -m venv .venv
+   .venv/bin/python -m pip install --upgrade pip
+   ```
+
+3. Install the local runtime packages used by optional integrations:
+
+   ```sh
+   .venv/bin/python -m pip install playwright pypdf
+   .venv/bin/python -m playwright install chromium
    ```
 
    `pdfminer.six` is also supported as a pure-Python fallback. The importer can
    use the system `pdftotext` command when it is already installed, but
    Homebrew/poppler is not required.
-3. Configure SolarEdge with username/email and password through Provider
+4. Verify the active Python path before troubleshooting runtime issues:
+
+   ```sh
+   .venv/bin/python -c 'import sys; print(sys.executable)'
+   ```
+
+   The System page also shows the active Python executable and dependency
+   availability under Advanced Diagnostics.
+5. Configure SolarEdge with username/email and password through Provider
    Management, or use the manual cookie fallback described below.
-4. Keep cookies and credentials private. They are ignored by `.gitignore` and must not be
+6. Keep cookies and credentials private. They are ignored by `.gitignore` and must not be
    printed or committed.
-5. Ensure the SQLite database is at `data/power.sqlite`.
+7. Ensure the SQLite database is at `data/power.sqlite`.
 
 Scripts resolve the project directory from their own location, so they work
 from any current directory.
@@ -169,11 +187,11 @@ advanced fallback.
 
 ### Automated Refresh
 
-Install Playwright for the Python used by LaunchAgent:
+Install Playwright for the same Python used by LaunchAgent:
 
 ```sh
-python3 -m pip install playwright
-python3 -m playwright install chromium
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
 ```
 
 Provide SolarEdge credentials through Provider Management, or via environment
@@ -567,100 +585,43 @@ not dominate the baseload estimate.
 
 ## LaunchAgent Automation
 
-Create `~/Library/LaunchAgents/com.local.powermonitor.plist` and replace both
-occurrences of `/absolute/path/to/PowerMonitor` with this project's absolute
-path:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.local.powermonitor</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>cd /absolute/path/to/PowerMonitor &amp;&amp; /usr/bin/python3 collector/collect_today.py</string>
-  </array>
-
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Minute</key>
-    <integer>10</integer>
-  </dict>
-
-  <key>StandardOutPath</key>
-  <string>/absolute/path/to/PowerMonitor/logs/launchagent.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/absolute/path/to/PowerMonitor/logs/launchagent.err.log</string>
-</dict>
-</plist>
-```
-
-Load or reload it:
+Generate LaunchAgents from the current checkout so scheduled jobs use the
+project Python instead of `/usr/bin/python3`:
 
 ```sh
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.plist
-launchctl kickstart -k gui/$(id -u)/com.local.powermonitor
+.venv/bin/python collector/install_launch_agents.py
 ```
 
-The job runs at 10 minutes past every hour. Because the collector replaces
-readings by timestamp, repeated imports safely refresh today's data.
+The helper writes plists for:
 
-### Web Server LaunchAgent
+- `com.local.powermonitor.collector`
+- `com.local.powermonitor.web`
+- `com.local.powermonitor.ocpp` when the Home Assistant OCPP importer is
+  present
 
-To keep the local-network dashboard available after login, create
-`~/Library/LaunchAgents/com.local.powermonitor.web.plist` and replace
-`/absolute/path/to/PowerMonitor` with this project's absolute path. The server
-binds to `0.0.0.0` by default; keep the optional `POWMONITOR_PORT` value if you
-want to pin the port from LaunchAgent:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.local.powermonitor.web</string>
-
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/absolute/path/to/PowerMonitor/collector/web.py</string>
-  </array>
-
-  <key>WorkingDirectory</key>
-  <string>/absolute/path/to/PowerMonitor</string>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>POWMONITOR_PORT</key>
-    <string>8765</string>
-  </dict>
-
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-
-  <key>StandardOutPath</key>
-  <string>/absolute/path/to/PowerMonitor/logs/web.launchagent.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/absolute/path/to/PowerMonitor/logs/web.launchagent.err.log</string>
-</dict>
-</plist>
-```
-
-Load or reload the web server:
+It prefers `<project>/.venv/bin/python` and prints the exact reload commands.
+Reload manually with:
 
 ```sh
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.collector.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.collector.plist
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist
+```
+
+Restart a loaded job immediately with:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.collector
 launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.web
 ```
+
+Check the interpreter used by a generated plist:
+
+```sh
+plutil -p ~/Library/LaunchAgents/com.local.powermonitor.collector.plist | grep ProgramArguments -A3
+```
+
+The collector safely refreshes existing readings by timestamp. The web server
+binds to `0.0.0.0` by default unless `POWMONITOR_HOST` or `web_server.host`
+explicitly requests localhost-only development mode.

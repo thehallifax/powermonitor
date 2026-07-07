@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import cgi
 import html
 import json
 import logging
@@ -7,6 +6,8 @@ import os
 import sqlite3
 import uuid
 from datetime import date, timedelta
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ import import_synergy_bill
 import report
 from engine.import_framework import detect_importer
 from engine.models import to_api_safe
+from engine.runtime_diagnostics import runtime_diagnostics
 from engine.tariff_catalog import (
     BUCKET_ORDER,
     DEFAULT_PLAN,
@@ -51,6 +53,16 @@ def live_health() -> dict:
     with sqlite3.connect(report.DB_PATH) as conn:
         report.validate_database(conn)
         return report.health_data(conn, report.local_today(), settings)
+
+
+def runtime_check() -> dict:
+    host, port = resolve_web_bind()
+    return runtime_diagnostics(
+        project_root=PROJECT_ROOT,
+        database_path=report.DB_PATH,
+        web_host=host,
+        web_port=port,
+    )
 
 
 def api_json_dumps(payload: dict) -> str:
@@ -272,6 +284,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(self.compare_data(params))
             elif path == "/api/health":
                 self.send_json(live_health())
+            elif path == "/api/runtime-check":
+                self.send_json({"runtime": runtime_check()})
             else:
                 self.send_json({"error": "not found"}, status=404)
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error) as exc:
@@ -441,10 +455,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def read_request_payload(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or 0)
-        raw_body = self.rfile.read(length).decode("utf-8")
-        if not raw_body:
+        raw_bytes = self.rfile.read(length)
+        if not raw_bytes:
             return {}
         content_type = self.headers.get("Content-Type", "")
+        if content_type.lower().startswith("multipart/form-data"):
+            fields, _files = parse_multipart_form(raw_bytes, content_type)
+            return normalize_provider_payload(fields)
+        raw_body = raw_bytes.decode("utf-8")
         if "application/json" in content_type:
             payload = json.loads(raw_body)
             if not isinstance(payload, dict):
@@ -614,22 +632,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(REPORT_PATH.read_bytes())
 
     def read_uploaded_file(self) -> tuple[str, bytes]:
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
-        field = form["import_file"] if "import_file" in form else None
-        if field is None or not getattr(field, "filename", None):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw_body = self.rfile.read(length)
+        fields, files = parse_multipart_form(raw_body, self.headers.get("Content-Type", ""))
+        uploaded = files.get("import_file")
+        if uploaded is None or not uploaded.get("filename"):
             raise ValueError("Choose an Ocular Excel file or Synergy PDF bill before previewing the import.")
-        content = field.file.read()
+        content = uploaded.get("content") or b""
         if not content:
             raise ValueError("That file is empty. Please choose the export or bill again.")
-        return safe_filename(field.filename), content
+        return safe_filename(str(uploaded["filename"])), content
 
     def write_upload(self, filename: str, content: bytes) -> Path:
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -812,9 +824,41 @@ def safe_filename(value: str) -> str:
     return cleaned or "upload"
 
 
+def parse_multipart_form(body: bytes, content_type: str) -> tuple[dict[str, str], dict[str, dict[str, object]]]:
+    if "multipart/form-data" not in content_type.lower():
+        raise ValueError("Expected multipart form data.")
+    headers = (
+        f"Content-Type: {content_type}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "MIME-Version: 1.0\r\n\r\n"
+    ).encode("utf-8")
+    message = BytesParser(policy=policy.default).parsebytes(headers + body)
+    if not message.is_multipart():
+        raise ValueError("Upload form was not multipart.")
+    fields: dict[str, str] = {}
+    files: dict[str, dict[str, object]] = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        filename = part.get_filename()
+        content = part.get_payload(decode=True) or b""
+        if filename is not None:
+            files[str(name)] = {
+                "filename": safe_filename(filename),
+                "content": content,
+                "content_type": part.get_content_type(),
+            }
+        else:
+            charset = part.get_content_charset() or "utf-8"
+            fields[str(name)] = content.decode(charset, errors="replace")
+    return fields, files
+
+
 def main() -> None:
     setup_logging()
     host, port = resolve_web_bind()
+    logging.info("Runtime check: %s", json.dumps(runtime_check(), sort_keys=True))
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     logging.info("PowerMonitor dashboard server started on http://%s:%d", host, port)
     print(f"PowerMonitor dashboard: http://{host}:{port}")
