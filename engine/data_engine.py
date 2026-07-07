@@ -1108,6 +1108,14 @@ class DataEngine:
             for provider_id, capabilities in self.get_measurement_provider_registry(start, end).capabilities().items()
         }
 
+    def get_home_capabilities(self, profile, start: date, end: date):
+        """Return home capability readiness from profile facts and measurements."""
+
+        from .home_capabilities import detect_home_capabilities
+
+        registry = self.get_measurement_provider_registry(start, end)
+        return detect_home_capabilities(profile, registry)
+
     def _reading_rows(self, start: date, end: date) -> list[dict[str, Any]]:
         start_text = start.isoformat()
         end_exclusive = (end + timedelta(days=1)).isoformat()

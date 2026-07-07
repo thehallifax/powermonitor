@@ -95,6 +95,9 @@ LOG_PATH = PROJECT_ROOT / "logs" / "report.log"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 HOME_PROFILE_PATH = DEFAULT_HOME_PROFILE_PATH
 COLLECT_LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
+DEMO_MODE = False
+DEMO_WEATHER_PATH: Optional[Path] = None
+DEMO_RECOMMENDATIONS_PATH: Optional[Path] = None
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 BUCKET_LABELS = {
@@ -113,6 +116,48 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
         report_path=REPORT_PATH,
         health_loader=public_health,
     )
+
+
+def activate_demo_mode(today: Optional[date] = None):
+    """Switch report paths to deterministic fictional demo data."""
+
+    global DB_PATH, REPORT_PATH, SETTINGS_PATH, HOME_PROFILE_PATH, COLLECT_LOG_PATH
+    global DEMO_MODE, DEMO_WEATHER_PATH, DEMO_RECOMMENDATIONS_PATH
+
+    from demo_mode import ensure_demo_environment
+    import collector_health
+
+    env = ensure_demo_environment(PROJECT_ROOT, today=today)
+    DB_PATH = env.db_path
+    REPORT_PATH = env.report_path
+    SETTINGS_PATH = env.settings_path
+    HOME_PROFILE_PATH = env.home_profile_path
+    COLLECT_LOG_PATH = env.collect_log_path
+    collector_health.STATE_PATH = env.collector_health_path
+    collector_health.SETTINGS_PATH = env.settings_path
+    DEMO_WEATHER_PATH = env.weather_path
+    DEMO_RECOMMENDATIONS_PATH = env.recommendations_path
+    DEMO_MODE = True
+    return env
+
+
+def configure_demo_mode(argv: Optional[list[str]] = None) -> bool:
+    from demo_mode import demo_requested
+
+    if not DEMO_MODE and demo_requested(argv):
+        activate_demo_mode()
+    return DEMO_MODE
+
+
+def demo_metadata() -> dict:
+    if not DEMO_MODE:
+        return {}
+    payload = {"enabled": True}
+    if DEMO_WEATHER_PATH and DEMO_WEATHER_PATH.exists():
+        payload["weather"] = json.loads(DEMO_WEATHER_PATH.read_text(encoding="utf-8"))
+    if DEMO_RECOMMENDATIONS_PATH and DEMO_RECOMMENDATIONS_PATH.exists():
+        payload["seed_recommendations"] = json.loads(DEMO_RECOMMENDATIONS_PATH.read_text(encoding="utf-8"))
+    return payload
 
 
 def financial_engine(household_context: Optional[HouseholdContext] = None) -> FinancialEngine:
@@ -829,6 +874,7 @@ def dashboard_data(
         "hidden_recommendations": [],
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
+        **({"demo": demo_metadata()} if DEMO_MODE else {}),
     }
 
 
@@ -894,6 +940,7 @@ def setup_logging() -> None:
 
 
 def load_settings() -> Settings:
+    configure_demo_mode()
     raw = DEFAULT_SETTINGS
     if SETTINGS_PATH.exists():
         with SETTINGS_PATH.open("r", encoding="utf-8") as settings_file:
@@ -6566,7 +6613,7 @@ def write_html(
     recommendations: list[Decision],
     selected_period: Optional[Period] = None,
     comparison: Optional[dict] = None,
-    output_path: Optional[Path] = REPORT_PATH,
+    output_path: Optional[Path] = None,
     timeline: Optional[DecisionTimeline] = None,
     recommendation_lifecycle_counts: Optional[dict[str, int]] = None,
     hidden: Optional[list[Decision]] = None,
@@ -6577,7 +6624,8 @@ def write_html(
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output_path = output_path or REPORT_PATH
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
         "current_billing_period", "Current billing period", period_summary.start, period_summary.end
     )
@@ -7672,6 +7720,7 @@ def build_live_html(
     glance_only: bool = False,
     provider_flash: Optional[dict] = None,
 ) -> str:
+    configure_demo_mode()
     settings = load_settings()
     current_day = local_today()
     selected = resolve_period(period_kind, settings, current_day, start, end)
@@ -7731,6 +7780,7 @@ def build_live_html(
 
 
 def main() -> None:
+    configure_demo_mode()
     setup_logging()
     settings = load_settings()
     current_day = local_today()

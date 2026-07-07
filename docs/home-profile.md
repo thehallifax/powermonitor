@@ -63,3 +63,26 @@ The Home Profile is not a provider connector and does not perform calculations.
 It should not contain credentials, cookies, tokens, account numbers, NMI values,
 or raw measurements. It is a local, user-declared profile used as context for
 future setup and intelligence work.
+
+## Capability Detection
+
+PowerMonitor derives backend home capabilities from two inputs:
+
+- Declared facts in the Home Profile.
+- Available measurement types advertised by the `MeasurementProviderRegistry`.
+
+Capability detection is backend-only. It does not change dashboard behaviour by
+itself and does not configure providers. Each detected capability reports:
+
+- Whether it is relevant to the home (`enabled`).
+- Whether PowerMonitor can support it right now (`available`).
+- A plain reason when it is unavailable.
+- Supporting Home Profile fields or provider measurement sources.
+- Confidence and measurement quality where relevant.
+
+For example, a home with solar declared but no solar generation measurements has
+solar generation analysis enabled but unavailable. A battery declared in the
+Home Profile remains unavailable until battery charge and discharge
+measurements are advertised by a provider. A home with only retailer or tariff
+details can support billing context, but deeper Home Intelligence waits for at
+least one energy capability.

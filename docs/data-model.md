@@ -82,6 +82,21 @@ cookies, tokens, account numbers, NMI values, or raw measurements.
 
 See `docs/home-profile.md` for persistence details and compatibility rules.
 
+## Home Capabilities
+
+Home capability detection combines the provider-independent Home Profile with
+measurement capabilities from `MeasurementProviderRegistry`. It reports whether
+PowerMonitor can currently support backend features such as billing analysis,
+solar generation analysis, household consumption analysis, grid import/export
+analysis, EV charging analysis, battery analysis, tariff optimisation, energy
+timeline readiness, and future Home Intelligence readiness.
+
+Each detected capability distinguishes `enabled` from `available`: enabled
+means the feature is relevant to the declared household, while available means
+PowerMonitor has enough declared facts and/or provider measurements to support
+it now. Capability records also carry unavailable reasons, supporting
+profile/provider sources, confidence, and data quality.
+
 ## Confidence Rules
 
 Confidence is attached to recommendations and scenario results.

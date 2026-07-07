@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import uuid
 from datetime import date, timedelta
 from email import policy
@@ -856,6 +857,9 @@ def parse_multipart_form(body: bytes, content_type: str) -> tuple[dict[str, str]
 
 
 def main() -> None:
+    report.configure_demo_mode(sys.argv)
+    global SETTINGS_PATH
+    SETTINGS_PATH = report.SETTINGS_PATH
     setup_logging()
     host, port = resolve_web_bind()
     logging.info("Runtime check: %s", json.dumps(runtime_check(), sort_keys=True))

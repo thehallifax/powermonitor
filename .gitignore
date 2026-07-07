@@ -10,6 +10,7 @@ venv/
 # Runtime data
 data/power.sqlite
 data/collector_health.json
+data/demo/
 data/import_uploads/
 
 # Logs
@@ -21,6 +22,7 @@ reports/
 
 # Secrets
 config/secrets.json
+config/demo/
 config/home_profile.json
 config/provider_mappings.json
 config/provider_state.json

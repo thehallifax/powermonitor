@@ -60,6 +60,33 @@ python3 collector/setup_home_profile.py
 The wizard stores declared home facts only. It does not configure live
 providers or change dashboard behaviour.
 
+## Demo Mode
+
+PowerMonitor can run with deterministic fictional demo data when no live
+providers are configured. Demo mode creates a realistic WA household with a
+Home Profile, representative Synergy bills, 15-minute energy readings, EV
+charging sessions, recommendations, timeline events, collector health, and
+fictional Perth weather.
+
+Generate the demo dashboard:
+
+```sh
+python3 collector/report.py --demo
+open reports/demo/index.html
+```
+
+Run the local dashboard server with demo data:
+
+```sh
+python3 collector/web.py --demo
+open http://localhost:8765
+```
+
+You can also enable it with `POWMONITOR_DEMO=1`. Demo files are kept separate
+from production data under `data/demo/`, `config/demo/`, `logs/demo/`, and
+`reports/demo/`. The seeded household is fictional and should not be replaced
+with real customer, account, NMI, cookie, token, or credential data.
+
 ## Setup
 
 1. Use Python 3.9 or newer. PowerMonitor is tested for Python 3.14
