@@ -19,6 +19,7 @@ from .efficiency_advisor import EfficiencyAdvisor
 from .fronius_provider import FroniusApiError, FroniusMeasurementProvider
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
+from .goodwe_provider import GoodWeApiError, GoodWeMeasurementProvider
 from .goals_engine import GoalsEngine
 from .provider_framework import (
     Provider,
@@ -111,6 +112,8 @@ __all__ = [
     "FroniusApiError",
     "FroniusMeasurementProvider",
     "Freshness",
+    "GoodWeApiError",
+    "GoodWeMeasurementProvider",
     "Goal",
     "GoalProgress",
     "GoalStatus",
