@@ -16,6 +16,7 @@ from .decision_engine import (
 )
 from .decision_pipeline import DecisionPipeline, DecisionPipelineOutput
 from .efficiency_advisor import EfficiencyAdvisor
+from .enphase_provider import EnphaseApiError, EnphaseMeasurementProvider
 from .fronius_provider import FroniusApiError, FroniusMeasurementProvider
 from .data_engine import BillPeriod, DataCompleteness, DataEngine, HouseholdSnapshot
 from .financial_engine import FinancialEngine
@@ -104,6 +105,8 @@ __all__ = [
     "DecisionPipelineOutput",
     "EfficiencyAdvisor",
     "EngineStatus",
+    "EnphaseApiError",
+    "EnphaseMeasurementProvider",
     "Evidence",
     "EvidenceItem",
     "EvidenceTrail",
