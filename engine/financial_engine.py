@@ -80,6 +80,12 @@ class FinancialEngine:
     def calculate_cost_difference(self, current_cost: float, comparison_cost: float) -> float:
         return float(current_cost) - float(comparison_cost)
 
+    def calculate_bill_variance(self, actual_cost: float, estimated_cost: float) -> float:
+        return float(actual_cost) - float(estimated_cost)
+
+    def calculate_percentage_variance(self, dollar_variance: float, actual_cost: float) -> float:
+        return float(dollar_variance) / float(actual_cost) * 100 if float(actual_cost) else 0.0
+
     def weighted_average_import_rate(self, summary: Any) -> float:
         import_cost = self._number(summary, "import_cost")
         grid_import_kwh = self._number(summary, "grid_import_kwh")

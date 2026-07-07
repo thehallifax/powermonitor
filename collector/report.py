@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from engine.briefing_engine import BriefingEngine
 from engine.advisor_presenter import attach_decision_to_advisors, explain_household_decisions
+from engine.bill_reconciliation_engine import BillReconciliationEngine
 from engine.charging_advisor import ChargingAdvisor
 from engine.context_engine import ContextEngine
 from engine.cost_advisor import CostAdvisor
@@ -337,6 +338,48 @@ def local_today() -> date:
     return datetime.now(LOCAL_TIMEZONE).date()
 
 
+def latest_bill_period_bounds(bill: dict) -> tuple[Optional[date], Optional[date]]:
+    starts = []
+    ends = []
+    for period in bill.get("periods") or []:
+        try:
+            if period.get("start_date"):
+                starts.append(date.fromisoformat(str(period["start_date"])))
+            if period.get("end_date"):
+                ends.append(date.fromisoformat(str(period["end_date"])))
+        except ValueError:
+            continue
+    return (min(starts) if starts else None, max(ends) if ends else None)
+
+
+def reconcile_latest_synergy_bill(
+    conn: sqlite3.Connection,
+    engine: DataEngine,
+    settings: Settings,
+    household_context: HouseholdContext,
+) -> Optional[dict]:
+    try:
+        bill = engine.get_latest_synergy_bill()
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        return None
+    if not bill:
+        return None
+    period_start, period_end = latest_bill_period_bounds(bill)
+    if period_start is None or period_end is None:
+        return None
+    try:
+        estimate = load_summary(conn, period_start, period_end, settings)
+        reconciliation = BillReconciliationEngine(financial_engine(household_context)).reconcile(
+            bill,
+            estimate,
+            settings,
+        )
+        engine.persist_bill_reconciliation(reconciliation)
+        return engine.get_latest_bill_reconciliation()
+    except (RuntimeError, sqlite3.Error, ValueError):
+        return None
+
+
 def dashboard_data(
     today: Optional[date] = None,
     period_kind: str = "current_billing_period",
@@ -384,6 +427,8 @@ def dashboard_data(
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
         provider_observations = context_engine.get_provider_observation_summary()
         promotion_summary = context_engine.promote_provider_observations()
+        actual_bill_comparison = reconcile_latest_synergy_bill(conn, context_engine, settings, household_context)
+        bill_reconciliation_summary = context_engine.get_bill_reconciliation_summary()
     scenarios = scenario_analysis(period_summary, settings)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
@@ -412,10 +457,13 @@ def dashboard_data(
         ),
         projected=True,
     )
-    try:
-        actual_bill_comparison = data_engine().compare_projected_to_latest_synergy_bill(glance_projected)
-    except (FileNotFoundError, RuntimeError, sqlite3.Error):
-        actual_bill_comparison = None
+    if actual_bill_comparison is None:
+        try:
+            actual_bill_comparison = data_engine().compare_projected_to_latest_synergy_bill(glance_projected)
+            bill_reconciliation_summary = data_engine().get_bill_reconciliation_summary()
+        except (FileNotFoundError, RuntimeError, sqlite3.Error):
+            actual_bill_comparison = None
+            bill_reconciliation_summary = {"latest": None, "history": [], "average_absolute_variance": None}
     generated_at = datetime.now().astimezone()
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
@@ -677,6 +725,8 @@ def dashboard_data(
         "plan_comparison": plan,
         "bill_change_explanation": bill_change,
         "actual_bill_comparison": actual_bill_comparison,
+        "bill_reconciliation": actual_bill_comparison,
+        "bill_reconciliation_summary": bill_reconciliation_summary,
         "latest_synergy_bill": actual_bill_comparison.get("latest_bill") if actual_bill_comparison else None,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
@@ -4352,22 +4402,18 @@ def actual_synergy_bill_html(comparison: Optional[dict], settings: Settings) -> 
     if not comparison:
         return f"""
         <section class="report-section compact-section">
-          <div class="section-title"><div><span class="eyebrow">Actual bill</span><h2>Latest Synergy bill</h2></div><p>Retailer reconciliation</p></div>
+          <div class="section-title"><div><span class="eyebrow">Bill reconciliation</span><h2>How close was PowerMonitor?</h2></div><p>Retailer reconciliation</p></div>
           <p class="notice">No Synergy PDF bill has been imported yet. Upload one on the Imports page to compare PowerMonitor's projection with the actual retailer bill.</p>
         </section>
         """
-    bill = comparison["latest_bill"]
-    difference = comparison.get("difference")
+    bill = comparison.get("latest_bill") or {}
+    actual_total = comparison.get("actual_bill_total", comparison.get("actual_bill"))
+    estimated_total = comparison.get("estimated_bill_total", comparison.get("projected_bill"))
+    difference = comparison.get("dollar_variance", comparison.get("difference"))
     difference_text = signed_money(float(difference)) if difference is not None else "Not available"
-    status_note = (
-        "PowerMonitor projected more than the actual bill."
-        if comparison.get("status") == "projection_higher" else
-        "PowerMonitor projected less than the actual bill."
-        if comparison.get("status") == "projection_lower" else
-        "Projection and actual bill are closely aligned."
-        if comparison.get("status") == "matched" else
-        "Projection comparison is unavailable."
-    )
+    category = str(comparison.get("variance_category") or comparison.get("status") or "comparison unavailable").replace("_", " ")
+    confidence = str(comparison.get("confidence") or bill.get("confidence") or "low").title()
+    explanation = str(comparison.get("explanation") or "PowerMonitor compared the imported bill with its estimate for the same period.")
     periods = bill.get("periods") or []
     period_rows = "".join(
         f"""
@@ -4380,22 +4426,50 @@ def actual_synergy_bill_html(comparison: Optional[dict], settings: Settings) -> 
         for period in periods
     ) or '<p class="notice">No plan period was detected on the imported bill.</p>'
     bucket_rows = bill_bucket_rows_html(bill, settings)
-    warnings = bill.get("warnings") or []
-    warning_html = "".join(f"<li>{html.escape(str(warning))}</li>" for warning in warnings) or "<li>No extraction warnings.</li>"
+    components = comparison.get("components") or []
+    component_rows = "".join(
+        f"""
+        <div class="bill-change-row {'bad' if float(component.get('variance') or 0.0) > 0 else 'good' if float(component.get('variance') or 0.0) < 0 else 'neutral'}">
+          <div><span>{html.escape(str(component.get('category') or '').replace('_', ' ').title())}</span><strong>{html.escape(str(component.get('label') or 'Bill component'))}</strong><p>{html.escape(str(component.get('explanation') or ''))}</p></div>
+          <strong>{signed_money(float(component.get('variance') or 0.0))}</strong>
+        </div>
+        """
+        for component in components
+    ) or '<p class="notice">No detailed variance breakdown is available yet.</p>'
+    data_gaps = comparison.get("data_gaps") or []
+    tariff_mismatches = comparison.get("tariff_mismatches") or []
+    warnings = list(bill.get("warnings") or []) + list(data_gaps)
+    warning_html = "".join(f"<li>{html.escape(str(warning))}</li>" for warning in warnings) or "<li>No data gaps affecting this comparison were found.</li>"
+    mismatch_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in tariff_mismatches)
+    tariff_action = (
+        f"""
+        <div class="notice">
+          <strong>Review tariff settings.</strong>
+          <p>The retailer bill contains rates that differ from the configured tariff. Check the Billing and Tariff setup section so future estimates use the right plan.</p>
+          <ul>{mismatch_html}</ul>
+        </div>
+        """
+        if tariff_mismatches else ""
+    )
     return f"""
     <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Actual bill</span><h2>Latest Synergy bill</h2></div><p>{html.escape(str(bill.get("issue_date") or "Imported bill"))}</p></div>
+      <div class="section-title"><div><span class="eyebrow">Bill reconciliation</span><h2>How close was PowerMonitor?</h2></div><p>{html.escape(confidence)} confidence</p></div>
+      <p class="scenario-note">{html.escape(explanation)}</p>
       <div class="metrics">
-        {metric("Invoice", str(bill.get("invoice_number") or "n/a"), f"Account {str(bill.get('account_number') or 'masked')}", "primary")}
-        {metric("Actual bill", money(float(comparison.get("actual_bill") or 0.0)), "Total bill amount", "cost")}
-        {metric("Projected bill", money(float(comparison.get("projected_bill") or 0.0)), "PowerMonitor estimate", "supply")}
-        {metric("Difference", difference_text, status_note, "good" if difference is not None and float(difference) >= 0 else "bad")}
+        {metric("Invoice", str(comparison.get("invoice_number") or bill.get("invoice_number") or "n/a"), f"Account {str(bill.get('account_number') or 'masked')}", "primary")}
+        {metric("Actual bill", money(float(actual_total or 0.0)), "Synergy bill total", "cost")}
+        {metric("PowerMonitor estimate", money(float(estimated_total or 0.0)), "Same billing period", "supply")}
+        {metric("Difference", difference_text, f"{category.title()} accuracy", "bad" if difference is not None and float(difference) > 0 else "good" if difference is not None and float(difference) < 0 else "neutral")}
+      </div>
+      <div class="bill-change-grid">
+        <div class="bill-change-card main"><h3>What explains the gap?</h3>{component_rows}</div>
+        <div class="bill-change-card"><h3>Data gaps affecting accuracy</h3><ul class="bill-change-list">{warning_html}</ul>{tariff_action}</div>
       </div>
       <div class="system-grid">
         <div class="system-card"><div class="chart-heading"><h3>Billing periods</h3><span>Plan changes supported</span></div><div class="completeness-grid">{period_rows}</div></div>
         <div class="system-card"><div class="chart-heading"><h3>Tariff rates detected</h3><span>Bill line items</span></div><div class="completeness-grid">{bucket_rows}</div></div>
       </div>
-      <details class="evidence-trail"><summary>Extraction notes</summary><ul>{warning_html}</ul></details>
+      <details class="evidence-trail"><summary>Advanced reconciliation details</summary><pre>{html.escape(json.dumps({key: comparison.get(key) for key in ('coverage', 'variance_category', 'confidence')}, indent=2, sort_keys=True))}</pre></details>
     </section>
     """
 

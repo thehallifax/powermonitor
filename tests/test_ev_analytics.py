@@ -127,12 +127,14 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertEqual(summary.ev_session_analytics["ignored_incomplete_sessions"], 1)
 
     def test_fallback_and_actual_labels_are_not_shown_together_for_today_zero_session(self):
+        today = report.local_today()
+        day_text = today.isoformat()
         with sqlite3.connect(":memory:") as conn:
-            create_readings(conn, "2026-07-05T23:30:00", grid_to_home_w=5000.0)
+            create_readings(conn, f"{day_text}T23:30:00", grid_to_home_w=5000.0)
             create_ev_sessions(conn)
-            insert_ev_session(conn, "today-zero", "2026-07-05T10:00:00", "2026-07-05T10:00:00", 0.0)
+            insert_ev_session(conn, "today-zero", f"{day_text}T10:00:00", f"{day_text}T10:00:00", 0.0)
             report.data_engine(conn).validate_database()
-            summary = report.load_summary(conn, date(2026, 7, 5), date(2026, 7, 5), Settings())
+            summary = report.load_summary(conn, today, today, Settings())
 
         html = report.ev_page_html(summary, Settings())
 

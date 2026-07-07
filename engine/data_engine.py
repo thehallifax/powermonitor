@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
 from .anomaly_engine import AnomalyEngine, HouseholdAnomaly
 from .behaviour_engine import BehaviourEngine, HouseholdBehaviour
+from .bill_reconciliation_engine import BillReconciliation
 from .decision_engine import DecisionEngine
 from .models import (
     Account,
@@ -401,6 +402,7 @@ class DataEngine:
         DataEngine._ensure_state_change_table(conn)
         DataEngine._ensure_notification_tables(conn)
         DataEngine._ensure_synergy_bill_tables(conn)
+        DataEngine._ensure_bill_reconciliation_table(conn)
         DataEngine._ensure_household_tables(conn)
         DataEngine._ensure_household_scoping(conn)
         conn.commit()
@@ -648,6 +650,7 @@ class DataEngine:
             "synergy_bills",
             "synergy_bill_periods",
             "synergy_bill_line_items",
+            "bill_reconciliations",
         )
         for table in scoped_tables:
             if DataEngine._table_exists(conn, table):
@@ -777,6 +780,48 @@ class DataEngine:
             """
             CREATE INDEX IF NOT EXISTS idx_synergy_bill_line_items_bill
             ON synergy_bill_line_items(household_id, bill_id)
+            """
+        )
+
+    @staticmethod
+    def _ensure_bill_reconciliation_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bill_reconciliations (
+                reconciliation_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                bill_id TEXT NOT NULL,
+                retailer TEXT NOT NULL,
+                invoice_number TEXT NOT NULL,
+                period_start TEXT,
+                period_end TEXT,
+                actual_bill_total REAL,
+                estimated_bill_total REAL,
+                dollar_variance REAL,
+                percentage_variance REAL,
+                variance_category TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                components_json TEXT NOT NULL,
+                data_gaps_json TEXT NOT NULL,
+                tariff_mismatches_json TEXT NOT NULL,
+                coverage_json TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_bill_reconciliations_household_bill
+            ON bill_reconciliations(household_id, bill_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bill_reconciliations_household_updated
+            ON bill_reconciliations(household_id, updated_at DESC)
             """
         )
 
@@ -1584,6 +1629,7 @@ class DataEngine:
         def insert(conn):
             self.validate_connection(conn)
             DataEngine._ensure_synergy_bill_tables(conn)
+            DataEngine._ensure_bill_reconciliation_table(conn)
             existing = conn.execute(
                 """
                 SELECT bill_id
@@ -1823,6 +1869,9 @@ class DataEngine:
         return self._with_connection(query)
 
     def compare_projected_to_latest_synergy_bill(self, projected_bill: Optional[float]) -> Optional[dict[str, Any]]:
+        latest_reconciliation = self.get_latest_bill_reconciliation()
+        if latest_reconciliation:
+            return latest_reconciliation
         bill = self.get_latest_synergy_bill()
         if not bill:
             return None
@@ -1843,6 +1892,220 @@ class DataEngine:
                 "comparison_unavailable"
             ),
         }
+
+    def persist_bill_reconciliation(self, reconciliation: BillReconciliation) -> dict[str, Any]:
+        household_id = self._active_household_id()
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        data = reconciliation.as_dict()
+        bill_id = data.get("bill_id")
+        if not bill_id:
+            raise ValueError("Bill reconciliation requires a bill_id")
+        reconciliation_id = hashlib.sha256(f"{household_id}:{bill_id}:reconciliation".encode("utf-8")).hexdigest()
+        summary = self._redact_bill_reconciliation_dict(data)
+
+        def upsert(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_bill_reconciliation_table(conn)
+            conn.execute(
+                """
+                INSERT INTO bill_reconciliations (
+                    reconciliation_id,
+                    household_id,
+                    bill_id,
+                    retailer,
+                    invoice_number,
+                    period_start,
+                    period_end,
+                    actual_bill_total,
+                    estimated_bill_total,
+                    dollar_variance,
+                    percentage_variance,
+                    variance_category,
+                    confidence,
+                    explanation,
+                    components_json,
+                    data_gaps_json,
+                    tariff_mismatches_json,
+                    coverage_json,
+                    summary_json,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(household_id, bill_id) DO UPDATE SET
+                    retailer = excluded.retailer,
+                    invoice_number = excluded.invoice_number,
+                    period_start = excluded.period_start,
+                    period_end = excluded.period_end,
+                    actual_bill_total = excluded.actual_bill_total,
+                    estimated_bill_total = excluded.estimated_bill_total,
+                    dollar_variance = excluded.dollar_variance,
+                    percentage_variance = excluded.percentage_variance,
+                    variance_category = excluded.variance_category,
+                    confidence = excluded.confidence,
+                    explanation = excluded.explanation,
+                    components_json = excluded.components_json,
+                    data_gaps_json = excluded.data_gaps_json,
+                    tariff_mismatches_json = excluded.tariff_mismatches_json,
+                    coverage_json = excluded.coverage_json,
+                    summary_json = excluded.summary_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    reconciliation_id,
+                    household_id,
+                    bill_id,
+                    data.get("retailer") or "Synergy",
+                    data.get("invoice_number") or "",
+                    data.get("period_start"),
+                    data.get("period_end"),
+                    data.get("actual_bill_total"),
+                    data.get("estimated_bill_total"),
+                    data.get("dollar_variance"),
+                    data.get("percentage_variance"),
+                    data.get("variance_category") or "unreliable",
+                    data.get("confidence") or "low",
+                    data.get("explanation") or "",
+                    json.dumps(data.get("components") or [], sort_keys=True),
+                    json.dumps(data.get("data_gaps") or [], sort_keys=True),
+                    json.dumps(data.get("tariff_mismatches") or [], sort_keys=True),
+                    json.dumps(data.get("coverage") or {}, sort_keys=True),
+                    json.dumps(summary, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return {"status": "saved", "reconciliation_id": reconciliation_id, "bill_id": bill_id}
+
+        return self._with_connection(upsert)
+
+    @staticmethod
+    def _redact_bill_reconciliation_dict(reconciliation: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "bill_id",
+            "invoice_number",
+            "retailer",
+            "period_start",
+            "period_end",
+            "actual_bill_total",
+            "estimated_bill_total",
+            "dollar_variance",
+            "percentage_variance",
+            "variance_category",
+            "confidence",
+            "explanation",
+            "components",
+            "data_gaps",
+            "tariff_mismatches",
+            "coverage",
+        }
+        return {key: reconciliation.get(key) for key in allowed}
+
+    def get_latest_bill_reconciliation(self) -> Optional[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_bill_reconciliation_table(conn)
+            row = conn.execute(
+                """
+                SELECT
+                    reconciliation_id,
+                    bill_id,
+                    retailer,
+                    invoice_number,
+                    period_start,
+                    period_end,
+                    actual_bill_total,
+                    estimated_bill_total,
+                    dollar_variance,
+                    percentage_variance,
+                    variance_category,
+                    confidence,
+                    explanation,
+                    components_json,
+                    data_gaps_json,
+                    tariff_mismatches_json,
+                    coverage_json,
+                    updated_at
+                FROM bill_reconciliations
+                WHERE household_id = ?
+                ORDER BY COALESCE(period_end, updated_at) DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (household_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            bill = self.get_latest_synergy_bill()
+            result = {
+                "reconciliation_id": row[0],
+                "bill_id": row[1],
+                "retailer": row[2],
+                "invoice_number": row[3],
+                "period_start": row[4],
+                "period_end": row[5],
+                "actual_bill_total": row[6],
+                "estimated_bill_total": row[7],
+                "dollar_variance": row[8],
+                "percentage_variance": row[9],
+                "variance_category": row[10],
+                "confidence": row[11],
+                "explanation": row[12],
+                "components": json.loads(row[13] or "[]"),
+                "data_gaps": json.loads(row[14] or "[]"),
+                "tariff_mismatches": json.loads(row[15] or "[]"),
+                "coverage": json.loads(row[16] or "{}"),
+                "updated_at": row[17],
+            }
+            result["latest_bill"] = bill if bill and bill.get("bill_id") == row[1] else None
+            result["projected_bill"] = row[7]
+            result["actual_bill"] = row[6]
+            result["difference"] = row[8]
+            result["status"] = row[10]
+            return result
+
+        return self._with_connection(query)
+
+    def get_bill_reconciliation_summary(self, limit: int = 6) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_bill_reconciliation_table(conn)
+            rows = conn.execute(
+                """
+                SELECT invoice_number, period_start, period_end, actual_bill_total, estimated_bill_total,
+                       dollar_variance, variance_category, confidence, updated_at
+                FROM bill_reconciliations
+                WHERE household_id = ?
+                ORDER BY COALESCE(period_end, updated_at) DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (household_id, limit),
+            ).fetchall()
+            history = [
+                {
+                    "invoice_number": row[0],
+                    "period_start": row[1],
+                    "period_end": row[2],
+                    "actual_bill_total": row[3],
+                    "estimated_bill_total": row[4],
+                    "dollar_variance": row[5],
+                    "variance_category": row[6],
+                    "confidence": row[7],
+                    "updated_at": row[8],
+                }
+                for row in rows
+            ]
+            variances = [abs(float(item["dollar_variance"])) for item in history if item.get("dollar_variance") is not None]
+            return {
+                "latest": self.get_latest_bill_reconciliation(),
+                "history": history,
+                "average_absolute_variance": sum(variances) / len(variances) if variances else None,
+            }
+
+        return self._with_connection(query)
 
     def persist_provider_observations(
         self,

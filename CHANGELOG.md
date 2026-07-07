@@ -1,5 +1,19 @@
 # Changelog
 
+## BILL-002 - Bill Reconciliation Engine
+
+- Added a reusable Bill Reconciliation Engine that compares imported Synergy
+  bills with PowerMonitor estimates for the same billing period.
+- Added variance categories, confidence, explanation text, component
+  breakdowns, data-gap notes, and tariff mismatch detection.
+- Persisted reconciliation results per household and bill so re-running reports
+  updates historical accuracy instead of duplicating records.
+- Updated the Bills & Tariffs page and summary payload to show how close
+  PowerMonitor was to the real bill in homeowner language.
+- Added regression coverage for variance thresholds, missing-data confidence,
+  multiple plan periods, tariff mismatches, persistence updates, and redacted
+  summary output.
+
 ## Bugfix - Synergy Fallback Parser and Ocular Same-Day EV Handling
 
 - Improved Synergy PDF fallback parsing when pure-Python extraction loses table
