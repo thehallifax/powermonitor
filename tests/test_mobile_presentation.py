@@ -583,11 +583,13 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertNotIn("What changed, and why it mattered", html)
         self.assertNotIn("Today's Progress", html)
         self.assertNotIn("Show 7 more events", html)
+        self.assertNotIn("previous period length", html)
         self.assertNotIn('id="home-goals"', html)
         self.assertEqual(html.count("Wait for cheaper charging"), 1)
         self.assertIn("View decisions", html)
         self.assertIn("View full history", html)
         self.assertIn("View bills", html)
+        self.assertIn("Projection assumes the rest of this bill follows your recent usage pattern.", html)
         self.assertLessEqual(html.count('class="home-timeline-row"'), 3)
 
     def test_home_timeline_caps_rows_at_three(self):
@@ -654,6 +656,38 @@ class MobilePresentationTests(unittest.TestCase):
         solar_index = html.index("Solar started")
         self.assertLess(peak_index, export_index)
         self.assertLess(export_index, solar_index)
+
+    def test_bill_contributor_rows_do_not_render_category_labels(self):
+        html = report.bill_change_explanation_html(
+            {
+                "available": True,
+                "narrative": "A few billing components changed this period.",
+                "current_bill": 210.0,
+                "previous_bill": 180.0,
+                "difference": 30.0,
+                "confidence": "High",
+                "contributors": [
+                    {"category": "household", "label": "General household consumption increased", "detail": "Higher everyday usage added cost.", "impact": 12.0},
+                    {"category": "overnight", "label": "Overnight charging increased", "detail": "More charging happened overnight.", "impact": 9.0},
+                    {"category": "off_peak", "label": "Off-peak usage increased", "detail": "Off-peak usage was higher than last period.", "impact": 4.0},
+                    {"category": "solar", "label": "Solar export credit fell", "detail": "Less export credit reduced the offset.", "impact": 3.0},
+                    {"category": "peak", "label": "Peak usage increased", "detail": "Peak imports were more expensive.", "impact": 2.0},
+                ],
+                "positive_changes": [],
+                "negative_changes": [],
+            }
+        )
+
+        self.assertIn("Largest contributors", html)
+        self.assertIn("General household consumption increased", html)
+        self.assertIn("Overnight charging increased", html)
+        self.assertNotIn("HOUSEHOLDGeneral", html)
+        self.assertNotIn("HouseholdGeneral", html)
+        self.assertNotIn("OVERNIGHTOvernight", html)
+        self.assertNotIn("OvernightOvernight", html)
+        self.assertNotIn("OFF PEAKOff-peak", html)
+        self.assertNotIn("SOLARSolar", html)
+        self.assertNotIn("PEAKPeak", html)
 
     def test_report_shell_reveals_deep_hash_routes(self):
         html = (

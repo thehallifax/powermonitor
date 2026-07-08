@@ -4541,6 +4541,7 @@ def home_page_html(
     energy_timeline: Optional[EnergyTimeline] = None,
     recommendations: Optional[list[Decision]] = None,
     timeline: Optional[DecisionTimeline] = None,
+    billing_summary: Optional[Summary] = None,
 ) -> str:
     return f"""
     <section class="report-section home-dashboard">
@@ -4548,7 +4549,7 @@ def home_page_html(
       {home_status_cards_section_html(briefing, glance, health)}
       {home_best_next_action_compact_html(briefing)}
       {home_today_timeline_html(energy_timeline)}
-      {home_bill_forecast_compact_html(glance)}
+      {home_bill_forecast_compact_html(glance, billing_summary)}
       {home_quick_links_html()}
     </section>
     """
@@ -4659,7 +4660,14 @@ def home_today_timeline_html(timeline: Optional[EnergyTimeline], limit: int = 3)
     """
 
 
-def home_bill_forecast_compact_html(glance: Optional[GlanceState]) -> str:
+def forecast_basis_homeowner_text(basis: str) -> str:
+    normalized = str(basis or "").strip().lower()
+    if normalized == "previous period length":
+        return "Forecast based on your previous billing period."
+    return "Projection assumes the rest of this bill follows your recent usage pattern."
+
+
+def home_bill_forecast_compact_html(glance: Optional[GlanceState], summary: Optional[Summary] = None) -> str:
     if not glance:
         return """
         <section class="home-dashboard-block home-bill-block">
@@ -4673,26 +4681,40 @@ def home_bill_forecast_compact_html(glance: Optional[GlanceState]) -> str:
     current = float(getattr(glance, "bill_current", 0.0) or 0.0)
     projected = float(getattr(glance, "bill_projected", 0.0) or 0.0)
     basis = getattr(glance, "bill_projection_basis", "Current run-rate")
-    cards = (
-        ("Current estimate", money(current), "So far this billing period"),
-        ("Projected bill", money(projected), str(basis)),
-    )
+    forecast_note = forecast_basis_homeowner_text(str(basis))
+    breakdown = []
+    if summary is not None:
+        breakdown.append(("Projected bill", money(projected)))
+        if float(getattr(summary, "supply_cost", 0.0) or 0.0):
+            breakdown.append(("Supply charges", money(float(summary.supply_cost))))
+        if float(getattr(summary, "import_cost", 0.0) or 0.0):
+            breakdown.append(("Energy charges", money(float(summary.import_cost))))
+        if float(getattr(summary, "export_credit", 0.0) or 0.0):
+            breakdown.append(("Export credits", f"-{money(float(summary.export_credit))}"))
+    else:
+        breakdown.append(("Projected bill", money(projected)))
     rows = "".join(
         f"""
-        <div class="home-forecast-card">
+        <div class="home-forecast-detail">
           <span>{html.escape(label)}</span>
           <strong>{html.escape(value)}</strong>
-          <small>{html.escape(detail)}</small>
         </div>
         """
-        for label, value, detail in cards
+        for label, value in breakdown
     )
     return f"""
     <section class="home-dashboard-block home-bill-block">
       <div class="section-title"><div><span class="eyebrow">Bill forecast</span><h2>Where is this billing period heading?</h2></div></div>
-      <div class="home-forecast-grid">{rows}</div>
+      <div class="home-forecast-summary">
+        <div class="home-forecast-main">
+          <span>Current estimate</span>
+          <strong>{html.escape(money(current))}</strong>
+          <small>So far this billing period</small>
+        </div>
+        <div class="home-forecast-grid">{rows}</div>
+      </div>
       <div class="home-inline-summary">
-        <p>{html.escape(str(basis))} is currently driving the forecast. Bills keeps the full explanation and tariff detail.</p>
+        <p>{html.escape(forecast_note)}</p>
         <a class="button-link" href="#bills">View bills</a>
       </div>
     </section>
@@ -5004,7 +5026,7 @@ def bill_change_contributor_html(item: dict) -> str:
     tone = "bad" if impact > 0 else "good"
     return f"""
     <div class="bill-change-row {tone}">
-      <div><span>{html.escape(str(item.get("category") or "change").replace("_", " ").title())}</span><strong>{html.escape(str(item.get("label") or "Bill change"))}</strong><p>{html.escape(str(item.get("detail") or ""))}</p></div>
+      <div><strong>{html.escape(str(item.get("label") or "Bill change"))}</strong><p>{html.escape(str(item.get("detail") or ""))}</p></div>
       <strong>{signed_money(impact)}</strong>
     </div>
     """
@@ -7278,7 +7300,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary)}
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -7744,12 +7766,17 @@ def write_html(
     .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
     .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .home-inline-summary .button-link {{ flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
-    .home-forecast-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }}
-    .home-forecast-card {{ padding:16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
-    .home-forecast-card span,.home-forecast-card strong,.home-forecast-card small {{ display:block; }}
-    .home-forecast-card span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
-    .home-forecast-card strong {{ margin-top:10px; font-size:24px; letter-spacing:-.03em; }}
-    .home-forecast-card small {{ margin-top:6px; color:var(--muted); font-size:11px; line-height:1.4; }}
+    .home-forecast-summary {{ display:grid; grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr); gap:12px; }}
+    .home-forecast-main {{ display:grid; align-content:start; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .home-forecast-main span,.home-forecast-main strong,.home-forecast-main small {{ display:block; }}
+    .home-forecast-main span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .home-forecast-main strong {{ margin-top:12px; font-size:42px; line-height:.95; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }}
+    .home-forecast-main small {{ margin-top:8px; color:var(--muted); font-size:12px; line-height:1.4; }}
+    .home-forecast-grid {{ display:grid; gap:10px; }}
+    .home-forecast-detail {{ display:grid; gap:4px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .home-forecast-detail span,.home-forecast-detail strong {{ display:block; }}
+    .home-forecast-detail span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .home-forecast-detail strong {{ font-size:20px; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }}
     .home-page-link-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
     .home-page-link {{ display:grid; gap:6px; padding:14px; color:inherit; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .home-page-link span {{ color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }}
@@ -7920,7 +7947,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-glance-card,.home-timeline-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-glance-card,.home-timeline-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
