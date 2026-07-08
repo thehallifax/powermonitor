@@ -826,6 +826,8 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Advanced bill details", html)
         self.assertIn("bills-breakdown-grid", html)
         self.assertIn("bills-detail-calculation-grid", html)
+        self.assertIn("bills-readable-list", html)
+        self.assertIn("bill-change-card-readable", html)
         self.assertIn("Grid energy", html)
         self.assertIn("Household usage cost", html)
         self.assertIn("Peak usage cost", html)
@@ -845,6 +847,99 @@ class MobilePresentationTests(unittest.TestCase):
         breakdown_block = html[html.index("Current billing period breakdown"):html.index("What is driving the bill?")]
         self.assertNotIn("Detailed bill calculations", breakdown_block)
         self.assertNotIn("Tariff charts", breakdown_block)
+
+    def test_ev_session_analytics_keeps_insights_and_tariff_usage_sections(self):
+        settings = report.load_settings()
+        summary = report.Summary(
+            start=date(2026, 6, 1),
+            end=date(2026, 7, 31),
+            supply_days=61,
+            intervals=1,
+            reading_days=61,
+            grid_import_kwh=512.0,
+            import_cost=140.0,
+            supply_cost=38.0,
+            total_cost=178.0,
+            export_credit=14.0,
+            net_cost=164.0,
+            solar_generated_kwh=320.0,
+            solar_used_kwh=210.0,
+            solar_exported_kwh=110.0,
+            self_consumption_pct=65.6,
+            solar_export_pct=34.4,
+            peak_cost_share_pct=28.0,
+            ev_charging_kwh=48.0,
+            ev_charging_cost=9.2,
+            ev_charging_source="ocular_export",
+            actual_ev_charging_kwh=48.0,
+            actual_ev_charging_cost=9.2,
+            actual_ev_tariff_breakdown={
+                "super_off_peak": {"kwh": 6.0, "cost": 0.6},
+                "overnight": {"kwh": 18.0, "cost": 3.2},
+                "off_peak": {"kwh": 12.0, "cost": 2.4},
+                "peak": {"kwh": 12.0, "cost": 3.0},
+            },
+            actual_ev_cost_partial=False,
+            average_daily_grid_import_kwh=8.4,
+            average_daily_solar_generation_kwh=5.2,
+            average_daily_net_cost=2.69,
+            buckets={
+                "overnight": {"kwh": 120.0, "cost": 22.0},
+                "off_peak": {"kwh": 98.0, "cost": 18.0},
+                "super_off_peak": {"kwh": 55.0, "cost": 8.0},
+                "peak": {"kwh": 239.0, "cost": 39.2},
+            },
+            ev_session_analytics={
+                "available": True,
+                "overview": {
+                    "total_kwh": 48.0,
+                    "total_cost": 9.2,
+                    "average_session_cost": 3.07,
+                    "average_session_kwh": 16.0,
+                    "average_effective_cost_per_kwh": 0.192,
+                },
+                "tariff_usage": {
+                    "super_off_peak": {"kwh": 6.0, "cost": 0.6, "pct": 12.5},
+                    "overnight": {"kwh": 18.0, "cost": 3.2, "pct": 37.5},
+                    "off_peak": {"kwh": 12.0, "cost": 2.4, "pct": 25.0},
+                    "peak": {"kwh": 12.0, "cost": 3.0, "pct": 25.0},
+                },
+                "insights": {
+                    "cheapest_session": {"date": "2026-06-05", "start_time": "11:05 pm", "end_time": "1:10 am", "energy_kwh": 14.2, "cost": 1.84},
+                    "most_expensive_session": {"date": "2026-06-14", "start_time": "5:45 pm", "end_time": "8:05 pm", "energy_kwh": 16.8, "cost": 4.92},
+                    "longest_session": {"date": "2026-06-14", "start_time": "5:45 pm", "end_time": "8:05 pm", "duration_minutes": 140, "energy_kwh": 16.8, "cost": 4.92},
+                    "highest_power_session": {"date": "2026-06-19", "start_time": "10:10 pm", "end_time": "11:35 pm", "max_power_kw": 7.20, "energy_kwh": 10.5, "cost": 2.44},
+                    "average_duration_minutes": 96,
+                    "duration_sample_count": 3,
+                    "session_count": 3,
+                    "charging_days": 3,
+                    "average_start_time": "10:42 pm",
+                    "average_finish_time": "12:31 am",
+                },
+                "sessions": [
+                    {
+                        "date": "2026-06-19",
+                        "start_time_display": "10:10 pm",
+                        "end_time_display": "11:35 pm",
+                        "duration_display": "1h 25m",
+                        "energy_kwh": 10.5,
+                        "cost": 2.44,
+                        "dominant_tariff_label": "Overnight",
+                        "cost_per_kwh": 0.232,
+                    }
+                ],
+                "recommendations": [SimpleNamespace(recommendation="Shift charging further into the overnight window.")],
+            },
+        )
+
+        html = report.ev_session_analytics_html(summary, settings)
+
+        self.assertIn("Tariff usage", html)
+        self.assertIn("Insights", html)
+        self.assertIn("ev-insight-metrics", html)
+        self.assertIn("ev-session-card", html)
+        self.assertIn("ev-tariff-row", html)
+        self.assertIn("Shift charging further into the overnight window.", html)
 
     def test_home_timeline_caps_rows_at_three(self):
         timeline = EnergyTimeline(

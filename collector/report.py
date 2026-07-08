@@ -5329,7 +5329,7 @@ def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> s
     <section class="report-section compact-section bills-detail-section">
       <div class="section-title"><div><span class="eyebrow">Bill attribution</span><h2>What is driving the bill?</h2></div><p>Biggest bill components first</p></div>
       <p class="scenario-note">This splits the estimated bill into the parts a household can usually act on: grid energy, fixed supply charge, solar export credit, EV charging, and peak usage.</p>
-      <div class="bills-summary-list">{''.join(rows)}</div>
+      <div class="bills-summary-list bills-readable-list">{''.join(rows)}</div>
     </section>
     """
 
@@ -5473,7 +5473,7 @@ def bill_change_explanation_html(explanation: Optional[dict], compact: bool = Fa
       <p class="scenario-note">{html.escape(str(explanation.get("narrative") or ""))}</p>
       <div class="metrics bill-change-metrics">{metrics}</div>
       <div class="bill-change-grid bill-change-grid-story">
-        <div class="bill-change-card main"><h3>Largest contributors</h3>{contributor_rows}</div>
+        <div class="bill-change-card main bill-change-card-readable"><h3>Largest contributors</h3>{contributor_rows}</div>
         <div class="bill-change-card bill-change-card-summary">
           <h3>Change summary</h3>
           <div class="bill-change-summary-grid">
@@ -5527,7 +5527,7 @@ def ev_bill_explanation_html(ev: dict) -> str:
     return f"""
     <div class="bill-change-ev">
       <div class="chart-heading"><h3>EV charging explanation</h3><span>{html.escape(str(ev.get("source") or "charger data").replace("_", " "))}</span></div>
-      <div class="bills-summary-list bills-summary-list-compact">{''.join(rows)}</div>
+      <div class="bills-summary-list bills-summary-list-compact bills-readable-list bills-readable-list-compact">{''.join(rows)}</div>
     </div>
     """
 
@@ -8092,17 +8092,20 @@ def write_html(
     .actual-ev-partial strong {{ font-size:11px; text-transform:uppercase; letter-spacing:.07em; }} .actual-ev-partial span {{ font-size:11px; }}
     .ev-session-section {{ background:linear-gradient(180deg,rgba(255,255,255,.9),rgba(246,252,249,.9)); }}
     .ev-overview-metrics {{ margin-bottom:14px; }}
-    .ev-session-grid {{ display:grid; grid-template-columns:.9fr 1.1fr; gap:14px; margin-top:14px; }}
-    .ev-session-card,.ev-session-recommendations,.ev-session-history {{ padding:20px; background:var(--paper); border:1px solid var(--line); border-radius:18px; }}
-    .ev-tariff-list {{ display:grid; gap:12px; }}
-    .ev-tariff-row {{ display:grid; grid-template-columns:230px 1fr 72px; align-items:center; gap:12px; }}
+    .ev-session-grid {{ display:grid; grid-template-columns:.9fr 1.1fr; gap:14px; margin-top:14px; align-items:start; }}
+    .ev-session-card,.ev-session-recommendations,.ev-session-history {{ padding:18px; background:var(--paper); border:1px solid var(--line); border-radius:18px; }}
+    .ev-tariff-list {{ display:grid; gap:10px; }}
+    .ev-tariff-row {{ display:grid; grid-template-columns:minmax(190px,220px) 1fr 72px; align-items:center; gap:10px; }}
     .ev-tariff-row div:first-child span,.ev-tariff-row div:first-child strong {{ display:block; }}
-    .ev-tariff-row div:first-child span {{ color:var(--muted); font-size:10px; font-weight:750; }}
-    .ev-tariff-row div:first-child strong,.ev-tariff-row > strong {{ font-size:11px; font-variant-numeric:tabular-nums; }}
+    .ev-tariff-row div:first-child span {{ color:var(--muted); font-size:11px; font-weight:750; line-height:1.35; }}
+    .ev-tariff-row div:first-child strong,.ev-tariff-row > strong {{ font-size:12px; font-variant-numeric:tabular-nums; }}
     .ev-tariff-row > strong {{ text-align:right; color:#315d4c; }}
     .ev-tariff-row.peak .actual-ev-track span {{ background:linear-gradient(90deg,#ed9a8b,var(--red)); }}
     .ev-insight-metrics {{ grid-template-columns:repeat(2,1fr); }}
-    .ev-insight-metrics .metric {{ min-height:112px; }}
+    .ev-insight-metrics .metric {{ display:grid; align-content:start; gap:8px; min-height:0; padding:16px 18px; }}
+    .ev-insight-metrics .metric span {{ font-size:11px; line-height:1.35; }}
+    .ev-insight-metrics .metric strong {{ margin-top:2px; font-size:22px; line-height:1.15; letter-spacing:-.025em; }}
+    .ev-insight-metrics .metric small {{ margin-top:0; max-width:none; color:#5f6b67; font-size:12px; line-height:1.45; }}
     .ev-session-recommendations {{ margin-top:14px; background:#fffaf0; border-color:#eeddb0; }}
     .ev-session-recommendations ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }}
     .ev-session-recommendations li + li {{ margin-top:6px; }}
@@ -8271,6 +8274,8 @@ def write_html(
     .plan-detail-grid strong {{ margin-top:6px; font-size:16px; letter-spacing:-.025em; }}
     .bills-summary-list {{ display:grid; gap:10px; margin-top:14px; }}
     .bills-summary-list-compact {{ margin-top:12px; }}
+    .bills-readable-list {{ max-width:min(100%, 840px); }}
+    .bills-readable-list-compact {{ max-width:min(100%, 760px); }}
     .bills-summary-row {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:center; padding:12px 14px; background:#fff; border:1px solid var(--line); border-radius:14px; }}
     .bills-summary-copy span,.bills-summary-copy small {{ display:block; }}
     .bills-summary-copy span {{ color:var(--ink); font-size:14px; font-weight:750; }}
@@ -8568,6 +8573,7 @@ def write_html(
     .tariff-window-list ul {{ margin:6px 0 0 18px; padding:0; color:var(--muted); font-size:12px; }}
     .bill-change-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:12px; margin-top:14px; }}
     .bill-change-card,.bill-change-ev {{ padding:14px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
+    .bill-change-card-readable {{ max-width:min(100%, 860px); }}
     .bill-change-card h3 {{ margin:0 0 10px; font-size:14px; }}
     .bill-change-grid-story .bill-change-card.main {{ grid-column:1 / -1; }}
     .bill-change-card-summary {{ display:grid; gap:14px; }}
@@ -8577,6 +8583,7 @@ def write_html(
     .bill-change-row {{ display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:16px; padding:14px 0; border-top:1px solid var(--line); }}
     .bill-change-row:first-of-type {{ border-top:0; padding-top:0; }}
     .bill-change-copy strong {{ display:block; font-size:15px; line-height:1.3; }}
+    .bill-change-copy {{ max-width:60ch; }}
     .bill-change-list span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .bill-change-row p {{ margin:4px 0 0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .bill-change-amount,.bill-change-list strong {{ min-width:84px; text-align:right; font-variant-numeric:tabular-nums; }}
