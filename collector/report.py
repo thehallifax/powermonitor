@@ -3548,24 +3548,77 @@ def daily_briefing_html(
     positive_items = dedupe_briefing_items(briefing.positive_outcomes)
     primary_items = action_items[:1]
     secondary_items = dedupe_briefing_items([*action_items[1:], *positive_items])[:2]
-    actions = home_action_section_html(primary_items)
-    secondary = home_secondary_section_html(secondary_items)
-    change_note = home_change_note([*primary_items, *secondary_items])
-    goal_progress = goals_progress_html(goals or [], limit=3)
     return f"""
     <section class="report-section briefing-section">
       {home_assistant_hero_html(briefing)}
-      {home_status_strip_html(briefing, glance, health)}
-      {energy_timeline_home_html(energy_timeline)}
-      {actions}
-      {secondary}
-      {household_insights_html(insights or [])}
-      <section class="briefing-block home-change-block">
-        <div class="section-title"><div><span class="eyebrow">What changed?</span><h2>{html.escape(change_note[0])}</h2></div></div>
-        <p class="notice">{html.escape(change_note[1])}</p>
-      </section>
-      {goal_progress}
+      {home_snapshot_html(briefing, glance, health)}
+      {home_yesterday_summary_html(trends_report)}
+      {home_best_next_action_html(primary_items, secondary_items)}
     </section>
+    """
+
+
+def home_snapshot_html(briefing: DailyBriefing, glance: Optional[GlanceState], health: Optional[dict] = None) -> str:
+    return f"""
+      <section class="briefing-block home-snapshot-block">
+        <div class="section-title"><div><span class="eyebrow">Today's Snapshot</span><h2>Am I doing okay today?</h2></div><p>Three quick checks</p></div>
+        {home_status_strip_html(briefing, glance, health)}
+      </section>
+    """
+
+
+def home_yesterday_summary_html(report: Optional[HouseholdTrendsReport]) -> str:
+    comparison_note = "Yesterday comparison is not available yet."
+    detail = "History already holds the longer household record and recent changes."
+    if report and (report.trends or report.records):
+        detail = "History has recent trends and records while yesterday-specific comparison is still being added."
+    return f"""
+      <section class="briefing-block home-yesterday-block">
+        <div class="section-title"><div><span class="eyebrow">Compared with Yesterday</span><h2>{html.escape(comparison_note)}</h2></div></div>
+        <div class="home-inline-summary">
+          <p>{html.escape(detail)}</p>
+          <a class="button-link" href="#analytics">View History</a>
+        </div>
+      </section>
+    """
+
+
+def home_best_next_action_html(primary_items: list[BriefingPriority], secondary_items: list[BriefingPriority]) -> str:
+    lead = primary_items[0] if primary_items else secondary_items[0] if secondary_items else None
+    if not lead:
+        return """
+      <section class="briefing-block home-action-block">
+        <div class="section-title"><div><span class="eyebrow">Best Next Action</span><h2>Nothing important needs action.</h2></div></div>
+        <div class="home-inline-summary">
+          <p>Everything looks normal right now. Open Decisions when you want the full recommendation centre and scenario cards.</p>
+          <a class="button-link" href="#whatif">View Decisions</a>
+        </div>
+      </section>
+        """
+    secondary_summary = ""
+    if secondary_items:
+        labels = "; ".join(trust_wording(item.title) for item in secondary_items[:2])
+        secondary_summary = f"<p><strong>Also watching</strong>{html.escape(labels)}</p>"
+    action_text = trust_wording(lead.recommendation or lead.summary or lead.title)
+    severity = briefing_priority_severity(lead.status)
+    return f"""
+      <section class="briefing-block home-action-block">
+        <div class="section-title"><div><span class="eyebrow">Best Next Action</span><h2>{html.escape(trust_wording(lead.title))}</h2></div><p>{html.escape(lead.confidence)} confidence</p></div>
+        <article class="briefing-card {html.escape(severity)} home-action-summary-card">
+          <div class="briefing-card-heading">
+            <span>{html.escape(lead.advisor_type.replace("_", " ").title())}</span>
+            <strong>{html.escape(lead.confidence)} confidence</strong>
+          </div>
+          <p class="primary-action">{html.escape(action_text)}</p>
+          <div class="decision-lines">
+            <p><strong>Why this matters</strong>{html.escape(trust_wording(lead.summary))}</p>
+            {secondary_summary}
+          </div>
+          <div class="provider-action-row">
+            <a class="button-link" href="#whatif">View Decisions</a>
+          </div>
+        </article>
+      </section>
     """
 
 
@@ -3601,6 +3654,17 @@ def energy_timeline_home_html(timeline: Optional[EnergyTimeline], limit: int = 6
         <div class="energy-timeline-list">{cards}</div>
         {more}
       </section>
+    """
+
+
+def energy_timeline_history_html(timeline: Optional[EnergyTimeline], limit: int = 8) -> str:
+    if not timeline:
+        return ""
+    return f"""
+    <section class="report-section compact-section energy-timeline-history">
+      <div class="section-title"><div><span class="eyebrow">Today</span><h2>Energy timeline</h2></div><p>Moved from Home for a shorter daily briefing</p></div>
+      {energy_timeline_home_html(timeline, limit=limit)}
+    </section>
     """
 
 
@@ -4480,49 +4544,20 @@ def home_page_html(
 ) -> str:
     return (
         daily_briefing_html(briefing, goals or [], glance, insights, trends_report, health, energy_timeline)
-        + home_recommendation_preview_html(recommendations or [])
         + home_timeline_preview_html(timeline)
+        + home_bill_forecast_html(glance, bill_change)
         + home_navigation_links_html()
-        + bill_change_explanation_html(bill_change, compact=True)
     )
 
-
-def home_recommendation_preview_html(recommendations: list[Decision]) -> str:
-    if not recommendations:
-        return """
-        <section class="briefing-block home-recommendation-preview">
-          <div class="section-title"><div><span class="eyebrow">Recommendation Preview</span><h2>Nothing needs a deeper decision right now.</h2></div></div>
-          <p class="notice">Use Decisions when you want scenarios and the full recommendation list.</p>
-        </section>
-        """
-    top = sorted(recommendations, key=recommendation_sort_key)[0]
-    return f"""
-    <section class="briefing-block home-recommendation-preview">
-      <div class="section-title"><div><span class="eyebrow">Recommendation Preview</span><h2>Decision detail lives in Decisions.</h2></div><p>Top recommendation only</p></div>
-      <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(top))}">
-        <div class="recommendation-centre-heading">
-          <span class="recommendation-level">{html.escape(recommendation_confidence(top))} confidence</span>
-          <div><small>Category</small><strong>{html.escape(recommendation_category(top).title())}</strong></div>
-        </div>
-        <h3>{html.escape(recommendation_title(top))}</h3>
-        <div class="decision-lines">
-          <p class="primary-action"><strong>What should I check?</strong>{html.escape(recommendation_what_to_check(top))}</p>
-          <p><strong>What happened?</strong>{html.escape(recommendation_what_happened(top))}</p>
-        </div>
-        <div class="provider-action-row">
-          <a class="button-link" href="#recommendations">Open Decisions</a>
-        </div>
-      </article>
-    </section>
-    """
-
-
-def home_timeline_preview_html(timeline: Optional[DecisionTimeline], limit: int = 6) -> str:
+def home_timeline_preview_html(timeline: Optional[DecisionTimeline], limit: int = 5) -> str:
     if not timeline or not timeline.entries:
         return """
         <section class="briefing-block home-timeline-preview">
-          <div class="section-title"><div><span class="eyebrow">History Preview</span><h2>No recent household events are ready yet.</h2></div></div>
-          <p class="notice">Open History when PowerMonitor has more timeline events to review.</p>
+          <div class="section-title"><div><span class="eyebrow">Household Timeline Preview</span><h2>No recent household events are ready yet.</h2></div></div>
+          <div class="home-inline-summary">
+            <p>History will show the full household record once more timeline events are available.</p>
+            <a class="button-link" href="#timeline">View History</a>
+          </div>
         </section>
         """
     rows = []
@@ -4541,9 +4576,55 @@ def home_timeline_preview_html(timeline: Optional[DecisionTimeline], limit: int 
         )
     return f"""
     <section class="briefing-block home-timeline-preview">
-      <div class="section-title"><div><span class="eyebrow">History Preview</span><h2>Recent household events</h2></div><p>Latest {min(len(timeline.entries), limit)}</p></div>
+      <div class="section-title"><div><span class="eyebrow">Household Timeline Preview</span><h2>Recent household events</h2></div><p>Top {min(len(timeline.entries), limit)}</p></div>
       <div class="timeline-list">{''.join(rows)}</div>
-      <div class="provider-action-row"><a class="button-link" href="#timeline">Open History</a></div>
+      <div class="provider-action-row"><a class="button-link" href="#timeline">View History</a></div>
+    </section>
+    """
+
+
+def home_bill_forecast_html(glance: Optional[GlanceState], explanation: Optional[dict]) -> str:
+    if not glance:
+        return """
+        <section class="report-section compact-section home-bill-forecast">
+          <div class="section-title"><div><span class="eyebrow">Bill Forecast</span><h2>Bill forecast is not available yet.</h2></div></div>
+          <div class="home-inline-summary">
+            <p>Bills keeps the full financial explanation, tariff comparison, and reconciliation when enough data is ready.</p>
+            <a class="button-link" href="#bills">View Bills</a>
+          </div>
+        </section>
+        """
+    current = float(getattr(glance, "bill_current", 0.0) or 0.0)
+    projected = float(getattr(glance, "bill_projected", 0.0) or 0.0)
+    remaining = projected - current
+    basis = getattr(glance, "bill_projection_basis", "Current run-rate")
+    narrative = None
+    if explanation and explanation.get("available"):
+        narrative = explanation.get("narrative")
+    cards = (
+        ("Current estimate", money(current), "So far this billing period"),
+        ("Projected bill", money(projected), str(basis)),
+        ("Still to come", signed_money(remaining), "Projected movement from current estimate"),
+    )
+    rows = "".join(
+        f"""
+        <div class="home-forecast-card">
+          <span>{html.escape(label)}</span>
+          <strong>{html.escape(value)}</strong>
+          <small>{html.escape(detail)}</small>
+        </div>
+        """
+        for label, value, detail in cards
+    )
+    note = narrative or "Bills owns the full explanation, attribution, and tariff comparison for this forecast."
+    return f"""
+    <section class="report-section compact-section home-bill-forecast">
+      <div class="section-title"><div><span class="eyebrow">Bill Forecast</span><h2>Where is this billing period heading?</h2></div><p>Current estimate and trajectory</p></div>
+      <div class="home-forecast-grid">{rows}</div>
+      <div class="home-inline-summary">
+        <p>{html.escape(str(note))}</p>
+        <a class="button-link" href="#bills">View Bills</a>
+      </div>
     </section>
     """
 
@@ -4567,7 +4648,7 @@ def home_navigation_links_html() -> str:
     )
     return f"""
     <section class="briefing-block home-links-block">
-      <div class="section-title"><div><span class="eyebrow">Go Deeper</span><h2>Open the page that owns the detail.</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">Quick Navigation</span><h2>Open the page that owns the detail.</h2></div></div>
       <div class="home-page-link-grid">{cards}</div>
     </section>
     """
@@ -6756,7 +6837,12 @@ def scenario_analysis_html(analysis: dict) -> str:
     """
 
 
-def whatif_page_html(analysis: dict, plan: dict, recommendations: list) -> str:
+def whatif_page_html(
+    analysis: dict,
+    plan: dict,
+    recommendations: list,
+    goals: Optional[list[GoalProgress]] = None,
+) -> str:
     savings = plan["savings"]
     meaning = (
         f"The EV Add On plan is ahead by {money(savings)} for this period."
@@ -6782,6 +6868,7 @@ def whatif_page_html(analysis: dict, plan: dict, recommendations: list) -> str:
         <div><span>Best next move</span><strong>{html.escape(best_move)}</strong></div>
       </div>
     </section>
+    {goals_progress_html(goals or [])}
     """
 
 
@@ -7142,7 +7229,7 @@ def write_html(
   </section>
   <section id="whatif" class="page">
     {page_heading_html("Decisions", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
-    {whatif_page_html(scenarios, plan, recommendation_presentations)}
+    {whatif_page_html(scenarios, plan, recommendation_presentations, goals)}
     <div id="recommendations">
       {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.", parent="Decisions")}
       {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
@@ -7151,6 +7238,8 @@ def write_html(
   <section id="analytics" class="page">
     {page_heading_html("History", "Daily trends, historical comparison, and larger analytical detail.")}
     {trends_html(trends, settings)}
+    {household_insights_html(household_insights)}
+    {energy_timeline_history_html(energy_timeline)}
     <div id="timeline">
       {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
       {timeline_html(display_timeline)}
@@ -7231,11 +7320,12 @@ def write_html(
     body:has(#system-collector:target) #home,
     body:has(#system-live-data:target) #home,
     body:has(#system-data-quality:target) #home,
+    body:has(#home-goals:target) #home,
     body:has(#energy-score-explanation:target) #home,
     body:has([id^="system-provider-"]:target) #home {{ display:none; }}
     body:has(#home:target) #home,
-    body:has(#home-goals:target) #home,
     body:has(#energy-score-explanation:target) #home,
+    body:has(#home-goals:target) #whatif,
     body:has(#recommendations:target) #whatif,
     body:has(#timeline:target) #analytics,
     body:has(#setup:target) #system,
@@ -7398,7 +7488,7 @@ def write_html(
     .action-card.green {{ background:#f3fbf7; border-color:#cce9dc; }} .action-card.amber {{ background:#fffaf0; border-color:#eeddb0; }} .action-card.red {{ background:#fff5f3; border-color:#f0cec8; }}
     .briefing-section {{ display:grid; gap:18px; }}
     .briefing-hero {{ display:flex; align-items:flex-start; justify-content:space-between; gap:28px; padding:26px; color:#fff; background:linear-gradient(135deg,#111816,#285140); border-radius:24px; }}
-    .home-assistant-hero {{ min-height:210px; align-items:center; }}
+    .home-assistant-hero {{ min-height:170px; align-items:center; }}
     .briefing-hero h2 {{ max-width:760px; color:#fff; font-size:34px; }}
     .briefing-hero p {{ max-width:700px; margin:8px 0 0; color:rgba(255,255,255,.74); }}
     .briefing-readtime {{ flex:0 0 150px; padding:14px; text-align:right; background:rgba(255,255,255,.1); border-radius:16px; }}
@@ -7406,14 +7496,18 @@ def write_html(
     .briefing-readtime span {{ color:rgba(255,255,255,.64); }}
     .briefing-readtime strong {{ display:block; margin-top:5px; font-size:20px; letter-spacing:-.035em; }}
     .briefing-headline {{ margin:0; color:#2f453e; font-size:20px; font-weight:750; letter-spacing:-.025em; }}
-    .home-status-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
-    .home-status-tile {{ min-height:154px; padding:19px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .home-status-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
+    .home-status-tile {{ min-height:122px; padding:16px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
     .home-status-tile span {{ display:block; color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
-    .home-status-tile h3 {{ margin:20px 0 6px; font-size:22px; letter-spacing:-.035em; }}
-    .home-status-tile p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.45; }}
+    .home-status-tile h3 {{ margin:14px 0 6px; font-size:20px; letter-spacing:-.035em; }}
+    .home-status-tile p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.4; }}
     .home-status-tile.green {{ background:#f3fbf7; border-color:#cce9dc; }}
     .home-status-tile.amber {{ background:#fffaf0; border-color:#eeddb0; }}
     .home-status-tile.red {{ background:#fff5f3; border-color:#f0cec8; }}
+    .home-inline-summary {{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .home-inline-summary p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
+    .home-action-summary-card .primary-action {{ margin-top:14px; }}
+    .home-action-summary-card .decision-lines {{ margin-top:12px; }}
     .home-change-block .notice {{ margin:0; }}
     .energy-timeline-list {{ display:grid; grid-template-columns:1fr; gap:10px; }}
     .energy-timeline-card {{ display:grid; grid-template-columns:64px 1fr; gap:14px; align-items:start; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
@@ -7558,10 +7652,17 @@ def write_html(
     .provider-action-row button {{ min-height:38px; padding:8px 12px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
     .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
     .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
+    .home-inline-summary .button-link {{ flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
+    .home-forecast-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+    .home-forecast-card {{ padding:16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .home-forecast-card span,.home-forecast-card strong,.home-forecast-card small {{ display:block; }}
+    .home-forecast-card span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .home-forecast-card strong {{ margin-top:10px; font-size:24px; letter-spacing:-.03em; }}
+    .home-forecast-card small {{ margin-top:6px; color:var(--muted); font-size:11px; line-height:1.4; }}
     .home-page-link-grid {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }}
-    .home-page-link {{ display:grid; gap:6px; padding:16px; color:inherit; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .home-page-link {{ display:grid; gap:6px; padding:14px; color:inherit; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .home-page-link span {{ color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }}
-    .home-page-link strong {{ font-size:14px; line-height:1.45; }}
+    .home-page-link strong {{ font-size:13px; line-height:1.4; }}
     .provider-action-row button[data-provider-action="remove"],.provider-action-row button[data-provider-action="disable"] {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
     .provider-action-row button[data-provider-action="reset"] {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-result {{ display:none; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
@@ -7652,7 +7753,7 @@ def write_html(
     body:has(#setup-billing-cycle:target) .top-nav a[href="#system"],
     body:has(#setup-tariff:target) .top-nav a[href="#system"],
     body:has(#energy-score-explanation:target) .top-nav a[href="#home"],
-    body:has(#home-goals:target) .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
+    body:has(#home-goals:target) .top-nav a[href="#whatif"] {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     .page-heading {{ padding:24px 28px; border:0; border-radius:28px; box-shadow:var(--shadow); }}
     .page-heading h2 {{ font-size:34px; letter-spacing:-.055em; }} .page-heading p {{ max-width:620px; font-size:14px; }}
     .report-section {{ margin-top:18px; padding:30px; border:0; border-radius:28px; background:rgba(255,255,255,.88); box-shadow:var(--shadow); }}
@@ -7728,7 +7829,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
@@ -7751,6 +7852,7 @@ def write_html(
       .auth-alert-heading {{ align-items:flex-start; flex-direction:column; }}
       .ev-caveat {{ align-items:flex-start; flex-direction:column; gap:8px; }}
       .briefing-hero {{ flex-direction:column; padding:20px; }} .home-assistant-hero {{ min-height:0; }} .briefing-readtime {{ flex:0 0 auto; width:100%; text-align:left; }}
+      .home-inline-summary {{ align-items:flex-start; flex-direction:column; }}
       .home-status-tile {{ min-height:auto; padding:16px; }} .home-status-tile h3 {{ margin-top:16px; font-size:20px; }}
       .briefing-grid,.briefing-grid.two-up {{ grid-template-columns:1fr; }}
       .metric.primary {{ grid-column:auto; }} .bar-row {{ grid-template-columns:105px 1fr 66px; gap:8px; }} .peak-badge {{ display:none; }}

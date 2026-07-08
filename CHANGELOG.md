@@ -1,5 +1,20 @@
 # Changelog
 
+## UX-006 - Dashboard Compression
+
+- Compressed Home into a shorter daily briefing built around seven sections:
+  hero, today's snapshot, yesterday placeholder, best next action, household
+  timeline preview, bill forecast, and quick navigation.
+- Removed Home-only stacks for goals, interesting observations, recommendation
+  previews, and bill explanation so the page stays closer to two to three
+  desktop screen heights.
+- Moved full household goals into Decisions and moved household observations
+  plus the daily energy timeline into History so no functionality was lost.
+- Replaced larger stacked Home cards with denser summary layouts for the best
+  next action, bill forecast, and inline page handoffs to the owning views.
+- Added regression coverage for the compressed Home structure and for the
+  relocated goals/history ownership routes.
+
 ## UX-005 - Navigation and Page Ownership Cleanup
 
 - Tightened page ownership so Home now stays a compact daily briefing with a
