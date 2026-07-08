@@ -4631,8 +4631,13 @@ def home_today_timeline_html(timeline: Optional[EnergyTimeline], limit: int = 3)
           </div>
         </section>
         """
+    ordered_events = sorted(
+        timeline.events,
+        key=lambda event: str(getattr(event, "sort_time", "") or getattr(event, "local_time", "")),
+        reverse=True,
+    )
     rows = []
-    for event in timeline.events[:limit]:
+    for event in ordered_events[:limit]:
         rows.append(
             f"""
             <article class="home-timeline-row">
@@ -4647,7 +4652,7 @@ def home_today_timeline_html(timeline: Optional[EnergyTimeline], limit: int = 3)
         )
     return f"""
     <section class="home-dashboard-block home-timeline-block">
-      <div class="section-title"><div><span class="eyebrow">Today's timeline</span><h2>{html.escape(timeline.summary)}</h2></div><p>Latest {min(len(timeline.events), limit)}</p></div>
+      <div class="section-title"><div><span class="eyebrow">Today's timeline</span><h2>{html.escape(timeline.summary)}</h2></div><p>Showing latest {min(len(ordered_events), limit)} events</p></div>
       <div class="home-timeline-list">{''.join(rows)}</div>
       <div class="provider-action-row"><a class="button-link" href="#timeline">View full history</a></div>
     </section>
@@ -7587,11 +7592,13 @@ def write_html(
     .home-action-summary-card .primary-action {{ margin-top:14px; }}
     .home-action-summary-card .decision-lines {{ margin-top:12px; }}
     .home-timeline-list {{ display:grid; gap:10px; }}
-    .home-timeline-row {{ display:grid; grid-template-columns:96px 1fr; gap:12px; padding:12px 14px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
-    .home-timeline-row .timeline-stamp {{ align-items:center; }}
+    .home-timeline-row {{ display:grid; grid-template-columns:84px 1fr; gap:10px; padding:10px 12px; background:#fff; border:1px solid var(--line); border-radius:14px; }}
+    .home-timeline-row .timeline-stamp {{ align-items:center; gap:6px; }}
+    .home-timeline-row .timeline-stamp span {{ min-width:22px; height:22px; font-size:9px; }}
+    .home-timeline-row .timeline-stamp time {{ color:#8a9692; font-size:10px; font-weight:750; letter-spacing:.03em; }}
     .home-timeline-row > div:last-child > span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
-    .home-timeline-row strong {{ display:block; margin-top:8px; font-size:14px; letter-spacing:-.02em; }}
-    .home-timeline-row p {{ margin:4px 0 0; color:var(--muted); font-size:12px; line-height:1.4; }}
+    .home-timeline-row strong {{ display:block; margin-top:6px; font-size:15px; letter-spacing:-.02em; }}
+    .home-timeline-row p {{ margin:3px 0 0; color:var(--muted); font-size:11px; line-height:1.35; }}
     .home-change-block .notice {{ margin:0; }}
     .energy-timeline-list {{ display:grid; grid-template-columns:1fr; gap:10px; }}
     .energy-timeline-card {{ display:grid; grid-template-columns:64px 1fr; gap:14px; align-items:start; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}

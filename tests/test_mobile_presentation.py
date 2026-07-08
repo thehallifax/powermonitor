@@ -30,6 +30,7 @@ from engine.models import (
 )
 from engine.provider_framework import ProviderCapability
 from engine.trends_engine import HouseholdRecord, HouseholdTrend, HouseholdTrendsReport
+from engine.energy_timeline import EnergyTimeline, EnergyTimelineEvent
 from presentation.glance import GlanceState
 
 
@@ -588,6 +589,71 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("View full history", html)
         self.assertIn("View bills", html)
         self.assertLessEqual(html.count('class="home-timeline-row"'), 3)
+
+    def test_home_timeline_caps_rows_at_three(self):
+        timeline = EnergyTimeline(
+            date="2026-07-08",
+            is_in_progress=True,
+            summary="Three key events are enough for the dashboard.",
+            events=[
+                EnergyTimelineEvent(
+                    event_type=f"event_{index}",
+                    local_time=f"{index:02d}:00",
+                    title=f"Event {index}",
+                    explanation="Something happened.",
+                    confidence="medium",
+                    sort_time=f"2026-07-08T{index:02d}:00:00",
+                )
+                for index in range(5)
+            ],
+        )
+
+        html = report.home_today_timeline_html(timeline)
+
+        self.assertEqual(html.count('class="home-timeline-row"'), 3)
+        self.assertIn("Showing latest 3 events", html)
+        self.assertNotIn("Latest 3", html)
+
+    def test_home_timeline_orders_rows_newest_first(self):
+        timeline = EnergyTimeline(
+            date="2026-07-08",
+            is_in_progress=True,
+            summary="Recent household activity.",
+            events=[
+                EnergyTimelineEvent(
+                    event_type="solar_start",
+                    local_time="08:15",
+                    title="Solar started",
+                    explanation="Morning solar production began.",
+                    confidence="high",
+                    sort_time="2026-07-08T08:15:00",
+                ),
+                EnergyTimelineEvent(
+                    event_type="peak_usage",
+                    local_time="18:45",
+                    title="Peak usage interval",
+                    explanation="Evening demand increased.",
+                    confidence="medium",
+                    sort_time="2026-07-08T18:45:00",
+                ),
+                EnergyTimelineEvent(
+                    event_type="export_start",
+                    local_time="11:30",
+                    title="Export started",
+                    explanation="Solar export began.",
+                    confidence="high",
+                    sort_time="2026-07-08T11:30:00",
+                ),
+            ],
+        )
+
+        html = report.home_today_timeline_html(timeline)
+
+        peak_index = html.index("Peak usage interval")
+        export_index = html.index("Export started")
+        solar_index = html.index("Solar started")
+        self.assertLess(peak_index, export_index)
+        self.assertLess(export_index, solar_index)
 
     def test_report_shell_reveals_deep_hash_routes(self):
         html = (
