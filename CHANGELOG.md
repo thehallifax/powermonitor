@@ -1,5 +1,15 @@
 # Changelog
 
+## POL-002 - Home Bill Forecast Handoff
+
+- Simplified the Home Bill Forecast so it now focuses on current spend,
+  billing-period progress, projected bill, previous-bill delta, and forecast
+  confidence instead of exposing bill component accounting.
+- Kept detailed supply, import, and export component breakdowns on Bills,
+  where the full bill explanation already lives.
+- Added regression coverage proving Home no longer renders supply, energy, or
+  export component labels while Bills still renders the detailed components.
+
 ## UX-006 - Dashboard Compression
 
 - Compressed Home into a shorter daily briefing built around seven sections:

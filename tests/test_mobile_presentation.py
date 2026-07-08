@@ -1,6 +1,7 @@
 import inspect
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -554,8 +555,51 @@ class MobilePresentationTests(unittest.TestCase):
             evidence_quality="MEDIUM",
             evidence_reason="Recent readings available.",
         )
+        billing_summary = report.Summary(
+            start=date(2026, 6, 1),
+            end=date(2026, 7, 2),
+            supply_days=32,
+            intervals=0,
+            reading_days=30,
+            grid_import_kwh=420.0,
+            import_cost=96.0,
+            supply_cost=24.0,
+            total_cost=120.0,
+            export_credit=6.0,
+            net_cost=114.0,
+            solar_generated_kwh=0.0,
+            solar_used_kwh=0.0,
+            solar_exported_kwh=0.0,
+            self_consumption_pct=0.0,
+            solar_export_pct=0.0,
+            peak_cost_share_pct=0.0,
+            ev_charging_kwh=0.0,
+            ev_charging_cost=0.0,
+            ev_charging_source="estimated",
+            actual_ev_charging_kwh=0.0,
+            actual_ev_charging_cost=0.0,
+            actual_ev_tariff_breakdown={},
+            actual_ev_cost_partial=False,
+            ev_session_analytics={},
+            average_daily_grid_import_kwh=0.0,
+            average_daily_solar_generation_kwh=0.0,
+            average_daily_net_cost=0.0,
+            buckets={
+                "overnight": {"kwh": 0.0, "cost": 0.0},
+                "off_peak": {"kwh": 0.0, "cost": 0.0},
+                "super_off_peak": {"kwh": 0.0, "cost": 0.0},
+                "peak": {"kwh": 0.0, "cost": 0.0},
+            },
+        )
+        bill_change = {"difference": 12.5, "previous_bill": 167.5, "confidence": "Medium"}
 
-        html = report.home_page_html(briefing, glance=glance)
+        html = report.home_page_html(
+            briefing,
+            glance=glance,
+            bill_change=bill_change,
+            billing_summary=billing_summary,
+            billing_period_end=date(2026, 8, 1),
+        )
 
         self.assertIn("Can I charge?", html)
         self.assertIn("Wait if you can.", html)
@@ -584,13 +628,66 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertNotIn("Today's Progress", html)
         self.assertNotIn("Show 7 more events", html)
         self.assertNotIn("previous period length", html)
+        self.assertNotIn("Supply charges", html)
+        self.assertNotIn("Energy charges", html)
+        self.assertNotIn("Export credits", html)
         self.assertNotIn('id="home-goals"', html)
         self.assertEqual(html.count("Wait for cheaper charging"), 1)
+        self.assertIn("Current spend", html)
+        self.assertIn("32 of 62 days", html)
+        self.assertIn("Compared with last bill", html)
+        self.assertIn("▲ $12.50", html)
+        self.assertIn("Forecast confidence", html)
         self.assertIn("View decisions", html)
         self.assertIn("View full history", html)
         self.assertIn("View bills", html)
         self.assertIn("Projection assumes the rest of this bill follows your recent usage pattern.", html)
         self.assertLessEqual(html.count('class="home-timeline-row"'), 3)
+
+    def test_bills_summary_keeps_detailed_bill_components(self):
+        settings = report.load_settings()
+        summary = report.Summary(
+            start=date(2026, 6, 1),
+            end=date(2026, 7, 31),
+            supply_days=61,
+            intervals=1,
+            reading_days=61,
+            grid_import_kwh=512.0,
+            import_cost=140.0,
+            supply_cost=38.0,
+            total_cost=178.0,
+            export_credit=14.0,
+            net_cost=164.0,
+            solar_generated_kwh=320.0,
+            solar_used_kwh=210.0,
+            solar_exported_kwh=110.0,
+            self_consumption_pct=65.6,
+            solar_export_pct=34.4,
+            peak_cost_share_pct=28.0,
+            ev_charging_kwh=0.0,
+            ev_charging_cost=0.0,
+            ev_charging_source="estimated",
+            actual_ev_charging_kwh=0.0,
+            actual_ev_charging_cost=0.0,
+            actual_ev_tariff_breakdown={},
+            actual_ev_cost_partial=False,
+            ev_session_analytics={},
+            average_daily_grid_import_kwh=8.4,
+            average_daily_solar_generation_kwh=5.2,
+            average_daily_net_cost=2.69,
+            buckets={
+                "overnight": {"kwh": 120.0, "cost": 22.0},
+                "off_peak": {"kwh": 98.0, "cost": 18.0},
+                "super_off_peak": {"kwh": 55.0, "cost": 8.0},
+                "peak": {"kwh": 239.0, "cost": 39.2},
+            },
+        )
+
+        html = report.summary_html("Current billing period", summary, settings)
+
+        self.assertIn("Import cost", html)
+        self.assertIn("Supply charge", html)
+        self.assertIn("Solar export credit", html)
 
     def test_home_timeline_caps_rows_at_three(self):
         timeline = EnergyTimeline(

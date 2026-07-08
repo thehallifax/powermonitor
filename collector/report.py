@@ -558,7 +558,7 @@ def dashboard_data(
         completeness,
         plan,
     )
-    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
+    glance_projected, glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
     )
@@ -4558,6 +4558,7 @@ def home_page_html(
     timeline: Optional[DecisionTimeline] = None,
     billing_summary: Optional[Summary] = None,
     historical_trends: Optional[HistoricalTrends] = None,
+    billing_period_end: Optional[date] = None,
 ) -> str:
     return f"""
     <section class="report-section home-dashboard">
@@ -4565,7 +4566,7 @@ def home_page_html(
       {home_status_cards_section_html(briefing, glance, health)}
       {home_best_next_action_compact_html(briefing)}
       {home_today_timeline_html(energy_timeline)}
-      {home_bill_forecast_compact_html(glance, billing_summary)}
+      {home_bill_forecast_compact_html(glance, billing_summary, bill_change, billing_period_end)}
       {historical_trends_home_html(historical_trends)}
       {home_quick_links_html()}
     </section>
@@ -4684,7 +4685,12 @@ def forecast_basis_homeowner_text(basis: str) -> str:
     return "Projection assumes the rest of this bill follows your recent usage pattern."
 
 
-def home_bill_forecast_compact_html(glance: Optional[GlanceState], summary: Optional[Summary] = None) -> str:
+def home_bill_forecast_compact_html(
+    glance: Optional[GlanceState],
+    summary: Optional[Summary] = None,
+    bill_change: Optional[dict] = None,
+    billing_period_end: Optional[date] = None,
+) -> str:
     if not glance:
         return """
         <section class="home-dashboard-block home-bill-block">
@@ -4699,36 +4705,76 @@ def home_bill_forecast_compact_html(glance: Optional[GlanceState], summary: Opti
     projected = float(getattr(glance, "bill_projected", 0.0) or 0.0)
     basis = getattr(glance, "bill_projection_basis", "Current run-rate")
     forecast_note = forecast_basis_homeowner_text(str(basis))
-    breakdown = []
+    progress_copy = "Billing period progress unavailable."
     if summary is not None:
-        breakdown.append(("Projected bill", money(projected)))
-        if float(getattr(summary, "supply_cost", 0.0) or 0.0):
-            breakdown.append(("Supply charges", money(float(summary.supply_cost))))
-        if float(getattr(summary, "import_cost", 0.0) or 0.0):
-            breakdown.append(("Energy charges", money(float(summary.import_cost))))
-        if float(getattr(summary, "export_credit", 0.0) or 0.0):
-            breakdown.append(("Export credits", f"-{money(float(summary.export_credit))}"))
+        current_days = max(int(getattr(summary, "supply_days", 0) or 0), 0)
+        period_end = billing_period_end or getattr(summary, "end", None)
+        total_days = None
+        if isinstance(period_end, date):
+            total_days = max((period_end - summary.start).days + 1, current_days)
+        if total_days:
+            progress_copy = f"{current_days} of {total_days} days"
+        elif current_days:
+            progress_copy = f"{current_days} days tracked"
+
+    difference = None
+    previous_bill = None
+    confidence = str(getattr(glance, "confidence", "") or "Medium").title()
+    if isinstance(bill_change, dict):
+        difference = bill_change.get("difference")
+        previous_bill = bill_change.get("previous_bill")
+        confidence = str(bill_change.get("confidence") or confidence).title()
+
+    if isinstance(difference, (int, float)):
+        difference_value = float(difference)
+        if abs(difference_value) < 0.005:
+            delta_value = "No change"
+            delta_note = "In line with your previous completed bill."
+            delta_tone = "neutral"
+        else:
+            delta_value = f"{'▲' if difference_value > 0 else '▼'} {money(abs(difference_value))}"
+            delta_note = (
+                "Higher than your previous completed bill."
+                if difference_value > 0
+                else "Lower than your previous completed bill."
+            )
+            delta_tone = "up" if difference_value > 0 else "down"
     else:
-        breakdown.append(("Projected bill", money(projected)))
-    rows = "".join(
-        f"""
-        <div class="home-forecast-detail">
-          <span>{html.escape(label)}</span>
-          <strong>{html.escape(value)}</strong>
-        </div>
-        """
-        for label, value in breakdown
+        delta_value = "Not ready yet"
+        delta_note = "PowerMonitor needs a previous completed bill for comparison."
+        delta_tone = "neutral"
+
+    previous_bill_note = (
+        f"Previous completed bill {money(float(previous_bill))}."
+        if isinstance(previous_bill, (int, float))
+        else delta_note
     )
     return f"""
     <section class="home-dashboard-block home-bill-block">
       <div class="section-title"><div><span class="eyebrow">Bill forecast</span><h2>Where is this billing period heading?</h2></div></div>
       <div class="home-forecast-summary">
         <div class="home-forecast-main">
-          <span>Current estimate</span>
+          <span>Current spend</span>
           <strong>{html.escape(money(current))}</strong>
-          <small>So far this billing period</small>
+          <small>{html.escape(progress_copy)}</small>
         </div>
-        <div class="home-forecast-grid">{rows}</div>
+        <div class="home-forecast-grid">
+          <div class="home-forecast-detail">
+            <span>Projected bill</span>
+            <strong>{html.escape(money(projected))}</strong>
+            <small>{html.escape(forecast_note)}</small>
+          </div>
+          <div class="home-forecast-detail home-forecast-delta home-forecast-delta-{html.escape(delta_tone)}">
+            <span>Compared with last bill</span>
+            <strong>{html.escape(delta_value)}</strong>
+            <small>{html.escape(previous_bill_note)}</small>
+          </div>
+          <div class="home-forecast-detail">
+            <span>Forecast confidence</span>
+            <strong>{html.escape(confidence)}</strong>
+            <small>{html.escape(forecast_note)}</small>
+          </div>
+        </div>
       </div>
       <div class="home-inline-summary">
         <p>{html.escape(forecast_note)}</p>
@@ -7146,7 +7192,7 @@ def write_html(
                 compared_trends = load_daily_trends(conn, previous_start, previous_end, settings)
         except (TypeError, ValueError, FileNotFoundError, RuntimeError, sqlite3.Error):
             compared_trends = []
-    glance_projected, _glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
+    glance_projected, glance_end, glance_basis, _glance_impact = financial_engine(household_context).project_bill(
         billing_summary,
         settings,
     )
@@ -7429,7 +7475,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary, historical_trends)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary, historical_trends, glance_end)}
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -7903,9 +7949,13 @@ def write_html(
     .home-forecast-main small {{ margin-top:8px; color:var(--muted); font-size:12px; line-height:1.4; }}
     .home-forecast-grid {{ display:grid; gap:10px; }}
     .home-forecast-detail {{ display:grid; gap:4px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
-    .home-forecast-detail span,.home-forecast-detail strong {{ display:block; }}
+    .home-forecast-detail span,.home-forecast-detail strong,.home-forecast-detail small {{ display:block; }}
     .home-forecast-detail span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .home-forecast-detail strong {{ font-size:20px; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }}
+    .home-forecast-detail small {{ color:var(--muted); font-size:12px; line-height:1.35; }}
+    .home-forecast-delta-up strong {{ color:var(--warn); }}
+    .home-forecast-delta-down strong {{ color:var(--good); }}
+    .home-forecast-delta-neutral strong {{ color:var(--text); }}
     .home-historical-trend-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
     .home-historical-trend-card {{ display:grid; gap:8px; min-height:154px; padding:14px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
     .home-historical-trend-card.improving {{ background:#f3fbf7; border-color:#cce9dc; }}
