@@ -1,5 +1,16 @@
 # Changelog
 
+## POL-004 - Bills Page Cleanup
+
+- Reorganised Bills into a clearer homeowner flow: bill summary first, then
+  bill explanation, what changed, and cost-saving actions.
+- Promoted the projected bill to the strongest visual element and tightened
+  the supporting financial summary so secondary numbers read more cleanly.
+- Simplified the bill-change area by keeping largest contributors prominent
+  and merging positive/negative change summaries into a quieter companion card.
+- Added a Bills action section that ends the page with action-first
+  recommendations while preserving the full detailed bill breakdown on Bills.
+
 ## POL-002 - Home Bill Forecast Handoff
 
 - Simplified the Home Bill Forecast so it now focuses on current spend,

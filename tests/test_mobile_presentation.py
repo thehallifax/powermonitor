@@ -689,6 +689,140 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Supply charge", html)
         self.assertIn("Solar export credit", html)
 
+    def test_bills_page_follows_financial_flow_and_ends_with_actions(self):
+        settings = report.load_settings()
+        summary = report.Summary(
+            start=date(2026, 6, 1),
+            end=date(2026, 7, 31),
+            supply_days=61,
+            intervals=1,
+            reading_days=61,
+            grid_import_kwh=512.0,
+            import_cost=140.0,
+            supply_cost=38.0,
+            total_cost=178.0,
+            export_credit=14.0,
+            net_cost=164.0,
+            solar_generated_kwh=320.0,
+            solar_used_kwh=210.0,
+            solar_exported_kwh=110.0,
+            self_consumption_pct=65.6,
+            solar_export_pct=34.4,
+            peak_cost_share_pct=28.0,
+            ev_charging_kwh=24.0,
+            ev_charging_cost=7.5,
+            ev_charging_source="estimated",
+            actual_ev_charging_kwh=0.0,
+            actual_ev_charging_cost=0.0,
+            actual_ev_tariff_breakdown={},
+            actual_ev_cost_partial=False,
+            ev_session_analytics={},
+            average_daily_grid_import_kwh=8.4,
+            average_daily_solar_generation_kwh=5.2,
+            average_daily_net_cost=2.69,
+            buckets={
+                "overnight": {"kwh": 120.0, "cost": 22.0},
+                "off_peak": {"kwh": 98.0, "cost": 18.0},
+                "super_off_peak": {"kwh": 55.0, "cost": 8.0},
+                "peak": {"kwh": 239.0, "cost": 39.2},
+            },
+        )
+        plan = {
+            "savings": 18.0,
+            "difference": -18.0,
+            "recommendation": "Shift more usage into lower-cost hours and keep reviewing the EV Add On plan.",
+            "solar_export_value_difference": 4.5,
+            "current_plan": {
+                "net_bill": 164.0,
+                "display_name": "Synergy EV Add On",
+                "ev_charging_cost": 7.5,
+                "household_usage_cost": 132.5,
+            },
+            "comparison_plan": {
+                "net_bill": 182.0,
+                "display_name": "Synergy Home Plan",
+                "ev_charging_cost": 19.0,
+                "household_usage_cost": 141.0,
+            },
+        }
+        recommendations = [
+            {
+                "recommendation_id": "bill-1",
+                "title": "Move charging later",
+                "recommended_action": "Shift EV charging after 9 pm.",
+                "rationale": "Most of the recent extra cost came from higher evening demand.",
+                "confidence": "High",
+                "urgency": {"value": "high"},
+                "category": {"value": "bills", "label": "Bills"},
+                "financial_impact": {"billing_period": 14.0},
+            },
+            {
+                "recommendation_id": "bill-2",
+                "title": "Trim cooling",
+                "recommended_action": "Reduce evening air conditioning by one hour.",
+                "rationale": "Peak usage is driving a larger share of the bill this period.",
+                "confidence": "Medium",
+                "urgency": {"value": "medium"},
+                "category": {"value": "efficiency", "label": "Efficiency"},
+                "financial_impact": {"billing_period": 8.0},
+            },
+        ]
+        bill_change = {
+            "available": True,
+            "narrative": "Your bill is projected to be higher because peak usage and overnight charging increased.",
+            "current_bill": 182.0,
+            "previous_bill": 164.0,
+            "difference": 18.0,
+            "confidence": "High",
+            "contributors": [
+                {"label": "Peak usage increased", "detail": "More usage landed in the expensive evening window.", "impact": 11.0},
+                {"label": "Overnight charging increased", "detail": "More EV charging happened this period.", "impact": 7.0},
+            ],
+            "positive_changes": [
+                {"label": "Solar export credit improved", "impact": -3.5},
+            ],
+            "negative_changes": [
+                {"label": "General household consumption increased", "impact": 9.5},
+            ],
+        }
+        comparison = {
+            "period_b": {
+                "kind": "previous_billing_period",
+                "label": "Previous billing period",
+                "start": "2026-04-01",
+                "end": "2026-05-31",
+            },
+            "deltas": {
+                "net_cost": 18.0,
+                "grid_import_kwh": 35.0,
+                "solar_generated_kwh": -12.0,
+                "peak_cost": 9.5,
+                "self_consumption_pct": -2.1,
+                "ev_charging_kwh": 10.0,
+            },
+        }
+
+        html = report.bills_page_html(
+            summary,
+            182.0,
+            plan,
+            recommendations,
+            None,
+            bill_change,
+            comparison,
+            settings,
+        )
+
+        self.assertLess(html.index("How much is my bill?"), html.index("Why is it that amount?"))
+        self.assertLess(html.index("Why is it that amount?"), html.index("Why has my bill changed?"))
+        self.assertLess(html.index("Why has my bill changed?"), html.index("What can I do about it?"))
+        self.assertIn("Projected bill", html)
+        self.assertIn("$182.00", html)
+        self.assertIn("Largest contributors", html)
+        self.assertIn("Detailed bill calculations", html)
+        self.assertIn("Shift EV charging after 9 pm.", html)
+        self.assertIn("Reduce evening air conditioning by one hour.", html)
+
     def test_home_timeline_caps_rows_at_three(self):
         timeline = EnergyTimeline(
             date="2026-07-08",
