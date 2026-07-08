@@ -683,11 +683,11 @@ class MobilePresentationTests(unittest.TestCase):
             },
         )
 
-        html = report.summary_html("Current billing period", summary, settings)
+        html = report.advanced_bill_details_html(summary, settings)
 
         self.assertIn("Import cost", html)
         self.assertIn("Supply charge", html)
-        self.assertIn("Solar export credit", html)
+        self.assertIn("Solar exported", html)
 
     def test_bills_page_follows_financial_flow_and_ends_with_actions(self):
         settings = report.load_settings()
@@ -820,7 +820,10 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("$182.00", html)
         self.assertIn("Largest contributors", html)
         self.assertIn("Current billing period breakdown", html)
+        self.assertIn("Current bill summary", html)
         self.assertIn("Detailed bill calculations", html)
+        self.assertIn("Tariff charts", html)
+        self.assertIn("Advanced bill details", html)
         self.assertIn("bills-breakdown-grid", html)
         self.assertIn("bills-detail-calculation-grid", html)
         self.assertIn("Grid energy", html)
@@ -833,6 +836,15 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("▼ -2.1%", html)
         self.assertIn("Shift EV charging after 9 pm.", html)
         self.assertIn("Reduce evening air conditioning by one hour.", html)
+        self.assertLess(html.index("Current bill summary"), html.index("Why has my bill changed?"))
+        self.assertLess(html.index("Why has my bill changed?"), html.index("What is driving the bill?"))
+        self.assertLess(html.index("What is driving the bill?"), html.index("Compared with previous billing period"))
+        self.assertLess(html.index("Compared with previous billing period"), html.index("Could a different plan reduce this bill?"))
+        self.assertLess(html.index("Could a different plan reduce this bill?"), html.index("What can I do about it?"))
+        self.assertLess(html.index("What can I do about it?"), html.index("Advanced bill details"))
+        breakdown_block = html[html.index("Current billing period breakdown"):html.index("What is driving the bill?")]
+        self.assertNotIn("Detailed bill calculations", breakdown_block)
+        self.assertNotIn("Tariff charts", breakdown_block)
 
     def test_home_timeline_caps_rows_at_three(self):
         timeline = EnergyTimeline(

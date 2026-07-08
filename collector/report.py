@@ -2198,6 +2198,39 @@ def summary_html(title: str, summary: Summary, settings: Settings) -> str:
       <div class="metrics bills-breakdown-grid">{headline_cards}</div>
       <p class="scenario-note">Start here: the bill estimate, daily run-rate, peak exposure, and solar credit usually explain the household story fastest.</p>
       <div class="insights">{insights}</div>
+    </section>
+    """
+
+
+def advanced_bill_details_html(summary: Summary, settings: Settings) -> str:
+    detail_cards = "".join(
+        [
+            metric("Total before export credit", money(summary.total_cost), "Import plus daily supply", "cost"),
+            metric("Grid import", kwh(summary.grid_import_kwh), "Energy drawn from the grid", "grid"),
+            metric("Import cost", money(summary.import_cost), "Usage charges by tariff", "cost"),
+            metric(
+                "Supply charge",
+                money(summary.supply_cost),
+                f"{money(settings.supply_charge_per_day)}/day x {summary.supply_days}",
+                "supply",
+            ),
+            metric("Solar generated", kwh(summary.solar_generated_kwh), "Total rooftop production", "solar"),
+            metric("Solar used directly", kwh(summary.solar_used_kwh), "Production consumed at home", "solar"),
+            metric("Solar exported", kwh(summary.solar_exported_kwh), "Sent back to the grid", "export"),
+            metric("Solar self-consumption", f"{summary.self_consumption_pct:.1f}%", "Solar kept and used at home", "solar"),
+            metric("Solar export percentage", f"{summary.solar_export_pct:.1f}%", "Share of generation exported", "export"),
+            metric(
+                ev_energy_label(settings, summary),
+                kwh(summary.ev_charging_kwh),
+                ev_note(settings, summary),
+                "ev",
+            ) if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
+            metric(ev_cost_label(settings, summary), money(summary.ev_charging_cost), ev_note(settings, summary), "ev") if summary.ev_charging_source not in {"home_assistant_ocpp", "ocular_export"} else "",
+        ]
+    )
+    return f"""
+    <section class="report-section compact-section bills-detail-section bills-advanced-section">
+      <div class="section-title"><div><span class="eyebrow">Advanced bill details</span><h2>Tariff and calculation details</h2></div><p>Available when you want the deeper breakdown</p></div>
       {disclosure_html("Detailed bill calculations", "Tariff, solar, EV, and average daily components", f'''
       <div class="metrics bills-detail-calculation-grid">{detail_cards}</div>
       {actual_ev_card_html(summary, settings)}
@@ -5516,14 +5549,22 @@ def financial_highlights_html(summary: Summary, projected_bill_value: float, pla
           <strong>{money(projected_bill_value)}</strong>
           <p>Projection assumes the rest of this bill follows your recent usage pattern.</p>
           <div class="bills-overview-subline">
-            <span>Current spend</span>
-            <strong>{money(summary.net_cost)}</strong>
+            <div>
+              <span>Current spend</span>
+              <strong>{money(summary.net_cost)}</strong>
+            </div>
+            <small>{summary.supply_days} days so far</small>
           </div>
         </div>
-        <div class="bills-overview-side">
-          {metric("Current billing period", money(summary.net_cost), f"{summary.supply_days} days so far", "primary")}
-          {metric("Savings opportunity", saving_text, plan["recommendation"], "good" if plan.get("savings", 0) > 0 else "neutral")}
-          {metric("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad")}
+        <div class="bills-overview-side-summary">
+          <div class="bills-summary-row neutral">
+            <div class="bills-summary-copy"><span>Savings opportunity</span><small>{html.escape(plan["recommendation"])}</small></div>
+            <strong>{html.escape(saving_text)}</strong>
+          </div>
+          <div class="bills-summary-row bad">
+            <div class="bills-summary-copy"><span>Peak usage cost</span><small>{summary.peak_cost_share_pct:.1f}% of import cost</small></div>
+            <strong>{money(summary.buckets["peak"]["cost"])}</strong>
+          </div>
         </div>
       </div>
     </section>
@@ -5542,22 +5583,20 @@ def bills_page_html(
 ) -> str:
     comparison_html_block = comparison_html(comparison) if comparison else ""
     actions_html = bills_actions_html(recommendations, plan)
+    advanced_details_html = advanced_bill_details_html(summary, settings)
     return f"""
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
     {financial_highlights_html(summary, projected_bill_value, plan, recommendations)}
-    <div class="bills-layout-grid bills-layout-grid--explain">
-      {summary_html("Current billing period breakdown", summary, settings)}
-      {bill_attribution_html(summary, plan, settings)}
-    </div>
-    <div class="bills-layout-grid bills-layout-grid--changes">
-      {bill_change_explanation_html(bill_change)}
-      {comparison_html_block}
-    </div>
+    {summary_html("Current billing period breakdown", summary, settings)}
+    {bill_change_explanation_html(bill_change)}
+    {bill_attribution_html(summary, plan, settings)}
+    {comparison_html_block}
     {actual_synergy_bill_html(actual_bill_comparison, settings)}
     <div class="bills-layout-grid bills-layout-grid--actions">
       {plan_comparison_html(plan, car_comparison(settings))}
       {actions_html}
     </div>
+    {advanced_details_html}
     """
 
 
@@ -7350,7 +7389,7 @@ def plan_comparison_html(comparison: dict, car: dict) -> str:
     )
     return f"""
     <section class="report-section compact-section plan-comparison-section bills-detail-section">
-      <div class="section-title"><div><span class="eyebrow">What can I do about it?</span><h2>Could a different plan reduce this bill?</h2></div><p>Same measured usage, configured rates</p></div>
+      <div class="section-title"><div><span class="eyebrow">Plan comparison</span><h2>Could a different plan reduce this bill?</h2></div><p>Same measured usage, configured rates</p></div>
       <div class="bills-plan-grid">
         <div class="bills-plan-hero">
           <span>Current plan</span>
@@ -8346,9 +8385,10 @@ def write_html(
     .bills-overview-hero > strong {{ font-size:48px; line-height:.92; letter-spacing:-.055em; font-variant-numeric:tabular-nums; }}
     .bills-overview-hero > p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.45; max-width:34ch; }}
     .bills-overview-subline {{ display:flex; align-items:flex-end; justify-content:space-between; gap:12px; padding-top:12px; border-top:1px solid var(--line); }}
+    .bills-overview-subline > div {{ display:grid; gap:4px; }}
     .bills-overview-subline strong {{ font-size:22px; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }}
-    .bills-overview-side {{ display:grid; gap:10px; }}
-    .bills-overview-side .metric {{ min-height:0; }}
+    .bills-overview-subline small {{ color:var(--muted); font-size:12px; line-height:1.4; }}
+    .bills-overview-side-summary {{ display:grid; gap:10px; align-content:start; }}
     .bills-breakdown-grid {{ grid-template-columns:minmax(260px,1.4fr) repeat(auto-fit,minmax(220px,1fr)); align-items:stretch; }}
     .bills-breakdown-grid .metric.primary {{ grid-row:span 2; min-height:0; }}
     .bills-detail-calculation-grid {{ grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); align-items:stretch; }}
@@ -8548,6 +8588,7 @@ def write_html(
     .bill-change-ev {{ margin-top:12px; }}
     .bills-actions-section .action-grid {{ grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
     .bills-actions-section .action-card {{ display:grid; align-content:start; min-height:0; }}
+    .bills-advanced-section details + details {{ margin-top:12px; }}
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_home_plan"]:checked) .tariff-preview-card[data-plan="synergy_home_plan"],
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_ev_add_on"]:checked) .tariff-preview-card[data-plan="synergy_ev_add_on"],
     .setup-config-form:has(select[name="current_plan"] option[value="previous_flat_or_home_plan"]:checked) .tariff-preview-card[data-plan="previous_flat_or_home_plan"] {{ display:block; }}
