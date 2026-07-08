@@ -569,14 +569,27 @@ class MobilePresentationTests(unittest.TestCase):
 
         self.assertIn("body:has(#setup-tariff:target) #system", html)
         self.assertIn("body:has(#system-live-data:target) #system", html)
-        self.assertIn("body:has(#recommendations:target) #home", html)
-        self.assertIn("body:has(#timeline:target) #home", html)
+        self.assertIn("body:has(#recommendations:target) #whatif", html)
+        self.assertIn("body:has(#timeline:target) #analytics", html)
         self.assertIn("body:has(#imports:target) #system", html)
         self.assertIn("body:has(#energy-score-explanation:target) #home", html)
         self.assertIn('id="system-live-data"', html)
         self.assertIn('id="system-data-quality"', html)
         self.assertIn('id="energy-score-explanation"', inspect.getsource(report.energy_score_html))
         self.assertIn("revealHashTarget", html)
+
+    def test_report_shell_assigns_full_sections_to_owner_pages(self):
+        source = inspect.getsource(report.write_html)
+        home_block = source[source.index('<section id="home"'):source.index('<section id="bills"')]
+        decisions_block = source[source.index('<section id="whatif"'):source.index('<section id="analytics"')]
+        history_block = source[source.index('<section id="analytics"'):source.index('<section id="system"')]
+
+        self.assertNotIn('id="recommendations"', home_block)
+        self.assertNotIn('id="timeline"', home_block)
+        self.assertIn('id="recommendations"', decisions_block)
+        self.assertIn("recommendation_centre_html", decisions_block)
+        self.assertIn('id="timeline"', history_block)
+        self.assertIn("timeline_html", history_block)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust today's advice?", "Provider status and confidence.")

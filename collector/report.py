@@ -7037,14 +7037,6 @@ def write_html(
   </section>
   <section id="home" class="page">
     {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline)}
-    <div id="recommendations">
-      {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.")}
-      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
-    </div>
-    <div id="timeline">
-      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.")}
-      {timeline_html(display_timeline)}
-    </div>
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -7067,10 +7059,18 @@ def write_html(
   <section id="whatif" class="page">
     {page_heading_html("Decisions", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
     {whatif_page_html(scenarios, plan, recommendation_presentations)}
+    <div id="recommendations">
+      {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.", parent="Decisions")}
+      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
+    </div>
   </section>
   <section id="analytics" class="page">
     {page_heading_html("History", "Daily trends, historical comparison, and larger analytical detail.")}
     {trends_html(trends, settings)}
+    <div id="timeline">
+      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
+      {timeline_html(display_timeline)}
+    </div>
     {comparison_html(comparison) if comparison else ""}
   </section>
   <section id="system" class="page">
@@ -7138,6 +7138,8 @@ def write_html(
     .mobile-shortcuts {{ display:none; }}
     .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
     body:has(.page:target) #home,
+    body:has(#recommendations:target) #home,
+    body:has(#timeline:target) #home,
     body:has(#setup:target) #home,
     body:has(#imports:target) #home,
     body:has(#setup-billing:target) #home,
@@ -7149,10 +7151,10 @@ def write_html(
     body:has(#energy-score-explanation:target) #home,
     body:has([id^="system-provider-"]:target) #home {{ display:none; }}
     body:has(#home:target) #home,
-    body:has(#recommendations:target) #home,
-    body:has(#timeline:target) #home,
     body:has(#home-goals:target) #home,
     body:has(#energy-score-explanation:target) #home,
+    body:has(#recommendations:target) #whatif,
+    body:has(#timeline:target) #analytics,
     body:has(#setup:target) #system,
     body:has(#imports:target) #system,
     body:has(#setup-billing:target) #system,
@@ -7544,12 +7546,12 @@ def write_html(
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
     body:has(#glance:target) .top-nav a[href="#home"],
-    body:has(#recommendations:target) .top-nav a[href="#home"],
     body:has(#bills:target) .top-nav a[href="#bills"],
     body:has(#solar:target) .top-nav a[href="#solar"],
     body:has(#ev:target) .top-nav a[href="#ev"],
     body:has(#whatif:target) .top-nav a[href="#whatif"],
-    body:has(#timeline:target) .top-nav a[href="#home"],
+    body:has(#recommendations:target) .top-nav a[href="#whatif"],
+    body:has(#timeline:target) .top-nav a[href="#analytics"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
     body:has(#imports:target) .top-nav a[href="#system"],
     body:has(#system:target) .top-nav a[href="#system"],
