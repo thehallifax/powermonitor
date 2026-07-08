@@ -36,7 +36,8 @@ meter, MQTT, and Home Assistant integrations contained within their provider
 implementation instead of leaking vendor-specific branches into reports or
 recommendations.
 
-For the broader product direction, see `VISION.md`.
+For the broader product direction, see `VISION.md`. For the current closed
+beta readiness assessment, see `docs/beta-readiness-audit.md`.
 
 ## Home Profile
 

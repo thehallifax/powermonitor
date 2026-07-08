@@ -7232,7 +7232,8 @@ def write_html(
     {whatif_page_html(scenarios, plan, recommendation_presentations, goals)}
     <div id="recommendations">
       {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.", parent="Decisions")}
-      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), goals, household_decisions)}
+      {advisor_centre_html(advisor_explanations.active())}
+      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], [], goals, household_decisions)}
     </div>
   </section>
   <section id="analytics" class="page">
