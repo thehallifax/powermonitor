@@ -608,6 +608,12 @@ class MobilePresentationTests(unittest.TestCase):
         decisions_block = source[source.index('<section id="whatif"'):source.index('<section id="analytics"')]
         history_block = source[source.index('<section id="analytics"'):source.index('<section id="system"')]
 
+        self.assertEqual(source.count('page_heading_html("Recommendation Centre"'), 1)
+        self.assertEqual(source.count("advisor_centre_html(advisor_explanations.active())"), 1)
+        self.assertEqual(source.count("recommendation_centre_html("), 1)
+        self.assertEqual(source.count('page_heading_html("Household History"'), 1)
+        self.assertEqual(source.count("timeline_html(display_timeline)"), 1)
+
         self.assertIn("recommendation_presentations, display_timeline", home_block)
         self.assertNotIn("Background checks", home_block)
         self.assertNotIn("Recommendation Centre", home_block)

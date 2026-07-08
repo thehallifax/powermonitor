@@ -2214,7 +2214,7 @@ def friendly_label(value: object) -> str:
 def page_heading_html(title: str, description: str, parent: str = "Home") -> str:
     return f"""
     <div class="page-heading">
-      <div class="page-breadcrumb"><a href="#home">{html.escape(parent)}</a><span>/</span><strong>{html.escape(title)}</strong></div>
+      <div class="page-breadcrumb"><a href="#home">{html.escape(parent)}</a><span>/</span><strong>Current page</strong></div>
       <h2>{html.escape(title)}</h2>
       <p>{html.escape(description)}</p>
     </div>
