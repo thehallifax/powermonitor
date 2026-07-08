@@ -948,12 +948,13 @@ class MobilePresentationTests(unittest.TestCase):
         home_block = source[source.index('<section id="home"'):source.index('<section id="bills"')]
         decisions_block = source[source.index('<section id="whatif"'):source.index('<section id="analytics"')]
         history_block = source[source.index('<section id="analytics"'):source.index('<section id="system"')]
+        history_helper = inspect.getsource(report.history_page_html)
 
         self.assertEqual(source.count('page_heading_html("Recommendation Centre"'), 1)
         self.assertEqual(source.count("advisor_centre_html(advisor_explanations.active())"), 1)
         self.assertEqual(source.count("recommendation_centre_html("), 1)
-        self.assertEqual(source.count('page_heading_html("Household History"'), 1)
-        self.assertEqual(source.count("timeline_html(display_timeline)"), 1)
+        self.assertEqual(history_helper.count('page_heading_html("Household History"'), 1)
+        self.assertEqual(history_helper.count("timeline_html(display_timeline)"), 1)
 
         self.assertIn("recommendation_presentations, display_timeline", home_block)
         self.assertNotIn("Background checks", home_block)
@@ -967,12 +968,130 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("advisor_centre_html(advisor_explanations.active())", decisions_block)
         self.assertIn("recommendation_centre_html", decisions_block)
         self.assertIn("goals_progress_html(goals or [])", inspect.getsource(report.whatif_page_html))
-        self.assertIn('id="timeline"', history_block)
-        self.assertIn("timeline_html", history_block)
-        self.assertIn("household_insights_html(household_insights)", history_block)
-        self.assertIn("energy_timeline_history_html(energy_timeline)", history_block)
+        self.assertIn("history_page_html(", history_block)
+        self.assertIn('id="timeline"', history_helper)
+        self.assertIn("timeline_html(display_timeline)", history_helper)
+        self.assertIn("household_insights_html(insights)", history_helper)
+        self.assertIn("energy_timeline_history_html(energy_timeline)", history_helper)
+        self.assertIn("history_story_section_html", history_helper)
         self.assertIn("What changed, and why it mattered", inspect.getsource(report.timeline_html))
-        self.assertNotIn("comparison_html(comparison)", history_block)
+        self.assertNotIn("comparison_html(comparison)", history_helper)
+
+    def test_history_page_starts_with_homeowner_story_and_keeps_full_history(self):
+        trends = [
+            report.DailyTrend(
+                day=date(2026, 7, 6),
+                grid_import_kwh=14.0,
+                solar_generated_kwh=8.0,
+                solar_exported_kwh=2.0,
+                import_cost=5.0,
+                export_credit=0.4,
+                net_cost=6.2,
+                ev_charging_kwh=0.0,
+                ev_charging_source="estimated",
+            ),
+            report.DailyTrend(
+                day=date(2026, 7, 7),
+                grid_import_kwh=18.0,
+                solar_generated_kwh=10.0,
+                solar_exported_kwh=3.0,
+                import_cost=7.0,
+                export_credit=0.6,
+                net_cost=8.9,
+                ev_charging_kwh=5.5,
+                ev_charging_source="estimated",
+            ),
+        ]
+        historical = report.HistoricalTrendsEngine().build(
+            [
+                {"day": date(2026, 7, 1), "net_cost": 6.0, "grid_import_kwh": 13.0, "solar_generated_kwh": 8.0, "solar_exported_kwh": 2.0},
+                {"day": date(2026, 7, 2), "net_cost": 6.2, "grid_import_kwh": 13.5, "solar_generated_kwh": 8.5, "solar_exported_kwh": 2.2},
+                {"day": date(2026, 7, 3), "net_cost": 6.4, "grid_import_kwh": 14.0, "solar_generated_kwh": 9.0, "solar_exported_kwh": 2.4},
+                {"day": date(2026, 7, 4), "net_cost": 6.3, "grid_import_kwh": 14.2, "solar_generated_kwh": 9.1, "solar_exported_kwh": 2.1},
+                {"day": date(2026, 7, 5), "net_cost": 6.1, "grid_import_kwh": 13.8, "solar_generated_kwh": 8.8, "solar_exported_kwh": 2.0},
+                {"day": date(2026, 7, 6), "net_cost": 6.2, "grid_import_kwh": 14.0, "solar_generated_kwh": 8.0, "solar_exported_kwh": 2.0},
+                {"day": date(2026, 7, 7), "net_cost": 8.9, "grid_import_kwh": 18.0, "solar_generated_kwh": 10.0, "solar_exported_kwh": 3.0},
+            ],
+            as_of=date(2026, 7, 8),
+        )
+        insights = [
+            HouseholdInsight(
+                insight_id="solar_shift",
+                headline="Solar covered more of the household load than normal.",
+                explanation="The latest solar day kept more generation at home than recent days usually do.",
+                comparison_period="Recent solar days",
+                confidence="Medium",
+                supporting_values={"Latest": "10.0 kWh", "Average": "8.9 kWh"},
+                topic="solar",
+                usefulness=10.0,
+            )
+        ]
+        energy_timeline = EnergyTimeline(
+            date="2026-07-08",
+            is_in_progress=True,
+            summary="A few notable events shaped the latest day.",
+            events=[
+                EnergyTimelineEvent(
+                    event_type="peak_usage_interval",
+                    local_time="19:30",
+                    title="Peak usage interval",
+                    explanation="Grid import increased during the evening.",
+                    confidence="medium",
+                    sort_time="2026-07-08T19:30:00",
+                ),
+                EnergyTimelineEvent(
+                    event_type="solar_started",
+                    local_time="08:10",
+                    title="Solar started",
+                    explanation="Rooftop solar began covering part of the household load.",
+                    confidence="high",
+                    sort_time="2026-07-08T08:10:00",
+                ),
+            ],
+        )
+        timeline = DecisionTimeline(
+            entries=[
+                TimelineEntry(
+                    timestamp="2026-07-08T19:30:00+08:00",
+                    title="Peak usage interval",
+                    summary="Grid import increased during the evening.",
+                    financial_impact="$2.10 extra",
+                    confidence="Medium",
+                    evidence_sources=["Household data"],
+                    event_type="billing_cost",
+                ),
+                TimelineEntry(
+                    timestamp="2026-07-07T12:10:00+08:00",
+                    title="Solar covered more load",
+                    summary="Solar covered more of the household load than normal.",
+                    financial_impact="$1.20 saved",
+                    confidence="High",
+                    evidence_sources=["Household data"],
+                    event_type="solar_event",
+                ),
+            ]
+        )
+
+        html = report.history_page_html(
+            trends,
+            report.load_settings(),
+            insights,
+            energy_timeline,
+            timeline,
+            historical,
+        )
+
+        self.assertIn("Recent household story", html)
+        self.assertIn("What happened recently?", html)
+        self.assertIn("Was the latest day normal?", html)
+        self.assertIn("Daily cost", html)
+        self.assertIn("Grid import", html)
+        self.assertIn("Solar generation", html)
+        self.assertIn("Estimated overnight EV charging", html)
+        self.assertIn("Household History", html)
+        self.assertIn("What changed, and why it mattered", html)
+        self.assertLess(html.index("Recent household story"), html.index("Household History"))
+        self.assertIn("Yesterday -", html)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust today's advice?", "Provider status and confidence.")
@@ -1060,7 +1179,7 @@ class MobilePresentationTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("Tuesday, 30 Jun", html)
+        self.assertIn("Tuesday - higher-cost activity stood out", html)
         self.assertIn('class="timeline-stamp"', html)
         self.assertIn("Billing Period Updated", html)
         self.assertNotIn("billing_period_updated", html)

@@ -2504,6 +2504,50 @@ def trends_html(trends: list[DailyTrend], settings: Settings) -> str:
     """
 
 
+def history_page_html(
+    trends: list[DailyTrend],
+    settings: Settings,
+    insights: list[HouseholdInsight],
+    energy_timeline: Optional[EnergyTimeline],
+    display_timeline: DecisionTimeline,
+    historical_trends: Optional[HistoricalTrends] = None,
+) -> str:
+    return f"""
+    {page_heading_html("History", "The household story over time, including what happened recently, what looked unusual, and what it meant.")}
+    {history_story_section_html(trends, settings, insights, historical_trends)}
+    {energy_timeline_history_html(energy_timeline)}
+    {history_comparison_summary_html(historical_trends, insights)}
+    {household_insights_html(insights)}
+    {trends_html(trends, settings)}
+    <div id="timeline">
+      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
+      {timeline_html(display_timeline)}
+    </div>
+    """
+
+
+def history_page_html(
+    trends: list[DailyTrend],
+    settings: Settings,
+    insights: list[HouseholdInsight],
+    energy_timeline: Optional[EnergyTimeline],
+    display_timeline: DecisionTimeline,
+    historical_trends: Optional[HistoricalTrends] = None,
+) -> str:
+    return f"""
+    {page_heading_html("History", "The household story over time, including what changed, what looked unusual, and what it meant.")}
+    {history_story_section_html(trends, settings, insights, historical_trends)}
+    {energy_timeline_history_html(energy_timeline)}
+    {history_comparison_summary_html(historical_trends, insights)}
+    {household_insights_html(insights)}
+    {trends_html(trends, settings)}
+    <div id="timeline">
+      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
+      {timeline_html(display_timeline)}
+    </div>
+    """
+
+
 def ev_accuracy_html(settings: Settings) -> str:
     if settings.ev_data_source == "ocular_export":
         return """
@@ -3388,20 +3432,71 @@ def timeline_event_icon(event_type: str) -> str:
     return "*"
 
 
-def timeline_event_group(timestamp: str) -> str:
+def timeline_event_datetime(timestamp: str) -> Optional[datetime]:
     try:
-        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-        return parsed.astimezone().strftime("%A, %d %b")
+        return datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).astimezone()
     except ValueError:
-        return "Recent events"
+        return None
+
+
+def timeline_event_group(timestamp: str) -> str:
+    parsed = timeline_event_datetime(timestamp)
+    if parsed is not None:
+        return parsed.strftime("%A, %d %b")
+    return "Recent events"
+
+
+def timeline_group_summary(entries: list[TimelineEntry]) -> str:
+    titles = " ".join(f"{entry.title} {entry.event_type}" for entry in entries[:3]).lower()
+    if any(token in titles for token in ("solar", "export")):
+        return "solar stood out"
+    if any(token in titles for token in ("ev", "charging")):
+        return "EV charging stood out"
+    if any(token in titles for token in ("bill", "cost", "peak", "tariff")):
+        return "higher-cost activity stood out"
+    if any(token in titles for token in ("decision", "recommend", "state")):
+        return "important household changes"
+    return "worth a closer look"
+
+
+def timeline_group_heading(day_label: str, entries: list[TimelineEntry]) -> str:
+    if not entries:
+        return day_label
+    parsed = timeline_event_datetime(entries[0].timestamp)
+    if parsed is None:
+        return day_label
+    local_day = parsed.date()
+    today = local_today()
+    if local_day == today:
+        return "Today - still in progress"
+    if local_day == today - timedelta(days=1):
+        return f"Yesterday - {timeline_group_summary(entries)}"
+    return f"{parsed.strftime('%A')} - {timeline_group_summary(entries)}"
 
 
 def timeline_time_label(timestamp: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-        return parsed.astimezone().strftime("%H:%M")
-    except ValueError:
-        return str(timestamp or "Time unknown")
+    parsed = timeline_event_datetime(timestamp)
+    if parsed is not None:
+        return parsed.strftime("%H:%M")
+    return str(timestamp or "Time unknown")
+
+
+def timeline_grouped_entries(entries: list[TimelineEntry]) -> list[tuple[str, list[TimelineEntry]]]:
+    groups: list[tuple[str, list[TimelineEntry]]] = []
+    current_key: Optional[str] = None
+    current_entries: list[TimelineEntry] = []
+    for entry in entries:
+        key = timeline_event_group(entry.timestamp)
+        if key != current_key:
+            if current_entries:
+                groups.append((current_key or "Recent events", current_entries))
+            current_key = key
+            current_entries = [entry]
+        else:
+            current_entries.append(entry)
+    if current_entries:
+        groups.append((current_key or "Recent events", current_entries))
+    return groups
 
 
 def timeline_html(timeline: DecisionTimeline) -> str:
@@ -3413,36 +3508,33 @@ def timeline_html(timeline: DecisionTimeline) -> str:
         </section>
         """
     rows = []
-    current_group = None
-    for entry in timeline.entries:
-        group = timeline_event_group(entry.timestamp)
-        if group != current_group:
-            current_group = group
-            rows.append(f'<div class="timeline-day">{html.escape(group)}</div>')
-        impact = (
-            f'<small>{html.escape(entry.financial_impact)}</small>'
-            if entry.financial_impact
-            else "<small>Financial impact unavailable</small>"
-        )
-        sources = ", ".join(customer_source(source) for source in entry.evidence_sources) if entry.evidence_sources else "No sources"
-        kind = customer_label(friendly_label(entry.event_type))
-        rows.append(
-            f"""
-            <article class="timeline-entry">
-              <div class="timeline-stamp"><span aria-hidden="true">{html.escape(timeline_event_icon(entry.event_type))}</span><time>{html.escape(timeline_time_label(entry.timestamp))}</time></div>
-              <div>
-                <span>{html.escape(entry.confidence)} confidence</span>
-                <h3>{html.escape(entry.title)}</h3>
-                <p>{html.escape(entry.summary)}</p>
-                <div class="timeline-meta">
-                  {impact}
-                  <small>{html.escape(kind)}</small>
-                  <small>Sources: {html.escape(sources)}</small>
-                </div>
-              </div>
-            </article>
-            """
-        )
+    for day_label, day_entries in timeline_grouped_entries(timeline.entries):
+        rows.append(f'<div class="timeline-day">{html.escape(timeline_group_heading(day_label, day_entries))}</div>')
+        for entry in day_entries:
+            impact = (
+                f'<small>{html.escape(entry.financial_impact)}</small>'
+                if entry.financial_impact
+                else "<small>Financial impact unavailable</small>"
+            )
+            sources = ", ".join(customer_source(source) for source in entry.evidence_sources) if entry.evidence_sources else "No sources"
+            kind = customer_label(friendly_label(entry.event_type))
+            rows.append(
+                f"""
+                <article class="timeline-entry">
+                  <div class="timeline-stamp"><span aria-hidden="true">{html.escape(timeline_event_icon(entry.event_type))}</span><time>{html.escape(timeline_time_label(entry.timestamp))}</time></div>
+                  <div>
+                    <span>{html.escape(entry.confidence)} confidence</span>
+                    <h3>{html.escape(entry.title)}</h3>
+                    <p>{html.escape(entry.summary)}</p>
+                    <div class="timeline-meta">
+                      {impact}
+                      <small>{html.escape(kind)}</small>
+                      <small>Sources: {html.escape(sources)}</small>
+                    </div>
+                  </div>
+                </article>
+                """
+            )
     return f"""
     <section class="report-section timeline-section">
       <div class="section-title">
@@ -3637,6 +3729,153 @@ def home_best_next_action_html(primary_items: list[BriefingPriority], secondary_
     """
 
 
+def history_story_metric(
+    trends: Optional[HistoricalTrends],
+    group_name: str,
+    metric_id: str,
+) -> Optional[HistoricalTrendMetric]:
+    if not trends:
+        return None
+    group = getattr(trends, group_name, None)
+    if not group or not getattr(group, "available", False):
+        return None
+    metric = group.metrics.get(metric_id)
+    if not historical_trend_metric_ready(metric):
+        return None
+    return metric
+
+
+def history_story_headline(latest: DailyTrend, historical_trends: Optional[HistoricalTrends]) -> str:
+    metric = history_story_metric(historical_trends, "cost", "rolling_7_day_average_cost")
+    if metric and metric.comparison_value and metric.value:
+        delta = float(metric.comparison_value) - float(metric.value)
+        pct = abs(delta / float(metric.value)) * 100 if float(metric.value) else 0.0
+        if pct >= 10:
+            return f"Yesterday was {'more' if delta > 0 else 'less'} expensive than usual."
+        return "Yesterday looked close to your usual daily cost."
+    return f"{latest.day.strftime('%A')} shows the latest household pattern."
+
+
+def history_story_comparison_sentence(historical_trends: Optional[HistoricalTrends]) -> str:
+    cost_metric = history_story_metric(historical_trends, "cost", "rolling_7_day_average_cost")
+    grid_metric = history_story_metric(historical_trends, "grid", "rolling_7_day_average_import")
+    solar_metric = history_story_metric(historical_trends, "solar", "rolling_7_day_average_generation")
+    parts = []
+    if cost_metric and cost_metric.comparison_value and cost_metric.value:
+        delta = float(cost_metric.comparison_value) - float(cost_metric.value)
+        if abs(delta) >= 0.5:
+            parts.append(
+                f"Daily cost was {abs(delta / float(cost_metric.value)) * 100:.0f}% {'above' if delta > 0 else 'below'} your recent average."
+            )
+    if grid_metric and grid_metric.comparison_value and grid_metric.value:
+        delta = float(grid_metric.comparison_value) - float(grid_metric.value)
+        if abs(delta) >= 0.5:
+            parts.append(f"Grid import was {'higher' if delta > 0 else 'lower'} than usual.")
+    if solar_metric and solar_metric.comparison_value and solar_metric.value:
+        delta = float(solar_metric.comparison_value) - float(solar_metric.value)
+        if abs(delta) >= 0.5:
+            parts.append(f"Solar generation was {'stronger' if delta > 0 else 'weaker'} than usual.")
+    return " ".join(parts) or "Recent household history is available, and the latest day looks close to normal."
+
+
+def history_story_detail(
+    latest: DailyTrend,
+    settings: Settings,
+    insights: list[HouseholdInsight],
+    historical_trends: Optional[HistoricalTrends],
+) -> str:
+    parts = [history_story_comparison_sentence(historical_trends)]
+    if float(latest.solar_generated_kwh or 0.0) > 0:
+        parts.append(f"Solar generated {kwh(latest.solar_generated_kwh)} and exported {kwh(latest.solar_exported_kwh)}.")
+    if float(latest.ev_charging_kwh or 0.0) > 0:
+        parts.append(f"{ev_energy_label(settings)} was {kwh(latest.ev_charging_kwh)}.")
+    if insights:
+        parts.append(trust_wording(insights[0].headline))
+    return " ".join(part for part in parts if part).strip()
+
+
+def history_story_metrics_html(latest: DailyTrend, settings: Settings) -> str:
+    cards = [
+        metric("Daily cost", money(latest.net_cost), latest.day.strftime("%A"), "primary"),
+        metric("Grid import", kwh(latest.grid_import_kwh), "Electricity bought from the grid", "grid"),
+    ]
+    if float(latest.solar_generated_kwh or 0.0) > 0:
+        cards.append(metric("Solar generation", kwh(latest.solar_generated_kwh), "Rooftop production", "solar"))
+    if float(latest.ev_charging_kwh or 0.0) > 0:
+        cards.append(metric(ev_energy_label(settings), kwh(latest.ev_charging_kwh), "Latest day", "ev"))
+    if float(latest.solar_exported_kwh or 0.0) > 0:
+        cards.append(metric("Export", kwh(latest.solar_exported_kwh), "Sent back to the grid", "export"))
+    return "".join(cards)
+
+
+def history_story_section_html(
+    trends: list[DailyTrend],
+    settings: Settings,
+    insights: list[HouseholdInsight],
+    historical_trends: Optional[HistoricalTrends] = None,
+) -> str:
+    latest = trends[-1] if trends else None
+    if latest is None:
+        return """
+        <section class="report-section compact-section history-story-section">
+          <div class="section-title"><div><span class="eyebrow">Recent household story</span><h2>No recent household story is ready yet.</h2></div></div>
+          <p class="notice">Once PowerMonitor has enough daily history, this page will summarise what happened recently and how it compared with normal.</p>
+        </section>
+        """
+    return f"""
+    <section class="report-section compact-section history-story-section">
+      <div class="section-title"><div><span class="eyebrow">Recent household story</span><h2>{html.escape(history_story_headline(latest, historical_trends))}</h2></div><p>{html.escape(latest.day.strftime('%A, %d %b %Y'))}</p></div>
+      <p class="scenario-note">{html.escape(history_story_detail(latest, settings, insights, historical_trends))}</p>
+      <div class="metrics history-story-metrics">{history_story_metrics_html(latest, settings)}</div>
+    </section>
+    """
+
+
+def history_comparison_cards(trends: Optional[HistoricalTrends]) -> list[str]:
+    specs = [
+        ("cost", "rolling_7_day_average_cost", "Daily cost", "7-day average", False, "Shows whether the latest day cost more or less than usual."),
+        ("grid", "rolling_7_day_average_import", "Grid import", "7-day average", False, "Shows whether the household relied on the grid more than usual."),
+        ("solar", "rolling_7_day_average_generation", "Solar generation", "7-day average", True, "Shows whether rooftop solar did more or less work than usual."),
+        ("exports", "rolling_7_day_average_exports", "Solar exports", "7-day average", True, "Shows whether more spare solar was sent to the grid."),
+    ]
+    cards = []
+    for group_name, metric_id, title, comparison_label, higher_is_better, explanation in specs:
+        metric_value = history_story_metric(trends, group_name, metric_id)
+        if metric_value:
+            cards.append(
+                historical_trend_card_html(
+                    metric_value,
+                    title=title,
+                    comparison_label=comparison_label,
+                    higher_is_better=higher_is_better,
+                    explanation=explanation,
+                )
+            )
+    return cards
+
+
+def history_comparison_summary_html(
+    historical_trends: Optional[HistoricalTrends],
+    insights: list[HouseholdInsight],
+    limit: int = 3,
+) -> str:
+    cards = history_comparison_cards(historical_trends)[:limit]
+    if not cards and not insights:
+        return ""
+    insight_note = (
+        f"<p class=\"scenario-note\">{html.escape(trust_wording(insights[0].explanation))}</p>"
+        if insights
+        else ""
+    )
+    return f"""
+    <section class="report-section compact-section history-comparison-section">
+      <div class="section-title"><div><span class="eyebrow">Compared with usual</span><h2>Was the latest day normal?</h2></div><p>{len(cards)} comparison{'s' if len(cards) != 1 else ''}</p></div>
+      <div class="home-historical-trend-grid history-comparison-grid">{''.join(cards)}</div>
+      {insight_note}
+    </section>
+    """
+
+
 def energy_timeline_home_html(timeline: Optional[EnergyTimeline], limit: int = 6) -> str:
     if not timeline or not timeline.events:
         return """
@@ -3675,10 +3914,30 @@ def energy_timeline_home_html(timeline: Optional[EnergyTimeline], limit: int = 6
 def energy_timeline_history_html(timeline: Optional[EnergyTimeline], limit: int = 8) -> str:
     if not timeline:
         return ""
+    events = sorted(
+        timeline.events,
+        key=lambda event: str(getattr(event, "sort_time", "") or getattr(event, "local_time", "")),
+        reverse=True,
+    )[:limit]
+    rows = "".join(
+        f"""
+        <article class="home-timeline-row history-preview-row">
+          <div class="timeline-stamp"><span aria-hidden="true">{html.escape(str(getattr(event, "icon", "") or "•"))}</span><time>{html.escape(str(getattr(event, "local_time", "")))}</time></div>
+          <div>
+            <span>{html.escape(str(getattr(event, "confidence", "") or "Current").title())} confidence</span>
+            <strong>{html.escape(str(getattr(event, "title", "")))}</strong>
+            <p>{html.escape(str(getattr(event, "explanation", "")))}</p>
+          </div>
+        </article>
+        """
+        for event in events
+    )
+    progress = "Still in progress" if timeline.is_in_progress else "Latest completed day"
     return f"""
     <section class="report-section compact-section energy-timeline-history">
-      <div class="section-title"><div><span class="eyebrow">Today</span><h2>Energy timeline</h2></div><p>Moved from Home for a shorter daily briefing</p></div>
-      {energy_timeline_home_html(timeline, limit=limit)}
+      <div class="section-title"><div><span class="eyebrow">Recent activity</span><h2>What happened recently?</h2></div><p>{html.escape(progress)}</p></div>
+      <p class="scenario-note">{html.escape(timeline.summary)}</p>
+      <div class="home-timeline-list history-timeline-preview">{rows}</div>
     </section>
     """
 
@@ -7577,14 +7836,7 @@ def write_html(
     </div>
   </section>
   <section id="analytics" class="page">
-    {page_heading_html("History", "Daily trends, historical comparison, and larger analytical detail.")}
-    {trends_html(trends, settings)}
-    {household_insights_html(household_insights)}
-    {energy_timeline_history_html(energy_timeline)}
-    <div id="timeline">
-      {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
-      {timeline_html(display_timeline)}
-    </div>
+    {history_page_html(trends, settings, household_insights, energy_timeline, display_timeline, historical_trends)}
   </section>
   <section id="system" class="page">
     {page_heading_html("Settings", "Setup, imports, provider status, confidence, and privacy-safe diagnostics.")}
@@ -7868,6 +8120,10 @@ def write_html(
     .home-timeline-row > div:last-child > span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
     .home-timeline-row strong {{ display:block; margin-top:6px; font-size:15px; letter-spacing:-.02em; }}
     .home-timeline-row p {{ margin:3px 0 0; color:var(--muted); font-size:11px; line-height:1.35; }}
+    .history-story-section .metrics {{ margin-top:14px; }}
+    .history-comparison-grid {{ margin-top:14px; }}
+    .history-timeline-preview .home-timeline-row {{ background:#f8fbf9; }}
+    .history-preview-row strong {{ margin-top:4px; }}
     .home-change-block .notice {{ margin:0; }}
     .energy-timeline-list {{ display:grid; grid-template-columns:1fr; gap:10px; }}
     .energy-timeline-card {{ display:grid; grid-template-columns:64px 1fr; gap:14px; align-items:start; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:16px; }}

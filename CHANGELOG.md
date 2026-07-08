@@ -1,5 +1,15 @@
 # Changelog
 
+## POL-005 - History Page Transformation
+
+- Reworked History into a clearer homeowner flow with a new recent household
+  story summary, compact recent-activity section, and comparison summary
+  before the deeper historical detail.
+- Kept the full household timeline and historical trend detail available, but
+  moved them below the story layer so the page reads less like a raw event log.
+- Improved timeline day headings so they read more like household context than
+  plain dates while preserving the existing event ordering and deep links.
+
 ## POL-004 - Bills Page Cleanup
 
 - Reorganised Bills into a clearer homeowner flow: bill summary first, then
