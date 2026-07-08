@@ -2195,11 +2195,11 @@ def summary_html(title: str, summary: Summary, settings: Settings) -> str:
         <p>{summary.start.strftime("%d %b %Y")} <span>to</span> {summary.end.strftime("%d %b %Y")}</p>
       </div>
       {no_data}
-      <div class="metrics">{headline_cards}</div>
+      <div class="metrics bills-breakdown-grid">{headline_cards}</div>
       <p class="scenario-note">Start here: the bill estimate, daily run-rate, peak exposure, and solar credit usually explain the household story fastest.</p>
       <div class="insights">{insights}</div>
       {disclosure_html("Detailed bill calculations", "Tariff, solar, EV, and average daily components", f'''
-      <div class="metrics">{detail_cards}</div>
+      <div class="metrics bills-detail-calculation-grid">{detail_cards}</div>
       {actual_ev_card_html(summary, settings)}
       ''')}
       {disclosure_html("Tariff charts", "Grid import and cost by tariff bucket", f'''
@@ -5283,19 +5283,20 @@ def evidence_trail_html(advisor: Advisor) -> str:
 
 def bill_attribution_html(summary: Summary, plan: dict, settings: Settings) -> str:
     current = plan["current_plan"]
+    rows = [
+        bills_summary_row_html("Grid energy", money(summary.import_cost), kwh(summary.grid_import_kwh), "grid"),
+        bills_summary_row_html("Household usage cost", money(current["household_usage_cost"]), "Grid cost excluding EV charging", "cost"),
+        bills_summary_row_html("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad"),
+        bills_summary_row_html("Supply charge", money(summary.supply_cost), f"{money(summary.supply_cost / summary.supply_days)}/day", "supply"),
+        bills_summary_row_html("EV charging cost", money(summary.ev_charging_cost), ev_cost_label(settings, summary), "ev"),
+        bills_summary_row_html("Export credit", f"-{money(summary.export_credit)}", kwh(summary.solar_exported_kwh), "credit"),
+        bills_summary_row_html("Plan savings/loss", signed_money(-plan["difference"]), plan["recommendation"], "good" if plan["savings"] > 0 else "bad" if plan["savings"] < 0 else "neutral"),
+    ]
     return f"""
     <section class="report-section compact-section bills-detail-section">
       <div class="section-title"><div><span class="eyebrow">Bill attribution</span><h2>What is driving the bill?</h2></div><p>Biggest bill components first</p></div>
       <p class="scenario-note">This splits the estimated bill into the parts a household can usually act on: grid energy, fixed supply charge, solar export credit, EV charging, and peak usage.</p>
-      <div class="metrics">
-        {metric("Grid energy", money(summary.import_cost), kwh(summary.grid_import_kwh), "grid")}
-        {metric("Supply charge", money(summary.supply_cost), f"{money(summary.supply_cost / summary.supply_days)}/day", "supply")}
-        {metric("Export credit", f"-{money(summary.export_credit)}", kwh(summary.solar_exported_kwh), "credit")}
-        {metric("EV charging cost", money(summary.ev_charging_cost), ev_cost_label(settings, summary), "ev")}
-        {metric("Household usage cost", money(current["household_usage_cost"]), "Grid cost excluding EV charging", "cost")}
-        {metric("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad")}
-        {metric("Plan savings/loss", signed_money(-plan["difference"]), plan["recommendation"], "good" if plan["savings"] > 0 else "bad" if plan["savings"] < 0 else "neutral")}
-      </div>
+      <div class="bills-summary-list">{''.join(rows)}</div>
     </section>
     """
 
@@ -5438,10 +5439,11 @@ def bill_change_explanation_html(explanation: Optional[dict], compact: bool = Fa
       <div class="section-title"><div><span class="eyebrow">What changed?</span><h2>Why has my bill changed?</h2></div><p>Largest contributors first</p></div>
       <p class="scenario-note">{html.escape(str(explanation.get("narrative") or ""))}</p>
       <div class="metrics bill-change-metrics">{metrics}</div>
-      <div class="bill-change-grid">
+      <div class="bill-change-grid bill-change-grid-story">
         <div class="bill-change-card main"><h3>Largest contributors</h3>{contributor_rows}</div>
         <div class="bill-change-card bill-change-card-summary">
           <h3>Change summary</h3>
+          <div class="bill-change-summary-grid">
           <div class="bill-change-summary-block">
             <span>Reduced cost</span>
             {positive_rows}
@@ -5449,6 +5451,7 @@ def bill_change_explanation_html(explanation: Optional[dict], compact: bool = Fa
           <div class="bill-change-summary-block">
             <span>Added cost</span>
             {negative_rows}
+          </div>
           </div>
         </div>
       </div>
@@ -5481,16 +5484,17 @@ def bill_change_small_list_html(items: list[dict], empty_label: str, tone: str =
 def ev_bill_explanation_html(ev: dict) -> str:
     petrol = ev.get("petrol_equivalent_cost")
     petrol_text = money(float(petrol)) if petrol is not None else "Not configured"
+    rows = [
+        bills_summary_row_html("Total EV energy", kwh(float(ev.get("total_energy_kwh") or 0.0)), "Actual charger data", "ev"),
+        bills_summary_row_html("Charging cost", money(float(ev.get("charging_cost") or 0.0)), "Approximate electricity cost", "cost"),
+        bills_summary_row_html("If all Peak", money(float(ev.get("cost_if_all_peak") or 0.0)), "Same energy at Peak rate", "bad"),
+        bills_summary_row_html("Off-peak saving", money(float(ev.get("savings_vs_peak") or 0.0)), "Compared with all-Peak charging", "good"),
+        bills_summary_row_html("Petrol equivalent", petrol_text, "Uses configured vehicle efficiency and fuel price", "supply"),
+    ]
     return f"""
     <div class="bill-change-ev">
       <div class="chart-heading"><h3>EV charging explanation</h3><span>{html.escape(str(ev.get("source") or "charger data").replace("_", " "))}</span></div>
-      <div class="metrics">
-        {metric("Total EV energy", kwh(float(ev.get("total_energy_kwh") or 0.0)), "Actual charger data", "ev")}
-        {metric("Charging cost", money(float(ev.get("charging_cost") or 0.0)), "Approximate electricity cost", "cost")}
-        {metric("If all Peak", money(float(ev.get("cost_if_all_peak") or 0.0)), "Same energy at Peak rate", "bad")}
-        {metric("Off-peak saving", money(float(ev.get("savings_vs_peak") or 0.0)), "Compared with all-Peak charging", "good")}
-        {metric("Petrol equivalent", petrol_text, "Uses configured vehicle efficiency and fuel price", "supply")}
-      </div>
+      <div class="bills-summary-list bills-summary-list-compact">{''.join(rows)}</div>
     </div>
     """
 
@@ -7307,29 +7311,21 @@ def comparison_html(comparison: dict) -> str:
         if comparison["period_b"]["kind"] == "previous_billing_period"
         else "Compared with selected period"
     )
-
-    def delta_card(title: str, value: float, formatter, lower_is_better: bool = False) -> str:
-        tone = "neutral"
-        if value:
-            positive = value < 0 if lower_is_better else value > 0
-            tone = "good" if positive else "bad"
-        return metric(title, formatter(value), label, tone)
-
-    cards = "".join(
+    rows = "".join(
         [
-            delta_card("Net cost change", deltas["net_cost"], signed_money, True),
-            delta_card("Grid import change", deltas["grid_import_kwh"], signed_kwh, True),
-            delta_card("Solar generation change", deltas["solar_generated_kwh"], signed_kwh),
-            delta_card("Peak cost change", deltas["peak_cost"], signed_money, True),
-            delta_card("Solar self-consumption change", deltas["self_consumption_pct"], lambda v: f"{v:+.1f} pp" if v else "0.0 pp"),
-            delta_card("EV charging change", deltas["ev_charging_kwh"], signed_kwh, True),
+            comparison_summary_row_html("Net cost", deltas["net_cost"], signed_money, lower_is_better=True),
+            comparison_summary_row_html("Grid import", deltas["grid_import_kwh"], signed_kwh, lower_is_better=True),
+            comparison_summary_row_html("Solar generation", deltas["solar_generated_kwh"], signed_kwh),
+            comparison_summary_row_html("Peak cost", deltas["peak_cost"], signed_money, lower_is_better=True),
+            comparison_summary_row_html("Self-consumption", deltas["self_consumption_pct"], lambda v: f"{v:+.1f}%"),
+            comparison_summary_row_html("EV charging", deltas["ev_charging_kwh"], signed_kwh, lower_is_better=True),
         ]
     )
     return f"""
     <section class="report-section compact-section comparison-section bills-detail-section">
       <div class="section-title"><div><span class="eyebrow">Period comparison</span><h2>{html.escape(label)}</h2></div>
       <p>{html.escape(comparison["period_b"]["label"])}: {comparison["period_b"]["start"]} to {comparison["period_b"]["end"]}</p></div>
-      <div class="metrics comparison-metrics">{cards}</div>
+      <div class="comparison-summary-list">{rows}</div>
     </section>
     """
 
@@ -7345,23 +7341,70 @@ def plan_comparison_html(comparison: dict, car: dict) -> str:
         if savings < 0
         else "Both plans are about even for this period."
     )
-    detail_rows = f"""
-      <div><span>EV charging cost</span><strong>{money(current["ev_charging_cost"])} / {money(flat["ev_charging_cost"])}</strong></div>
-      <div><span>Household usage cost</span><strong>{money(current["household_usage_cost"])} / {money(flat["household_usage_cost"])}</strong></div>
-      <div><span>Solar export value difference</span><strong>{signed_money(comparison["solar_export_value_difference"])}</strong></div>
-    """
+    detail_rows = "".join(
+        [
+            bills_summary_row_html("EV charging cost", f"{money(current['ev_charging_cost'])} / {money(flat['ev_charging_cost'])}", "Current plan / flat plan", "ev"),
+            bills_summary_row_html("Household usage cost", f"{money(current['household_usage_cost'])} / {money(flat['household_usage_cost'])}", "Current plan / flat plan", "cost"),
+            bills_summary_row_html("Solar export value difference", signed_money(comparison["solar_export_value_difference"]), "Difference between plan models", "credit"),
+        ]
+    )
     return f"""
     <section class="report-section compact-section plan-comparison-section bills-detail-section">
       <div class="section-title"><div><span class="eyebrow">What can I do about it?</span><h2>Could a different plan reduce this bill?</h2></div><p>Same measured usage, configured rates</p></div>
-      <div class="metrics">
-        {metric("Current plan", money(current["net_bill"]), current["display_name"], "primary")}
-        {metric("Flat plan", money(flat["net_bill"]), flat["display_name"], "cost")}
-        {metric("Difference", signed_money(comparison["difference"]), conclusion, "good" if savings > 0 else "bad" if savings < 0 else "neutral")}
+      <div class="bills-plan-grid">
+        <div class="bills-plan-hero">
+          <span>Current plan</span>
+          <strong>{money(current["net_bill"])}</strong>
+          <small>{html.escape(current["display_name"])}</small>
+        </div>
+        <div class="bills-plan-hero secondary">
+          <span>Flat plan</span>
+          <strong>{money(flat["net_bill"])}</strong>
+          <small>{html.escape(flat["display_name"])}</small>
+        </div>
+        <div class="bills-plan-outcome">
+          <span>Difference</span>
+          <strong>{signed_money(comparison["difference"])}</strong>
+          <p>{html.escape(conclusion)}</p>
+        </div>
       </div>
-      <div class="plan-detail-grid">{detail_rows}</div>
+      <div class="bills-summary-list bills-summary-list-compact">{detail_rows}</div>
       <p class="scenario-note">{html.escape(comparison["recommendation"])} These are tariff-model estimates, not actual bill reconciliation.</p>
       <p class="scenario-note">{html.escape(car["message"])}</p>
     </section>
+    """
+
+
+def bills_summary_row_html(label: str, value: str, note: str = "", tone: str = "") -> str:
+    note_html = f"<small>{html.escape(note)}</small>" if note else ""
+    tone_class = f" {html.escape(tone)}" if tone else ""
+    return f"""
+    <div class="bills-summary-row{tone_class}">
+      <div class="bills-summary-copy"><span>{html.escape(label)}</span>{note_html}</div>
+      <strong>{html.escape(value)}</strong>
+    </div>
+    """
+
+
+def comparison_indicator(value: float) -> str:
+    if value > 0:
+        return "▲"
+    if value < 0:
+        return "▼"
+    return "→"
+
+
+def comparison_summary_row_html(title: str, value: float, formatter, lower_is_better: bool = False) -> str:
+    tone = "neutral"
+    if value:
+        improved = value < 0 if lower_is_better else value > 0
+        tone = "good" if improved else "bad"
+    display = formatter(value)
+    return f"""
+    <div class="comparison-summary-row {tone}">
+      <span>{html.escape(title)}</span>
+      <strong>{html.escape(f"{comparison_indicator(value)} {display}")}</strong>
+    </div>
     """
 
 
@@ -8074,7 +8117,7 @@ def write_html(
     .recommendation-controls form {{ display:flex; flex-wrap:wrap; gap:8px; margin:0; }}
     .recommendation-controls button {{ min-height:30px; padding:6px 9px; color:var(--deep-2); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; font-size:11px; font-weight:750; cursor:pointer; }}
     .recommendation-controls button:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
-    .action-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
+    .action-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }}
     .action-card {{ padding:17px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
     .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
     .action-card h3 {{ margin:11px 0 5px; font-size:16px; }} .action-card p {{ margin:0; color:var(--muted); font-size:12px; }}
@@ -8187,6 +8230,29 @@ def write_html(
     .plan-detail-grid div {{ padding:13px; background:#f8fbf9; border:1px solid var(--line); border-radius:13px; }}
     .plan-detail-grid span,.plan-detail-grid strong {{ display:block; }} .plan-detail-grid span {{ color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }}
     .plan-detail-grid strong {{ margin-top:6px; font-size:16px; letter-spacing:-.025em; }}
+    .bills-summary-list {{ display:grid; gap:10px; margin-top:14px; }}
+    .bills-summary-list-compact {{ margin-top:12px; }}
+    .bills-summary-row {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:center; padding:12px 14px; background:#fff; border:1px solid var(--line); border-radius:14px; }}
+    .bills-summary-copy span,.bills-summary-copy small {{ display:block; }}
+    .bills-summary-copy span {{ color:var(--ink); font-size:14px; font-weight:750; }}
+    .bills-summary-copy small {{ margin-top:3px; color:var(--muted); font-size:11px; line-height:1.4; }}
+    .bills-summary-row strong {{ text-align:right; white-space:nowrap; font-size:20px; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }}
+    .bills-summary-row.good strong {{ color:var(--green); }}
+    .bills-summary-row.bad strong {{ color:var(--red); }}
+    .bills-summary-row.credit strong {{ color:#2d7a63; }}
+    .comparison-summary-list {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:14px; }}
+    .comparison-summary-row {{ display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-radius:14px; }}
+    .comparison-summary-row span {{ color:var(--ink); font-size:13px; font-weight:750; }}
+    .comparison-summary-row strong {{ white-space:nowrap; font-size:20px; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }}
+    .comparison-summary-row.good strong {{ color:var(--green); }}
+    .comparison-summary-row.bad strong {{ color:var(--red); }}
+    .bills-plan-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:14px; }}
+    .bills-plan-hero,.bills-plan-outcome {{ display:grid; gap:6px; padding:16px 18px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .bills-plan-hero span,.bills-plan-outcome span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .bills-plan-hero strong,.bills-plan-outcome strong {{ font-size:30px; line-height:1; letter-spacing:-.05em; font-variant-numeric:tabular-nums; white-space:nowrap; }}
+    .bills-plan-hero small {{ color:var(--muted); font-size:12px; line-height:1.4; }}
+    .bills-plan-hero.secondary {{ background:#f8fbf9; }}
+    .bills-plan-outcome p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.4; }}
     .scenario-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
     .scenario-card {{ min-height:188px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
     .scenario-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
@@ -8269,11 +8335,12 @@ def write_html(
     .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
     .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .home-inline-summary .button-link {{ flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
-    .bills-layout-grid {{ display:grid; grid-template-columns:minmax(0,1.4fr) minmax(280px,.95fr); gap:14px; align-items:start; margin-top:14px; }}
+    .bills-layout-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr)); gap:14px; align-items:start; margin-top:14px; }}
     .bills-layout-grid > .report-section {{ margin-top:0; }}
-    .bills-layout-grid--actions {{ grid-template-columns:minmax(0,1fr) minmax(0,1fr); }}
+    .bills-layout-grid--actions {{ grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); }}
+    .bills-layout-grid--changes {{ grid-template-columns:minmax(0,1fr); }}
     .bills-detail-section .section-title {{ margin-bottom:16px; }}
-    .bills-overview-grid {{ display:grid; grid-template-columns:minmax(0,1.2fr) minmax(280px,.8fr); gap:14px; }}
+    .bills-overview-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:14px; }}
     .bills-overview-hero {{ display:grid; gap:12px; padding:22px; background:#fff; border:1px solid var(--line); border-radius:22px; }}
     .bills-overview-hero > span,.bills-overview-subline span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .bills-overview-hero > strong {{ font-size:48px; line-height:.92; letter-spacing:-.055em; font-variant-numeric:tabular-nums; }}
@@ -8282,6 +8349,12 @@ def write_html(
     .bills-overview-subline strong {{ font-size:22px; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }}
     .bills-overview-side {{ display:grid; gap:10px; }}
     .bills-overview-side .metric {{ min-height:0; }}
+    .bills-breakdown-grid {{ grid-template-columns:minmax(260px,1.4fr) repeat(auto-fit,minmax(220px,1fr)); align-items:stretch; }}
+    .bills-breakdown-grid .metric.primary {{ grid-row:span 2; min-height:0; }}
+    .bills-detail-calculation-grid {{ grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); align-items:stretch; }}
+    .bills-breakdown-grid .metric,.bills-detail-calculation-grid .metric {{ min-height:0; }}
+    .bills-breakdown-grid .metric strong,.bills-detail-calculation-grid .metric strong {{ white-space:nowrap; overflow-wrap:normal; word-break:normal; font-variant-numeric:tabular-nums; }}
+    .bills-breakdown-grid .metric small,.bills-detail-calculation-grid .metric small {{ max-width:none; }}
     .home-forecast-summary {{ display:grid; grid-template-columns:minmax(0,1.15fr) minmax(260px,.85fr); gap:12px; }}
     .home-forecast-main {{ display:grid; align-content:start; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
     .home-forecast-main span,.home-forecast-main strong,.home-forecast-main small {{ display:block; }}
@@ -8453,10 +8526,12 @@ def write_html(
     .tariff-preview-card dd {{ margin:3px 0 0; color:var(--ink); font-size:13px; font-weight:850; }}
     .tariff-window-list {{ margin-top:10px; }}
     .tariff-window-list ul {{ margin:6px 0 0 18px; padding:0; color:var(--muted); font-size:12px; }}
-    .bill-change-grid {{ display:grid; grid-template-columns:2fr 1fr; gap:12px; margin-top:14px; }}
+    .bill-change-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:12px; margin-top:14px; }}
     .bill-change-card,.bill-change-ev {{ padding:14px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
     .bill-change-card h3 {{ margin:0 0 10px; font-size:14px; }}
+    .bill-change-grid-story .bill-change-card.main {{ grid-column:1 / -1; }}
     .bill-change-card-summary {{ display:grid; gap:14px; }}
+    .bill-change-summary-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }}
     .bill-change-summary-block {{ display:grid; gap:8px; }}
     .bill-change-summary-block > span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
     .bill-change-row {{ display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:16px; padding:14px 0; border-top:1px solid var(--line); }}
@@ -8471,6 +8546,8 @@ def write_html(
     .bill-change-list {{ display:grid; gap:8px; margin:0; padding:0; list-style:none; }}
     .bill-change-list li {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; padding:9px 10px; background:#f8fbf9; border:1px solid var(--line); border-radius:10px; }}
     .bill-change-ev {{ margin-top:12px; }}
+    .bills-actions-section .action-grid {{ grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
+    .bills-actions-section .action-card {{ display:grid; align-content:start; min-height:0; }}
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_home_plan"]:checked) .tariff-preview-card[data-plan="synergy_home_plan"],
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_ev_add_on"]:checked) .tariff-preview-card[data-plan="synergy_ev_add_on"],
     .setup-config-form:has(select[name="current_plan"] option[value="previous_flat_or_home_plan"]:checked) .tariff-preview-card[data-plan="previous_flat_or_home_plan"] {{ display:block; }}
@@ -8486,7 +8563,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

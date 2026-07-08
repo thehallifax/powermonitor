@@ -10,6 +10,16 @@
 - Improved timeline day headings so they read more like household context than
   plain dates while preserving the existing event ordering and deep links.
 
+## POL-004 - Bills Layout Polish
+
+- Flattened Bill Attribution into a cleaner scan-friendly summary list so the
+  cost drivers read more like a financial dashboard and less like stacked
+  report cards.
+- Replaced the previous-period comparison card stack with a compact comparison
+  summary that keeps the same deltas while making changes easier to scan.
+- Tightened the plan-comparison and EV explanation layouts so supporting bill
+  details stay available without dominating the page.
+
 ## POL-004 - Bills Page Cleanup
 
 - Reorganised Bills into a clearer homeowner flow: bill summary first, then
