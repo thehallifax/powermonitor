@@ -1,5 +1,21 @@
 # Changelog
 
+## UX-005 - Navigation and Page Ownership Cleanup
+
+- Tightened page ownership so Home now stays a compact daily briefing with a
+  top recommendation preview, a short History preview, capped goal progress,
+  and direct links into Bills, EV, Solar, Decisions, and History.
+- Wired Home to use the existing recommendation and timeline data for those
+  previews instead of leaving that detail stranded on longer pages.
+- Removed the advisor/background-check slab from the full Recommendation
+  Centre so Decisions focuses on decision content rather than duplicate
+  support material.
+- Removed bill comparison duplication from History so full bill explanation
+  and reconciliation stay owned by Bills.
+- Added regression coverage that checks Home receives the preview datasets,
+  Decisions owns the full Recommendation Centre, and History owns the full
+  timeline without re-owning bill comparison.
+
 ## INSIGHT-001 - Energy Timeline
 
 - Added an Energy Timeline engine that turns existing daily readings and EV

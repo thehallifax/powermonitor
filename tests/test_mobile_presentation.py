@@ -584,12 +584,15 @@ class MobilePresentationTests(unittest.TestCase):
         decisions_block = source[source.index('<section id="whatif"'):source.index('<section id="analytics"')]
         history_block = source[source.index('<section id="analytics"'):source.index('<section id="system"')]
 
+        self.assertIn("recommendation_presentations, display_timeline", home_block)
         self.assertNotIn('id="recommendations"', home_block)
         self.assertNotIn('id="timeline"', home_block)
         self.assertIn('id="recommendations"', decisions_block)
         self.assertIn("recommendation_centre_html", decisions_block)
+        self.assertNotIn("advisor_centre_html", inspect.getsource(report.recommendation_centre_html))
         self.assertIn('id="timeline"', history_block)
         self.assertIn("timeline_html", history_block)
+        self.assertNotIn("comparison_html(comparison)", history_block)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust today's advice?", "Provider status and confidence.")

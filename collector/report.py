@@ -3257,7 +3257,6 @@ def recommendation_centre_html(
         else ""
     )
     return f"""
-    {advisor_centre_html(advisors)}
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
         <div><span class="eyebrow">Recommendation centre</span><h2>What should I do next?</h2></div>
@@ -3552,7 +3551,7 @@ def daily_briefing_html(
     actions = home_action_section_html(primary_items)
     secondary = home_secondary_section_html(secondary_items)
     change_note = home_change_note([*primary_items, *secondary_items])
-    goal_progress = goals_progress_html(goals or [])
+    goal_progress = goals_progress_html(goals or [], limit=3)
     return f"""
     <section class="report-section briefing-section">
       {home_assistant_hero_html(briefing)}
@@ -3561,7 +3560,6 @@ def daily_briefing_html(
       {actions}
       {secondary}
       {household_insights_html(insights or [])}
-      {home_trends_records_html(trends_report)}
       <section class="briefing-block home-change-block">
         <div class="section-title"><div><span class="eyebrow">What changed?</span><h2>{html.escape(change_note[0])}</h2></div></div>
         <p class="notice">{html.escape(change_note[1])}</p>
@@ -3906,11 +3904,12 @@ def dedupe_briefing_items(items: list[BriefingPriority]) -> list[BriefingPriorit
     return deduped
 
 
-def goals_progress_html(goals: list[GoalProgress]) -> str:
+def goals_progress_html(goals: list[GoalProgress], limit: Optional[int] = None) -> str:
     if not goals:
         return ""
+    visible_goals = goals[:limit] if limit else goals
     cards = []
-    for goal in goals:
+    for goal in visible_goals:
         progress = f"{goal.progress_pct}%" if goal.progress_pct is not None else "Unknown"
         cards.append(
             f"""
@@ -3930,7 +3929,7 @@ def goals_progress_html(goals: list[GoalProgress]) -> str:
         )
     return f"""
     <section id="home-goals" class="briefing-block">
-      <div class="section-title"><div><span class="eyebrow">Today's Progress</span><h2>{len(goals)} active goal{'s' if len(goals) != 1 else ''}</h2></div></div>
+      <div class="section-title"><div><span class="eyebrow">Today's Progress</span><h2>{len(goals)} active goal{'s' if len(goals) != 1 else ''}</h2></div><p>{'Top priorities only' if limit and len(goals) > limit else 'Current household goals'}</p></div>
       <div class="briefing-grid">{''.join(cards)}</div>
     </section>
     """
@@ -4476,12 +4475,102 @@ def home_page_html(
     trends_report: Optional[HouseholdTrendsReport] = None,
     health: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
+    recommendations: Optional[list[Decision]] = None,
+    timeline: Optional[DecisionTimeline] = None,
 ) -> str:
     return (
         daily_briefing_html(briefing, goals or [], glance, insights, trends_report, health, energy_timeline)
+        + home_recommendation_preview_html(recommendations or [])
+        + home_timeline_preview_html(timeline)
+        + home_navigation_links_html()
         + bill_change_explanation_html(bill_change, compact=True)
-        + setup_progress_card_html(setup)
     )
+
+
+def home_recommendation_preview_html(recommendations: list[Decision]) -> str:
+    if not recommendations:
+        return """
+        <section class="briefing-block home-recommendation-preview">
+          <div class="section-title"><div><span class="eyebrow">Recommendation Preview</span><h2>Nothing needs a deeper decision right now.</h2></div></div>
+          <p class="notice">Use Decisions when you want scenarios and the full recommendation list.</p>
+        </section>
+        """
+    top = sorted(recommendations, key=recommendation_sort_key)[0]
+    return f"""
+    <section class="briefing-block home-recommendation-preview">
+      <div class="section-title"><div><span class="eyebrow">Recommendation Preview</span><h2>Decision detail lives in Decisions.</h2></div><p>Top recommendation only</p></div>
+      <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(top))}">
+        <div class="recommendation-centre-heading">
+          <span class="recommendation-level">{html.escape(recommendation_confidence(top))} confidence</span>
+          <div><small>Category</small><strong>{html.escape(recommendation_category(top).title())}</strong></div>
+        </div>
+        <h3>{html.escape(recommendation_title(top))}</h3>
+        <div class="decision-lines">
+          <p class="primary-action"><strong>What should I check?</strong>{html.escape(recommendation_what_to_check(top))}</p>
+          <p><strong>What happened?</strong>{html.escape(recommendation_what_happened(top))}</p>
+        </div>
+        <div class="provider-action-row">
+          <a class="button-link" href="#recommendations">Open Decisions</a>
+        </div>
+      </article>
+    </section>
+    """
+
+
+def home_timeline_preview_html(timeline: Optional[DecisionTimeline], limit: int = 6) -> str:
+    if not timeline or not timeline.entries:
+        return """
+        <section class="briefing-block home-timeline-preview">
+          <div class="section-title"><div><span class="eyebrow">History Preview</span><h2>No recent household events are ready yet.</h2></div></div>
+          <p class="notice">Open History when PowerMonitor has more timeline events to review.</p>
+        </section>
+        """
+    rows = []
+    for entry in timeline.entries[:limit]:
+        rows.append(
+            f"""
+            <article class="timeline-entry compact">
+              <div class="timeline-stamp"><span aria-hidden="true">{html.escape(timeline_event_icon(entry.event_type))}</span><time>{html.escape(timeline_time_label(entry.timestamp))}</time></div>
+              <div>
+                <span>{html.escape(entry.confidence)} confidence</span>
+                <h3>{html.escape(entry.title)}</h3>
+                <p>{html.escape(entry.summary)}</p>
+              </div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="briefing-block home-timeline-preview">
+      <div class="section-title"><div><span class="eyebrow">History Preview</span><h2>Recent household events</h2></div><p>Latest {min(len(timeline.entries), limit)}</p></div>
+      <div class="timeline-list">{''.join(rows)}</div>
+      <div class="provider-action-row"><a class="button-link" href="#timeline">Open History</a></div>
+    </section>
+    """
+
+
+def home_navigation_links_html() -> str:
+    links = (
+        ("Bills", "#bills", "Bill explanation and tariff comparison"),
+        ("EV", "#ev", "Charging sessions, costs, and EV insights"),
+        ("Solar", "#solar", "Generation, exports, and solar performance"),
+        ("Decisions", "#whatif", "Scenarios, recommendations, and decision support"),
+        ("History", "#analytics", "Timeline and longer-term household history"),
+    )
+    cards = "".join(
+        f"""
+        <a class="home-page-link" href="{href}">
+          <span>{html.escape(label)}</span>
+          <strong>{html.escape(description)}</strong>
+        </a>
+        """
+        for label, href, description in links
+    )
+    return f"""
+    <section class="briefing-block home-links-block">
+      <div class="section-title"><div><span class="eyebrow">Go Deeper</span><h2>Open the page that owns the detail.</h2></div></div>
+      <div class="home-page-link-grid">{cards}</div>
+    </section>
+    """
 
 
 def advisor_home_html(advisor: Advisor) -> str:
@@ -4803,33 +4892,14 @@ def financial_highlights_html(summary: Summary, projected_bill_value: float, pla
         if plan.get("savings", 0) < 0
         else "No plan gap detected"
     )
-    top_recommendation = recommendations[0] if recommendations else None
-    top_action = recommendation_action(top_recommendation) if top_recommendation else "No savings recommendation is active right now."
-    best_action = (
-        best_next_action_html(
-            title=recommendation_title(top_recommendation),
-            action=top_action,
-            reason=recommendation_why(top_recommendation),
-            impact=recommendation_impact(top_recommendation),
-            confidence=f"{recommendation_confidence(top_recommendation)} confidence",
-        )
-        if top_recommendation
-        else best_next_action_html(
-            title="No bill action is needed right now.",
-            action="Review the bill estimate below and check back when new readings or imports arrive.",
-            reason="PowerMonitor has not found a bill or tariff recommendation that needs attention.",
-            confidence="Current recommendation check",
-        )
-    )
     return f"""
-    {best_action}
     <section class="report-section compact-section">
-      <div class="section-title"><div><span class="eyebrow">Financial overview</span><h2>Start here</h2></div><p>Current bill, projection, and next opportunity</p></div>
+      <div class="section-title"><div><span class="eyebrow">Financial overview</span><h2>Start here</h2></div><p>Current bill, projection, and financial summary</p></div>
       <div class="metrics">
         {metric("Current billing period", money(summary.net_cost), f"{summary.start.strftime('%d %b')} to {summary.end.strftime('%d %b %Y')}", "primary")}
         {metric("Projected bill", money(projected_bill_value), "Based on current period run-rate", "cost")}
         {metric("Savings opportunity", saving_text, plan["recommendation"], "good" if plan.get("savings", 0) > 0 else "neutral")}
-        {metric("Next useful action", top_action, "From active recommendations", "solar")}
+        {metric("Peak usage cost", money(summary.buckets["peak"]["cost"]), f"{summary.peak_cost_share_pct:.1f}% of import cost", "bad")}
       </div>
     </section>
     """
@@ -4871,18 +4941,39 @@ def solar_page_html(summary: Summary, recommendations: list) -> str:
             metric("Export percentage", f"{summary.solar_export_pct:.1f}%", "Generation exported", "export"),
         ]
     )
-    rec_html = recommendations_html(solar_recs) if solar_recs else '<p class="notice">No solar-specific recommendation is active for this period. Keep using daytime solar where practical and review this page when new readings arrive.</p>'
+    rec_html = solar_insights_html(solar_recs)
     return f"""
-    {recommendation_best_next_action_html(
-        solar_recs,
-        "No solar-specific action is needed right now.",
-        "Solar generation and self-consumption are still shown below so you can understand how much solar stayed in the home.",
-    )}
     <section class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Solar detail</span><h2>Generation and self-consumption</h2></div><p>Supporting metrics</p></div>
       <div class="metrics">{cards}</div>
     </section>
     {rec_html}
+    """
+
+
+def solar_insights_html(recommendations: list[Decision]) -> str:
+    if not recommendations:
+        return """
+        <section class="report-section compact-section">
+          <div class="section-title"><div><span class="eyebrow">Solar insights</span><h2>No solar-specific insight needs attention.</h2></div></div>
+          <p class="notice">Generation, self-consumption, and export metrics still appear above for this period.</p>
+        </section>
+        """
+    items = "".join(
+        f"""
+        <article class="action-card {html.escape(recommendation_severity(item))}">
+          <span>{html.escape(recommendation_confidence(item))} confidence</span>
+          <h3>{html.escape(recommendation_title(item))}</h3>
+          <p><strong>Why this matters</strong>{html.escape(recommendation_why(item))}</p>
+        </article>
+        """
+        for item in sorted(recommendations, key=recommendation_sort_key)[:2]
+    )
+    return f"""
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Solar insights</span><h2>What stands out in this period?</h2></div><p>Top {min(len(recommendations), 2)}</p></div>
+      <div class="action-grid">{items}</div>
+    </section>
     """
 
 
@@ -4946,13 +5037,6 @@ def ev_page_html(summary: Summary, settings: Settings) -> str:
         </section>
         """
     return f"""
-    {best_next_action_html(
-        title="Use actual charger history when available.",
-        action="Import completed Ocular sessions or connect Home Assistant charger data when you want more confident EV cost advice.",
-        reason="EV recommendations are most useful when PowerMonitor can see completed charging sessions, tariff timing, and delivered energy.",
-        impact=money(summary.ev_charging_cost),
-        confidence="Actual sessions available" if summary.ev_session_analytics.get("available") else "Using fallback estimate",
-    )}
     {ev_source_status_html(summary, settings)}
     {actual_ev_card_html(summary, settings)}
     {ev_session_analytics_html(summary, settings)}
@@ -7036,7 +7120,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline)}
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -7071,7 +7155,6 @@ def write_html(
       {page_heading_html("Household History", "The household events, decisions, outcomes, and confidence changes worth remembering.", parent="History")}
       {timeline_html(display_timeline)}
     </div>
-    {comparison_html(comparison) if comparison else ""}
   </section>
   <section id="system" class="page">
     {page_heading_html("Settings", "Setup, imports, provider status, confidence, and privacy-safe diagnostics.")}
@@ -7406,6 +7489,7 @@ def write_html(
     .timeline-list {{ display:grid; gap:12px; }}
     .timeline-day {{ margin:8px 0 0; color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .timeline-entry {{ display:grid; grid-template-columns:120px 1fr; gap:16px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .timeline-entry.compact {{ grid-template-columns:96px 1fr; gap:12px; padding:14px; }}
     .timeline-stamp {{ display:flex; align-items:center; gap:8px; }}
     .timeline-stamp span {{ display:inline-grid; place-items:center; min-width:28px; height:28px; padding:0; color:#fff; background:var(--deep-2); border-radius:50%; font-size:10px; font-weight:900; letter-spacing:0; }}
     .timeline-entry time {{ color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.06em; text-transform:uppercase; }}
@@ -7474,6 +7558,10 @@ def write_html(
     .provider-action-row button {{ min-height:38px; padding:8px 12px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
     .provider-action-row .button-link {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font-size:12px; font-weight:750; text-decoration:none; }}
     .provider-action-row .button-link.muted {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
+    .home-page-link-grid {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }}
+    .home-page-link {{ display:grid; gap:6px; padding:16px; color:inherit; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .home-page-link span {{ color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }}
+    .home-page-link strong {{ font-size:14px; line-height:1.45; }}
     .provider-action-row button[data-provider-action="remove"],.provider-action-row button[data-provider-action="disable"] {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
     .provider-action-row button[data-provider-action="reset"] {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
     .provider-action-result {{ display:none; padding:11px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
@@ -7640,7 +7728,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
