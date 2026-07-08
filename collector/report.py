@@ -35,6 +35,14 @@ from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.energy_timeline import EnergyTimeline, EnergyTimelineEngine
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
+from engine.historical_trends_engine import (
+    HistoricalTrendMetric,
+    HistoricalTrends,
+    HistoricalTrendsEngine,
+    IMPROVING,
+    UNCHANGED,
+    WORSENING,
+)
 from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
 from engine.household_state_engine import HouseholdStateEngine
 from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
@@ -1615,6 +1623,13 @@ def load_daily_trends(
             )
         )
     return trends
+
+
+def build_historical_trends(conn: sqlite3.Connection, today: date, settings: Settings) -> HistoricalTrends:
+    history_start = today - timedelta(days=30)
+    history_end = today - timedelta(days=1)
+    history = load_daily_trends(conn, history_start, history_end, settings)
+    return HistoricalTrendsEngine().build(history, as_of=today)
 
 
 def load_recommendations(
@@ -4542,6 +4557,7 @@ def home_page_html(
     recommendations: Optional[list[Decision]] = None,
     timeline: Optional[DecisionTimeline] = None,
     billing_summary: Optional[Summary] = None,
+    historical_trends: Optional[HistoricalTrends] = None,
 ) -> str:
     return f"""
     <section class="report-section home-dashboard">
@@ -4550,6 +4566,7 @@ def home_page_html(
       {home_best_next_action_compact_html(briefing)}
       {home_today_timeline_html(energy_timeline)}
       {home_bill_forecast_compact_html(glance, billing_summary)}
+      {historical_trends_home_html(historical_trends)}
       {home_quick_links_html()}
     </section>
     """
@@ -4719,6 +4736,112 @@ def home_bill_forecast_compact_html(glance: Optional[GlanceState], summary: Opti
       </div>
     </section>
     """
+
+
+def historical_trends_home_html(trends: Optional[HistoricalTrends], limit: int = 6) -> str:
+    cards = historical_trend_home_cards(trends)[:limit]
+    if not cards:
+        return ""
+    return f"""
+    <section class="home-dashboard-block home-historical-trends-block">
+      <div class="section-title"><div><span class="eyebrow">Historical trends</span><h2>How yesterday compared with normal.</h2></div><p>{len(cards)} comparisons</p></div>
+      <div class="home-historical-trend-grid">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def historical_trend_home_cards(trends: Optional[HistoricalTrends]) -> list[str]:
+    if not trends:
+        return []
+    specs = [
+        ("cost", "rolling_7_day_average_cost", "Yesterday cost", "7-day average", False, "Lower household cost than normal."),
+        ("cost", "rolling_30_day_average_cost", "Yesterday cost", "30-day average", False, "Shows whether yesterday was cheaper than your recent month."),
+        ("grid", "rolling_7_day_average_import", "Grid import", "7-day average", False, "Less electricity purchased from the grid than normal."),
+        ("grid", "rolling_30_day_average_import", "Grid import", "30-day average", False, "Shows whether grid use is moving away from your recent month."),
+        ("solar", "rolling_7_day_average_generation", "Solar generation", "7-day average", True, "Your solar production was better than usual."),
+        ("exports", "rolling_7_day_average_exports", "Solar exports", "7-day average", True, "Shows whether more solar was sent to the grid than usual."),
+        ("self_consumption", "rolling_average_self_consumption", "Solar used at home", "recent average", True, "More self-consumption means more solar stayed in the home."),
+    ]
+    cards = []
+    for domain_name, metric_id, title, comparison_label, higher_is_better, explanation in specs:
+        group = getattr(trends, domain_name, None)
+        if not group or not getattr(group, "available", False):
+            continue
+        metric = group.metrics.get(metric_id)
+        if not historical_trend_metric_ready(metric):
+            continue
+        cards.append(
+            historical_trend_card_html(
+                metric,
+                title=title,
+                comparison_label=comparison_label,
+                higher_is_better=higher_is_better,
+                explanation=explanation,
+            )
+        )
+    return cards
+
+
+def historical_trend_metric_ready(metric: Optional[HistoricalTrendMetric]) -> bool:
+    if not metric or metric.value is None or metric.comparison_value is None:
+        return False
+    required_days = 10 if "30" in metric.metric_id or metric.metric_id == "rolling_average_self_consumption" else 3
+    return int(metric.sample_days or 0) >= required_days
+
+
+def historical_trend_card_html(
+    metric: HistoricalTrendMetric,
+    *,
+    title: str,
+    comparison_label: str,
+    higher_is_better: bool,
+    explanation: str,
+) -> str:
+    yesterday = float(metric.comparison_value or 0.0)
+    comparison = float(metric.value or 0.0)
+    delta = yesterday - comparison
+    pct = delta / comparison * 100 if comparison else 0.0
+    direction = historical_home_direction(delta, higher_is_better)
+    relation = "above" if delta > 0 else "below" if delta < 0 else "in line with"
+    pct_text = "in line with" if abs(pct) < 0.5 else f"{abs(pct):.0f}% {relation}"
+    return f"""
+      <article class="home-historical-trend-card {html.escape(direction.lower())}">
+        <div class="home-historical-trend-head">
+          <span>{html.escape(title)}</span>
+          <strong>{html.escape(historical_direction_indicator(direction))}</strong>
+        </div>
+        <div class="home-historical-trend-value">{html.escape(format_historical_value(yesterday, metric.unit))}</div>
+        <p>{html.escape(pct_text)} your {html.escape(comparison_label)}</p>
+        <div class="home-historical-trend-meta">
+          <span>Yesterday: {html.escape(format_historical_value(yesterday, metric.unit))}</span>
+          <span>{html.escape(comparison_label.title())}: {html.escape(format_historical_value(comparison, metric.unit))}</span>
+        </div>
+        <small>{html.escape(explanation)}</small>
+      </article>
+    """
+
+
+def historical_home_direction(delta: float, higher_is_better: bool) -> str:
+    if abs(delta) < 0.000001:
+        return UNCHANGED
+    improved = delta > 0 if higher_is_better else delta < 0
+    return IMPROVING if improved else WORSENING
+
+
+def historical_direction_indicator(direction: str) -> str:
+    if direction == IMPROVING:
+        return "▲ Improving"
+    if direction == WORSENING:
+        return "▼ Worsening"
+    return "→ Unchanged"
+
+
+def format_historical_value(value: float, unit: str) -> str:
+    if unit == "$":
+        return money(value)
+    if unit == "%":
+        return f"{value:.0f}%"
+    return kwh(value)
 
 
 def home_quick_links_html() -> str:
@@ -7055,6 +7178,12 @@ def write_html(
                 energy_timeline = build_energy_timeline(timeline_conn, local_today(), settings, now=generated_dt)
         except (FileNotFoundError, RuntimeError, sqlite3.Error):
             energy_timeline = EnergyTimelineEngine().build(day=local_today(), readings=[], settings=settings, now=generated_dt)
+    try:
+        with sqlite3.connect(DB_PATH) as historical_conn:
+            validate_database(historical_conn)
+            historical_trends = build_historical_trends(historical_conn, local_today(), settings)
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        historical_trends = HistoricalTrendsEngine().build([], as_of=local_today())
     overnight_baseload_watts = float(overnight_baseload_watts or 0.0)
     import_sources = setup_import_sources()
     provider_registry = build_provider_registry(
@@ -7300,7 +7429,7 @@ def write_html(
     {glance_page_html(glance)}
   </section>
   <section id="home" class="page">
-    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary)}
+    {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary, historical_trends)}
   </section>
   <section id="bills" class="page">
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
@@ -7777,6 +7906,20 @@ def write_html(
     .home-forecast-detail span,.home-forecast-detail strong {{ display:block; }}
     .home-forecast-detail span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .home-forecast-detail strong {{ font-size:20px; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }}
+    .home-historical-trend-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+    .home-historical-trend-card {{ display:grid; gap:8px; min-height:154px; padding:14px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
+    .home-historical-trend-card.improving {{ background:#f3fbf7; border-color:#cce9dc; }}
+    .home-historical-trend-card.worsening {{ background:#fff5f3; border-color:#f0cec8; }}
+    .home-historical-trend-head {{ display:flex; align-items:center; justify-content:space-between; gap:8px; }}
+    .home-historical-trend-head span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .home-historical-trend-head strong {{ flex:0 0 auto; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:999px; font-size:8px; font-weight:850; letter-spacing:.06em; text-transform:uppercase; }}
+    .home-historical-trend-card.improving .home-historical-trend-head strong {{ color:#226b50; background:#dff4e9; }}
+    .home-historical-trend-card.worsening .home-historical-trend-head strong {{ color:#a74334; background:#ffe3de; }}
+    .home-historical-trend-value {{ font-size:30px; line-height:1; font-weight:850; letter-spacing:-.045em; font-variant-numeric:tabular-nums; }}
+    .home-historical-trend-card p {{ margin:0; color:var(--ink); font-size:13px; line-height:1.35; }}
+    .home-historical-trend-meta {{ display:flex; flex-wrap:wrap; gap:6px; }}
+    .home-historical-trend-meta span {{ padding:4px 7px; color:var(--muted); background:rgba(255,255,255,.7); border:1px solid rgba(0,0,0,.04); border-radius:999px; font-size:9px; font-weight:750; }}
+    .home-historical-trend-card small {{ color:var(--muted); font-size:11px; line-height:1.35; }}
     .home-page-link-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
     .home-page-link {{ display:grid; gap:6px; padding:14px; color:inherit; text-decoration:none; background:#fff; border:1px solid var(--line); border-radius:18px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
     .home-page-link span {{ color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; }}
@@ -7947,7 +8090,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-glance-card,.home-timeline-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
