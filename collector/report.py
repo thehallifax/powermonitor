@@ -7182,6 +7182,7 @@ def system_page_html(
     provider_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
+    battery_comparison: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -7214,6 +7215,7 @@ def system_page_html(
       </div>
       {provider_observations_diagnostics_html(provider_observations)}
       {runtime_check_html(runtime_check)}
+      {battery_dispatch_diagnostics_html(battery_comparison)}
       {provider_runtime_html(provider_runtime)}
       {provider_registry_html(provider_registry)}
       {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
@@ -7259,6 +7261,73 @@ def system_page_html(
     """
 
 
+def battery_dispatch_diagnostics_html(comparison: Optional[dict]) -> str:
+    if not comparison or not comparison.get("diagnostics"):
+        return ""
+    diagnostics = comparison.get("diagnostics") or {}
+    options = diagnostics.get("options") or []
+    recommended_capacity = float((comparison.get("recommended") or {}).get("capacity_kwh") or 0.0)
+    selected = next(
+        (option for option in options if abs(float(option.get("capacity_kwh") or 0.0) - recommended_capacity) < 1e-9),
+        options[0] if options else None,
+    )
+    if not selected:
+        return ""
+    summary = selected.get("summary") or {}
+    totals = summary.get("totals") or {}
+    warnings = summary.get("warnings") or []
+    warning_html = (
+        f"""<div class="notice warning"><strong>Dispatch warnings</strong><ul>{"".join(f"<li>{html.escape(str(item))}</li>" for item in warnings)}</ul></div>"""
+        if warnings
+        else '<p class="scenario-note">No battery dispatch invariant warnings for the selected size.</p>'
+    )
+    rows = []
+    for row in selected.get("daily_rows") or []:
+        rows.append(
+            f"""
+            <tr class="{'warning' if row.get('energy_conservation_check') != 'pass' else ''}">
+              <td>{html.escape(str(row.get("date") or ""))}</td>
+              <td>{kwh(float(row.get("starting_state_of_charge_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("verified_solar_export_available_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("charged_into_battery_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("rejected_solar_because_battery_full_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("peak_import_before_battery_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("other_non_cheapest_import_before_battery_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("cheapest_window_import_before_battery_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("battery_discharge_into_peak_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("battery_discharge_into_other_non_cheapest_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("total_battery_discharge_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("ending_state_of_charge_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("remaining_peak_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("remaining_other_non_cheapest_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("remaining_cheapest_window_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("remaining_solar_export_kwh") or 0.0))}</td>
+              <td>{money(float(row.get("estimated_savings") or 0.0))}</td>
+              <td>{html.escape(str(row.get("energy_conservation_check") or ""))}</td>
+            </tr>
+            """
+        )
+    return f"""
+    <div class="system-card battery-diagnostics">
+      <div class="chart-heading"><h3>Battery dispatch diagnostics</h3><span>Selected size: {html.escape(str(selected.get("label") or ""))}</span></div>
+      <p>{html.escape(str(diagnostics.get("methodology") or ""))}</p>
+      <div class="config-grid">
+        {battery_metric("Solar export", kwh(float(totals.get("verified_solar_export_available_kwh") or 0.0)), "Verified available")}
+        {battery_metric("Charged", kwh(float(totals.get("charged_into_battery_kwh") or 0.0)), "Into battery")}
+        {battery_metric("Discharged", kwh(float(totals.get("total_battery_discharge_kwh") or 0.0)), "From battery")}
+        {battery_metric("Rejected solar", kwh(float(totals.get("rejected_solar_because_battery_full_kwh") or 0.0)), "Battery full")}
+        {battery_metric("Savings", money(float(totals.get("estimated_savings") or 0.0)), "Daily rows total")}
+        {battery_metric("Check", str(summary.get("energy_conservation_check") or "unknown"), "Invariant result")}
+      </div>
+      {warning_html}
+      <div class="battery-diagnostics-table">
+        <table class="responsive-table">
+          <thead><tr><th>Date</th><th>Start SOC</th><th>Solar export</th><th>Charged</th><th>Rejected</th><th>Peak before</th><th>Other before</th><th>Cheapest before</th><th>Peak discharge</th><th>Other discharge</th><th>Total discharge</th><th>End SOC</th><th>Peak left</th><th>Other left</th><th>Cheapest left</th><th>Export left</th><th>Savings</th><th>Check</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>
+    </div>
+    """
 def imports_page_html(
     history: Optional[list[dict]] = None,
     capability_summary=None,
@@ -7585,61 +7654,116 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         if effective_label
         else f"Calculated using {tariff_name} tariff."
     )
-    rows = []
-    rows.append(
-        f"""
-        <tr>
-          <td>No battery</td>
-          <td>{money(float(baseline.get("estimated_bill") or 0.0))}</td>
-          <td>{money(0.0)}</td>
-          <td>{kwh(0.0)}</td>
-          <td>{kwh(0.0)}</td>
-          <td>{kwh(float(baseline.get("remaining_grid_import_kwh") or 0.0))}</td>
-          <td>{kwh(float(baseline.get("remaining_solar_export_kwh") or 0.0))}</td>
-          <td>Baseline</td>
-        </tr>
-        """
-    )
-    for option in options:
-        capacity = float(option.get("capacity_kwh") or 0.0)
-        marker = "Recommended" if abs(capacity - recommended_capacity) < 1e-9 else ""
-        rows.append(
-            f"""
-            <tr>
-              <td>{html.escape(str(option.get("label") or f"{capacity:g} kWh"))}</td>
-              <td>{money(float(option.get("estimated_bill") or 0.0))}</td>
-              <td>{money(float(option.get("period_savings") or 0.0))}<br><span>{money(float(option.get("annualised_savings") or 0.0))}/yr</span></td>
-              <td>{kwh(float(option.get("peak_import_avoided_kwh") or 0.0))}</td>
-              <td>{kwh(float(option.get("other_import_avoided_kwh") or 0.0))}</td>
-              <td>{kwh(float(option.get("remaining_grid_import_kwh") or 0.0))}</td>
-              <td>{kwh(float(option.get("remaining_solar_export_kwh") or 0.0))}</td>
-              <td>{html.escape(marker or f'{float(option.get("capacity_used_pct") or 0.0):.0f}% avg use')}</td>
-            </tr>
-            """
+    rows = [
+        battery_option_row_html(
+            {
+                **baseline,
+                "label": "No battery",
+                "recommendation_signal": "Current baseline",
+                "marginal_savings_to_next_capacity": options[0].get("period_savings") if options else None,
+            },
+            recommended_capacity,
+            baseline=True,
         )
+    ]
+    for option in options:
+        rows.append(battery_option_row_html(option, recommended_capacity))
+    opportunity = comparison.get("opportunity_metrics", {}) or {}
 
     return f"""
     <div class="scenario-insights battery-comparison">
       <div class="chart-heading"><h3>Home battery sizing</h3><span>Tariff-aware actual interval model</span></div>
-      <p>{html.escape(str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period."))}</p>
-      <table class="responsive-table">
+      <p class="battery-conclusion">{html.escape(str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period."))}</p>
+      <div class="battery-metrics">
+        {battery_metric("Solar export available", kwh(float(opportunity.get("average_daily_solar_export_available_kwh") or 0.0)), "Average per day for charging")}
+        {battery_metric("Non-cheapest import", kwh(float(opportunity.get("average_daily_non_cheapest_grid_import_kwh") or 0.0)), "Average daily import a battery can economically offset")}
+        {battery_metric("Battery charged", kwh(float(opportunity.get("average_daily_battery_energy_charged_kwh") or 0.0)), "Average daily charge at recommended size")}
+        {battery_metric("Battery discharged", kwh(float(opportunity.get("average_daily_battery_energy_discharged_kwh") or 0.0)), "Average daily discharge at recommended size")}
+        {battery_metric("Utilisation", f"{float(opportunity.get('average_battery_utilisation_pct') or 0.0):.0f}%", "Average capacity used each day")}
+        {battery_metric("Full / depleted days", f"{int(opportunity.get('days_battery_reached_full_charge') or 0)} / {int(opportunity.get('days_battery_fully_depleted') or 0)}", "Reached full charge / fully discharged")}
+        {battery_metric("Solar export left", kwh(float(opportunity.get("remaining_solar_export_kwh") or 0.0)), "After recommended battery model")}
+        {battery_metric("Next-size gain", money(float(opportunity.get("marginal_savings_to_next_capacity") or 0.0)), "Extra period saving from the next size")}
+      </div>
+      <table class="responsive-table battery-homeowner-table">
         <thead>
           <tr>
-            <th>Option</th>
+            <th>Usable capacity</th>
             <th>Estimated bill</th>
-            <th>Savings</th>
-            <th>Peak avoided</th>
-            <th>Other avoided</th>
-            <th>Import left</th>
-            <th>Export left</th>
+            <th>Period savings</th>
+            <th>Annualised estimate</th>
             <th>Signal</th>
           </tr>
         </thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
       <p class="scenario-note">{html.escape(tariff_note)}</p>
-      <p>{html.escape(str(comparison.get("methodology") or ""))}</p>
+      <p class="scenario-note">{html.escape(str(comparison.get("diagnostics", {}).get("methodology") or comparison.get("methodology") or ""))}</p>
+      {battery_calculation_details_html(comparison)}
     </div>
+    """
+
+
+def battery_option_row_html(option: dict, recommended_capacity: float, baseline: bool = False) -> str:
+    capacity = float(option.get("capacity_kwh") or 0.0)
+    is_recommended = not baseline and abs(capacity - recommended_capacity) < 1e-9
+    signal = str(option.get("recommendation_signal") or ("Current baseline" if baseline else "Limited additional benefit"))
+    capacity_label = "No battery" if baseline else str(option.get("label") or f"{capacity:g} kWh usable")
+    return f"""
+    <tr class="{'recommended' if is_recommended else 'baseline' if baseline else ''}">
+      <td><strong>{html.escape(capacity_label)}</strong></td>
+      <td>{money(float(option.get("estimated_bill") or 0.0))}</td>
+      <td>{money(float(option.get("period_savings") or 0.0))}</td>
+      <td>{money(float(option.get("annualised_savings") or 0.0))}</td>
+      <td><span class="battery-signal">{html.escape(signal)}</span></td>
+    </tr>
+    """
+
+
+def battery_metric(label: str, value: str, note: str) -> str:
+    return f"""
+    <div>
+      <span>{html.escape(label)}</span>
+      <strong>{html.escape(value)}</strong>
+      <small>{html.escape(note)}</small>
+    </div>
+    """
+
+
+def battery_calculation_details_html(comparison: dict) -> str:
+    baseline = comparison.get("baseline", {})
+    options = comparison.get("options", [])
+    rows = [
+        f"""
+        <tr>
+          <td>No battery</td><td>{kwh(0.0)}</td><td>{kwh(0.0)}</td>
+          <td>{kwh(float(baseline.get("remaining_grid_import_kwh") or 0.0))}</td>
+          <td>{kwh(float(baseline.get("remaining_solar_export_kwh") or 0.0))}</td>
+          <td>{money(0.0)}</td>
+        </tr>
+        """
+    ]
+    for option in options:
+        rows.append(
+            f"""
+            <tr>
+              <td>{html.escape(str(option.get("label") or ""))}</td>
+              <td>{kwh(float(option.get("peak_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("other_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("remaining_grid_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("remaining_solar_export_kwh") or 0.0))}</td>
+              <td>{money(float(option.get("marginal_savings_to_next_capacity") or 0.0))}</td>
+            </tr>
+            """
+        )
+    return f"""
+    <details class="battery-calculation-details">
+      <summary>How was this calculated?</summary>
+      <p>{html.escape(str(comparison.get("methodology") or ""))}</p>
+      <table class="responsive-table">
+        <thead><tr><th>Option</th><th>Peak avoided</th><th>Other avoided</th><th>Import left</th><th>Export left</th><th>Next-size gain</th></tr></thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+    </details>
     """
 
 
@@ -8106,7 +8230,7 @@ def write_html(
       {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}
       {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
     </div>
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check)}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check, battery_comparison=scenarios.get("battery_comparison"))}
   </section>
 """
     )
@@ -8483,6 +8607,21 @@ def write_html(
     .scenario-card.bad {{ border-color:#f0cec8; background:#fff5f3; }} .scenario-card.bad strong {{ color:#a74334; }}
     .scenario-insights {{ margin-top:14px; padding:18px; background:#fffaf0; border:1px solid #eeddb0; border-radius:17px; }}
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
+    .battery-conclusion {{ max-width:920px; color:#4c3f1f; font-size:14px; line-height:1.55; }}
+    .battery-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:14px 0; }}
+    .battery-metrics div,.battery-diagnostics .config-grid div {{ padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
+    .battery-metrics span,.battery-metrics strong,.battery-metrics small,.battery-diagnostics .config-grid span,.battery-diagnostics .config-grid strong,.battery-diagnostics .config-grid small {{ display:block; }}
+    .battery-metrics span,.battery-diagnostics .config-grid span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .battery-metrics strong,.battery-diagnostics .config-grid strong {{ margin-top:5px; font-size:18px; letter-spacing:-.025em; white-space:nowrap; }}
+    .battery-metrics small,.battery-diagnostics .config-grid small {{ margin-top:4px; color:var(--muted); font-size:11px; line-height:1.35; }}
+    .battery-homeowner-table td,.battery-homeowner-table th {{ white-space:nowrap; }}
+    .battery-homeowner-table tr.recommended td {{ background:#f3fbf7; }}
+    .battery-homeowner-table tr.baseline td {{ background:#fff; color:var(--muted); }}
+    .battery-signal {{ display:inline-block; padding:4px 8px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:10px; font-weight:850; white-space:nowrap; }}
+    .battery-calculation-details {{ margin-top:12px; padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
+    .battery-calculation-details summary {{ cursor:pointer; font-size:12px; font-weight:850; }}
+    .battery-diagnostics-table {{ overflow-x:auto; margin-top:12px; }}
+    .battery-diagnostics-table table {{ min-width:1500px; }}
     .timeline-list {{ display:grid; gap:12px; }}
     .timeline-day {{ margin:8px 0 0; color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .timeline-entry {{ display:grid; grid-template-columns:120px 1fr; gap:16px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
@@ -8788,7 +8927,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

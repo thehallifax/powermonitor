@@ -100,9 +100,46 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Home battery sizing", markup)
         self.assertIn("No battery", markup)
         self.assertIn("5 kWh usable", markup)
-        self.assertIn("Tariff-aware actual interval model", markup)
+        self.assertIn("Solar export available", markup)
+        self.assertIn("Non-cheapest import", markup)
+        self.assertIn("Battery charged", markup)
+        self.assertIn("Battery discharged", markup)
         self.assertIn("Recommended", markup)
+        self.assertIn("How was this calculated?", markup)
+        self.assertNotIn("<th>Peak avoided</th>", markup.split("How was this calculated?", 1)[0])
         self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 July 2026.", markup)
+
+    def test_battery_comparison_renders_limited_benefit_and_oversized_signals(self):
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 6.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+        )
+        markup = report.scenario_analysis_html(analysis)
+
+        self.assertIn("Limited additional benefit", markup)
+        self.assertIn("Likely oversized for this usage pattern", markup)
+
+    def test_battery_dispatch_diagnostics_view_renders_daily_validation_table(self):
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 8.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 3.0},
+            ],
+        )
+
+        markup = report.battery_dispatch_diagnostics_html(analysis["battery_comparison"])
+
+        self.assertIn("Battery dispatch diagnostics", markup)
+        self.assertIn("Selected size", markup)
+        self.assertIn("Start SOC", markup)
+        self.assertIn("Rejected", markup)
+        self.assertIn("No battery dispatch invariant warnings", markup)
 
     def test_battery_comparison_empty_state_renders_without_fake_savings(self):
         analysis = report.scenario_analysis(summary(), settings(), battery_intervals=[])

@@ -269,8 +269,35 @@ class FinancialEngine:
             option["marginal_savings"] = option["period_savings"] - previous_savings
             previous_savings = option["period_savings"]
             options.append(option)
+        for index, option in enumerate(options):
+            next_option = options[index + 1] if index + 1 < len(options) else None
+            option["marginal_savings_to_next_capacity"] = (
+                next_option["period_savings"] - option["period_savings"]
+                if next_option is not None
+                else None
+            )
 
         recommendation = self._battery_sizing_recommendation(options)
+        self._apply_battery_option_signals(options, recommendation)
+        opportunity = self._battery_opportunity_metrics(options, normalised, days, cheapest_rate)
+        diagnostics = {
+            "methodology": "Daily reset: each day starts at 0 kWh state of charge and does not carry unused energy into the next day.",
+            "options": [
+                {
+                    "capacity_kwh": option["capacity_kwh"],
+                    "label": option["label"],
+                    "signal": option["recommendation_signal"],
+                    "summary": option["diagnostics_summary"],
+                    "daily_rows": option["daily_diagnostics"],
+                }
+                for option in options
+            ],
+            "warnings": [
+                warning
+                for option in options
+                for warning in option["diagnostics_summary"].get("warnings", [])
+            ],
+        }
         data_quality = {
             "intervals": len(normalised),
             "days": len(days),
@@ -321,6 +348,8 @@ class FinancialEngine:
             "baseline": baseline,
             "options": options,
             "recommended": recommendation,
+            "opportunity_metrics": opportunity,
+            "diagnostics": diagnostics,
             "data_quality": data_quality,
         }
 
@@ -698,14 +727,29 @@ class FinancialEngine:
         days_full = 0
         days_depleted = 0
         discharge_buckets: dict[str, float] = {}
+        daily_diagnostics = []
 
-        for day_rows in by_day.values():
+        for day, day_rows in by_day.items():
             daily_export = sum(row["solar_export_kwh"] for row in day_rows)
             daily_stored = min(float(capacity_kwh), daily_export)
+            rejected_solar = max(daily_export - daily_stored, 0.0)
             remaining_state = daily_stored
             stored_solar += daily_stored
             if capacity_kwh > 0 and daily_stored >= float(capacity_kwh) - 1e-9:
                 days_full += 1
+
+            peak_before = sum(row["grid_import_kwh"] for row in day_rows if row["tariff_bucket"] == "peak")
+            other_before = sum(
+                row["grid_import_kwh"]
+                for row in day_rows
+                if row["grid_import_kwh"] > 0 and row["tariff_bucket"] != "peak" and row["rate"] > cheapest_rate + 1e-9
+            )
+            cheapest_before = sum(row["grid_import_kwh"] for row in day_rows if row["grid_import_kwh"] > 0 and row["rate"] <= cheapest_rate + 1e-9)
+            eligible_peak_before = sum(
+                row["grid_import_kwh"]
+                for row in day_rows
+                if row["tariff_bucket"] == "peak" and row["solar_export_kwh"] <= 1e-9
+            )
 
             candidates = [
                 row
@@ -722,21 +766,71 @@ class FinancialEngine:
                 ),
                 reverse=True,
             )
+            day_peak_discharge = 0.0
+            day_other_discharge = 0.0
+            day_avoided_cost = 0.0
             for row in candidates:
                 if remaining_state <= 1e-9:
                     break
                 amount = min(remaining_state, row["grid_import_kwh"])
                 remaining_state -= amount
                 discharged += amount
-                avoided_cost += amount * row["rate"]
+                avoided = amount * row["rate"]
+                avoided_cost += avoided
+                day_avoided_cost += avoided
                 discharge_buckets[row["tariff_bucket"]] = discharge_buckets.get(row["tariff_bucket"], 0.0) + amount
                 if row["tariff_bucket"] == "peak":
                     peak_avoided += amount
+                    day_peak_discharge += amount
                 else:
                     other_avoided += amount
+                    day_other_discharge += amount
 
             if daily_stored > 0 and remaining_state <= 1e-9:
                 days_depleted += 1
+
+            total_day_discharge = day_peak_discharge + day_other_discharge
+            remaining_peak = max(peak_before - day_peak_discharge, 0.0)
+            remaining_other = max(other_before - day_other_discharge, 0.0)
+            day_savings = day_avoided_cost - daily_stored * export_credit_rate
+            checks = []
+            if daily_stored > daily_export + 1e-9:
+                checks.append("charged_more_than_verified_export")
+            if total_day_discharge > daily_stored + 1e-9:
+                checks.append("discharged_more_than_stored")
+            if max(eligible_peak_before - day_peak_discharge, 0.0) > 1e-9 and day_other_discharge > 1e-9:
+                checks.append("other_tariff_served_before_eligible_peak_import")
+            if cheapest_before > 0 and total_day_discharge > peak_before + other_before + 1e-9:
+                checks.append("cheapest_window_discharged")
+            if any(row["solar_export_kwh"] > 1e-9 and row["grid_import_kwh"] > 0 for row in candidates):
+                checks.append("simultaneous_charge_and_discharge")
+            if abs((daily_stored - total_day_discharge) - remaining_state) > 1e-9:
+                checks.append("daily_state_reconciliation_failed")
+            if abs((daily_export - daily_stored) - rejected_solar) > 1e-9:
+                checks.append("solar_export_reconciliation_failed")
+            daily_diagnostics.append(
+                {
+                    "date": day,
+                    "starting_state_of_charge_kwh": 0.0,
+                    "verified_solar_export_available_kwh": daily_export,
+                    "charged_into_battery_kwh": daily_stored,
+                    "rejected_solar_because_battery_full_kwh": rejected_solar,
+                    "peak_import_before_battery_kwh": peak_before,
+                    "other_non_cheapest_import_before_battery_kwh": other_before,
+                    "cheapest_window_import_before_battery_kwh": cheapest_before,
+                    "battery_discharge_into_peak_kwh": day_peak_discharge,
+                    "battery_discharge_into_other_non_cheapest_kwh": day_other_discharge,
+                    "total_battery_discharge_kwh": total_day_discharge,
+                    "ending_state_of_charge_kwh": remaining_state,
+                    "remaining_peak_import_kwh": remaining_peak,
+                    "remaining_other_non_cheapest_import_kwh": remaining_other,
+                    "remaining_cheapest_window_import_kwh": cheapest_before,
+                    "remaining_solar_export_kwh": rejected_solar,
+                    "estimated_savings": day_savings,
+                    "energy_conservation_check": "pass" if not checks else "fail",
+                    "warnings": checks,
+                }
+            )
 
         lost_export_credit = stored_solar * export_credit_rate
         savings = avoided_cost - lost_export_credit
@@ -745,6 +839,7 @@ class FinancialEngine:
         average_daily_utilisation = discharged / modelled_days if modelled_days else 0.0
         capacity_used_pct = average_daily_utilisation / float(capacity_kwh) * 100 if capacity_kwh else 0.0
         annualised = self.projected_annual_cost(savings, modelled_days) if modelled_days else 0.0
+        diagnostics_summary = self._battery_diagnostics_summary(daily_diagnostics)
 
         return {
             "capacity_kwh": float(capacity_kwh),
@@ -767,7 +862,91 @@ class FinancialEngine:
             "remaining_solar_export_kwh": max(float(baseline_solar_exported_kwh) - stored_solar, 0.0),
             "discharge_buckets": discharge_buckets,
             "modelled_days": modelled_days,
+            "daily_diagnostics": daily_diagnostics,
+            "diagnostics_summary": diagnostics_summary,
         }
+
+    def _battery_diagnostics_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        fields = (
+            "verified_solar_export_available_kwh",
+            "charged_into_battery_kwh",
+            "rejected_solar_because_battery_full_kwh",
+            "peak_import_before_battery_kwh",
+            "other_non_cheapest_import_before_battery_kwh",
+            "cheapest_window_import_before_battery_kwh",
+            "battery_discharge_into_peak_kwh",
+            "battery_discharge_into_other_non_cheapest_kwh",
+            "total_battery_discharge_kwh",
+            "ending_state_of_charge_kwh",
+            "remaining_peak_import_kwh",
+            "remaining_other_non_cheapest_import_kwh",
+            "remaining_cheapest_window_import_kwh",
+            "remaining_solar_export_kwh",
+            "estimated_savings",
+        )
+        warnings = [
+            f"{row['date']}: {warning}"
+            for row in rows
+            for warning in row.get("warnings", [])
+        ]
+        return {
+            "days": len(rows),
+            "totals": {field: sum(float(row.get(field) or 0.0) for row in rows) for field in fields},
+            "warnings": warnings,
+            "energy_conservation_check": "pass" if not warnings else "fail",
+        }
+
+    def _battery_opportunity_metrics(
+        self,
+        options: list[dict[str, Any]],
+        intervals: list[dict[str, Any]],
+        days: list[str],
+        cheapest_rate: float,
+    ) -> dict[str, Any]:
+        day_count = len(days)
+        available_export = sum(row["solar_export_kwh"] for row in intervals)
+        non_cheapest_import = sum(
+            row["grid_import_kwh"]
+            for row in intervals
+            if row["grid_import_kwh"] > 0 and row["rate"] > cheapest_rate + 1e-9
+        )
+        recommended = next((option for option in options if option.get("recommendation_signal") == "Recommended"), options[0] if options else {})
+        return {
+            "average_daily_solar_export_available_kwh": available_export / day_count if day_count else 0.0,
+            "average_daily_non_cheapest_grid_import_kwh": non_cheapest_import / day_count if day_count else 0.0,
+            "average_daily_battery_energy_charged_kwh": float(recommended.get("stored_solar_kwh") or 0.0) / day_count if day_count else 0.0,
+            "average_daily_battery_energy_discharged_kwh": float(recommended.get("discharged_kwh") or 0.0) / day_count if day_count else 0.0,
+            "average_battery_utilisation_pct": float(recommended.get("capacity_used_pct") or 0.0),
+            "days_battery_reached_full_charge": int(recommended.get("days_full") or 0),
+            "days_battery_fully_depleted": int(recommended.get("days_depleted") or 0),
+            "remaining_solar_export_kwh": float(recommended.get("remaining_solar_export_kwh") or 0.0),
+            "marginal_savings_to_next_capacity": recommended.get("marginal_savings_to_next_capacity"),
+        }
+
+    def _apply_battery_option_signals(self, options: list[dict[str, Any]], recommendation: dict[str, Any]) -> None:
+        recommended_capacity = float(recommendation.get("capacity_kwh") or 0.0)
+        for option in options:
+            capacity = float(option.get("capacity_kwh") or 0.0)
+            savings = float(option.get("period_savings") or 0.0)
+            next_marginal = option.get("marginal_savings_to_next_capacity")
+            utilisation = float(option.get("capacity_used_pct") or 0.0)
+            if abs(capacity - recommended_capacity) < 1e-9 and recommendation.get("status") == "recommended":
+                signal = "Recommended"
+            elif savings <= 0.005:
+                signal = "Limited additional benefit"
+            elif capacity < recommended_capacity:
+                signal = "Good value"
+            elif next_marginal is None and capacity > recommended_capacity:
+                signal = "Likely oversized for this usage pattern"
+            elif capacity > recommended_capacity and (
+                utilisation < BATTERY_MIN_UTILISATION_PCT
+            ):
+                signal = "Likely oversized for this usage pattern"
+            elif capacity > recommended_capacity:
+                signal = "Limited additional benefit"
+            else:
+                signal = "Good value"
+            option["recommendation_signal"] = signal
 
     def _battery_sizing_recommendation(self, options: list[dict[str, Any]]) -> dict[str, Any]:
         if not options:

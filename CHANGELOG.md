@@ -1,5 +1,21 @@
 # Changelog
 
+## FIN-004 - Battery Model Validation View
+
+- Simplified the Decisions-page battery sizing comparison so homeowners see
+  capacity, estimated bill, period savings, annualised savings, and a computed
+  recommendation signal first.
+- Added battery opportunity metrics for daily solar export available, economic
+  grid import opportunity, average charged/discharged energy, utilisation,
+  full/depleted days, remaining export, and next-size marginal saving.
+- Added per-capacity daily battery dispatch diagnostics with state of charge,
+  charged/rejected solar, import before/after battery, discharge by tariff
+  value, daily savings, and energy-conservation checks.
+- Added a developer-facing battery dispatch diagnostics table under Advanced
+  Diagnostics on Settings/System.
+- Kept the FIN-003 tariff-version note in the homeowner battery comparison and
+  continued exposing tariff metadata in the battery API payload.
+
 ## FIN-003 - Tariff Versioning Foundation
 
 - Added immutable tariff version records with provider, tariff name, version,
