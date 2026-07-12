@@ -1209,7 +1209,8 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Household History", html)
         self.assertIn("What changed, and why it mattered", html)
         self.assertLess(html.index("Recent household story"), html.index("Household History"))
-        self.assertIn("Yesterday -", html)
+        expected_contextual_heading = report.timeline_group_heading("2026-07-07", [timeline.entries[1]])
+        self.assertIn(expected_contextual_heading, html)
 
     def test_page_heading_includes_home_breadcrumb(self):
         html = report.page_heading_html("Can I trust today's advice?", "Provider status and confidence.")

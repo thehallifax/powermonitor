@@ -1,5 +1,37 @@
 # Changelog
 
+## FIN-003 - Tariff Versioning Foundation
+
+- Added immutable tariff version records with provider, tariff name, version,
+  effective dates, supply charge, usage/export rates, windows, source metadata,
+  currency, creation timestamp, and checksum.
+- Added a reusable tariff version store and date resolver that preserves
+  historical versions, closes superseded open-ended versions, and supports
+  multiple providers and overlapping tariff catalogues.
+- Updated report bill calculations, daily trends, tariff comparisons, scenario
+  modelling, and battery modelling to resolve tariff versions by date instead
+  of reading raw current rates directly.
+- Exposed current tariff metadata and battery tariff-version metadata in the
+  dashboard API, and added the Decisions battery note showing the tariff
+  effective date used.
+- Added tests for version creation, replacement, resolver lookups,
+  immutability, historical bill calculation, API metadata, and battery payload
+  metadata.
+
+## FIN-002 - Tariff-Aware Battery Modelling
+
+- Replaced the fixed 10 kWh battery What If card with a Financial Engine-owned
+  battery sizing comparison for no battery, 5, 10, 15, and 20 kWh usable
+  capacities.
+- Added tariff-aware dispatch using actual interval grid-import and verified
+  solar-export readings, with no grid charging, daily state reset, Peak-first
+  discharge, and explicit diminishing-return recommendation logic.
+- Exposed the structured battery comparison in the scenario API payload and
+  rendered a Decisions/What If battery sizing table without changing other
+  dashboard pages or non-battery scenarios.
+- Added unit tests for battery dispatch behaviour, daily reset assumptions,
+  no-solar fallback, diminishing returns, and Decisions-page presentation.
+
 ## POL-005 - History Page Transformation
 
 - Reworked History into a clearer homeowner flow with a new recent household

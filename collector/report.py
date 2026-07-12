@@ -92,6 +92,7 @@ from engine.tariff_catalog import (
     plan_label,
     supported_plan_options,
 )
+from engine.tariff_versioning import TariffResolver, TariffVersion, resolver_for_settings
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -170,6 +171,22 @@ def demo_metadata() -> dict:
 
 def financial_engine(household_context: Optional[HouseholdContext] = None) -> FinancialEngine:
     return FinancialEngine(household_context=household_context)
+
+
+def tariff_resolver(settings: Any) -> TariffResolver:
+    return resolver_for_settings(settings)
+
+
+def tariff_for_date(settings: Any, when: date) -> TariffVersion:
+    return tariff_resolver(settings).resolve(when)
+
+
+def tariff_metadata(settings: Any, when: date) -> dict[str, Any]:
+    return tariff_for_date(settings, when).public_metadata()
+
+
+def human_date(value: date) -> str:
+    return f"{value.day} {value.strftime('%B %Y')}"
 
 
 def charging_advisor(household_context: Optional[HouseholdContext] = None) -> ChargingAdvisor:
@@ -522,6 +539,7 @@ def dashboard_data(
         household_context = context_engine.get_household_context()
         today_summary = load_summary(conn, current_day, current_day, settings)
         period_summary = load_summary(conn, selected.start, selected.end, settings)
+        battery_intervals = battery_dispatch_intervals(context_engine, selected.start, selected.end, settings)
         billing_summary = (
             period_summary
             if selected.start == billing.start and selected.end == billing.end
@@ -549,7 +567,7 @@ def dashboard_data(
         promotion_summary = context_engine.promote_provider_observations()
         actual_bill_comparison = reconcile_latest_synergy_bill(conn, context_engine, settings, household_context)
         bill_reconciliation_summary = context_engine.get_bill_reconciliation_summary()
-    scenarios = scenario_analysis(period_summary, settings)
+    scenarios = scenario_analysis(period_summary, settings, battery_intervals=battery_intervals)
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
     energy_score = build_energy_score(
@@ -846,6 +864,7 @@ def dashboard_data(
         "household_trends": household_trends.as_dict(),
         "tariff_scenario": tariff_scenario(period_summary, settings),
         "plan_comparison": plan,
+        "current_tariff": tariff_metadata(settings, selected.end),
         "bill_change_explanation": bill_change,
         "actual_bill_comparison": actual_bill_comparison,
         "bill_reconciliation": actual_bill_comparison,
@@ -853,6 +872,7 @@ def dashboard_data(
         "latest_synergy_bill": actual_bill_comparison.get("latest_bill") if actual_bill_comparison else None,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
+        "battery_comparison": scenarios["battery_comparison"],
         "timeline": display_timeline.as_dict(),
         "comparison": comparison,
         "advisors": advisors.as_dict(),
@@ -1236,6 +1256,7 @@ def ev_session_analytics(
 
 def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
     measurements = data_engine(conn).get_measurements(start, end)
+    resolver = tariff_resolver(settings)
     totals = measurement_totals(measurements)
     interval_timestamps = {
         measurement.timestamp
@@ -1247,14 +1268,21 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         for bucket in BUCKET_ORDER
     }
     estimated_ev_charging = 0.0
+    finances = financial_engine()
+    export_credit = 0.0
     for measurement in measurements:
+        measurement_day = date.fromisoformat(measurement.timestamp[:10])
+        tariff = resolver.resolve(measurement_day)
+        if measurement.measurement_type == MeasurementType.GRID_EXPORT:
+            export_credit += finances.calculate_export_credit(float(measurement.value or 0.0), tariff.primary_export_rate)
+            continue
         if measurement.measurement_type != MeasurementType.GRID_IMPORT:
             continue
         bucket = str(measurement.attributes.get("tariff_bucket") or "")
         kwh = float(measurement.value or 0.0)
         buckets.setdefault(bucket, {"kwh": 0.0, "cost": 0.0})
         buckets[bucket]["kwh"] += kwh
-        buckets[bucket]["cost"] += kwh * settings.import_rates.get(bucket, 0)
+        buckets[bucket]["cost"] += kwh * tariff.usage_rate(bucket)
         if bucket == "overnight":
             power_w = float(measurement.attributes.get("power_w") or 0.0)
             interval_minutes = float(measurement.attributes.get("interval_minutes") or 15)
@@ -1293,9 +1321,10 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         actual_ev_charging = None
         actual_ev_cost = None
     supply_days = (end - start).days + 1
-    finances = financial_engine()
-    supply_cost = supply_days * settings.supply_charge_per_day
-    export_credit = finances.calculate_export_credit(float(exported), settings.export_credit_rate)
+    supply_cost = sum(
+        resolver.resolve(start + timedelta(days=offset)).supply_charge_per_day
+        for offset in range(supply_days)
+    )
     total_cost = float(import_cost) + supply_cost
     net_cost = finances.calculate_net_bill(float(import_cost), supply_cost, export_credit)
     self_consumption = used / generated * 100 if generated else 0.0
@@ -1329,7 +1358,7 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         ev_charging_cost=(
             actual_ev_cost
             if actual_ev_cost is not None
-            else finances.cost_of_ev_session(float(estimated_ev_charging), settings.import_rates["overnight"])
+            else finances.cost_of_ev_session(float(estimated_ev_charging), resolver.resolve(end).usage_rate("overnight"))
         ),
         ev_charging_source=(
             actual_source if actual_ev_charging is not None else "estimated"
@@ -1346,12 +1375,48 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     )
 
 
+def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
+    resolver = tariff_resolver(settings)
+    grid_rows = {
+        str(row.get("measurement_time")): row
+        for row in engine.get_grid_intervals(start, end)
+    }
+    solar_rows = {
+        str(row.get("measurement_time")): row
+        for row in engine.get_solar_intervals(start, end)
+    }
+    timestamps = sorted(set(grid_rows) | set(solar_rows))
+    intervals = []
+    for timestamp in timestamps:
+        bucket = str(grid_rows.get(timestamp, {}).get("tariff_bucket") or "")
+        tariff = resolver.resolve(date.fromisoformat(timestamp[:10]))
+        intervals.append(
+            {
+            "measurement_time": timestamp,
+            "tariff_bucket": bucket,
+            "import_rate": tariff.usage_rate(bucket),
+            "grid_import_kwh": float(grid_rows.get(timestamp, {}).get("grid_to_home_kwh") or 0.0),
+            "solar_export_kwh": float(solar_rows.get(timestamp, {}).get("solar_to_grid_kwh") or 0.0),
+            "tariff_version_id": tariff.version_id,
+            "tariff_effective_from": tariff.effective_from.isoformat(),
+            "tariff_name": tariff.tariff_name,
+        }
+        )
+    return intervals
+
+
 def tariff_scenario(summary: Summary, settings: Settings) -> dict:
+    resolver = tariff_resolver(settings)
+    comparison_tariff = resolver.resolve(
+        summary.end,
+        provider=str(getattr(settings, "retailer", "") or "Synergy"),
+        tariff_name=plan_label(settings.comparison_plan),
+    )
     rates = settings.comparison_plan_rates
     finances = financial_engine()
-    comparison_import = finances.calculate_import_cost(summary.grid_import_kwh, rates["flat_import_rate"])
-    comparison_supply = summary.supply_days * rates["supply_charge_per_day"]
-    comparison_credit = finances.calculate_export_credit(summary.solar_exported_kwh, rates["export_credit_rate"])
+    comparison_import = finances.calculate_import_cost(summary.grid_import_kwh, comparison_tariff.usage_rate("peak") or rates["flat_import_rate"])
+    comparison_supply = summary.supply_days * comparison_tariff.supply_charge_per_day
+    comparison_credit = finances.calculate_export_credit(summary.solar_exported_kwh, comparison_tariff.primary_export_rate)
     comparison_net = finances.calculate_net_bill(comparison_import, comparison_supply, comparison_credit)
     return {
         "current_plan": settings.current_plan,
@@ -1360,6 +1425,7 @@ def tariff_scenario(summary: Summary, settings: Settings) -> dict:
         "comparison_plan_net_cost": comparison_net,
         "difference": summary.net_cost - comparison_net,
         "estimated_savings": comparison_net - summary.net_cost,
+        "comparison_tariff_version": comparison_tariff.public_metadata(),
     }
 
 
@@ -1372,6 +1438,13 @@ def weighted_average_import_rate(summary: Summary) -> float:
 
 
 def plan_comparison(summary: Summary, settings: Settings) -> dict:
+    resolver = tariff_resolver(settings)
+    current_tariff = resolver.resolve(summary.end)
+    comparison_tariff = resolver.resolve(
+        summary.end,
+        provider=str(getattr(settings, "retailer", "") or "Synergy"),
+        tariff_name=plan_label(settings.comparison_plan),
+    )
     return financial_engine().compare_tariff_plans(
         summary,
         settings.current_plan,
@@ -1389,6 +1462,8 @@ def plan_comparison(summary: Summary, settings: Settings) -> dict:
         },
         current_display_name=plan_label(settings.current_plan),
         comparison_display_name=plan_label(settings.comparison_plan),
+        current_tariff_version=current_tariff,
+        comparison_tariff_version=comparison_tariff,
     )
 
 
@@ -1424,12 +1499,18 @@ def scenario_card(
     }
 
 
-def scenario_analysis(summary: Summary, settings: Settings) -> dict:
+def scenario_analysis(
+    summary: Summary,
+    settings: Settings,
+    battery_intervals: Optional[list[dict[str, Any]]] = None,
+) -> dict:
     actual_bill = summary.net_cost
     ev_kwh = summary.ev_charging_kwh
     ev_actual_cost = summary.ev_charging_cost
-    cheapest_bucket = min(BUCKET_ORDER, key=lambda bucket: settings.import_rates.get(bucket, 0))
-    peak_bucket = max(BUCKET_ORDER, key=lambda bucket: settings.import_rates.get(bucket, 0))
+    current_tariff = tariff_for_date(settings, summary.end)
+    current_rates = current_tariff.usage_rate_map
+    cheapest_bucket = min(BUCKET_ORDER, key=lambda bucket: current_rates.get(bucket, 0))
+    peak_bucket = max(BUCKET_ORDER, key=lambda bucket: current_rates.get(bucket, 0))
 
     scenarios = []
     for scenario_id, title, bucket in (
@@ -1437,7 +1518,7 @@ def scenario_analysis(summary: Summary, settings: Settings) -> dict:
         ("ev_all_overnight", "What if every EV session occurred overnight?", "overnight"),
         ("ev_all_peak", "What if every EV session occurred during Peak?", peak_bucket),
     ):
-        scenario_ev_cost = ev_kwh * settings.import_rates[bucket]
+        scenario_ev_cost = ev_kwh * current_rates[bucket]
         scenarios.append(
             scenario_card(
                 scenario_id,
@@ -1463,7 +1544,7 @@ def scenario_analysis(summary: Summary, settings: Settings) -> dict:
     average_import_rate = weighted_average_import_rate(summary)
     self_consumed_kwh = min(summary.solar_exported_kwh, summary.grid_import_kwh)
     avoided_import_cost = self_consumed_kwh * average_import_rate
-    lost_export_credit = summary.solar_exported_kwh * settings.export_credit_rate
+    lost_export_credit = summary.solar_exported_kwh * current_tariff.primary_export_rate
     scenarios.append(
         scenario_card(
             "solar_export_self_consumed",
@@ -1475,20 +1556,16 @@ def scenario_analysis(summary: Summary, settings: Settings) -> dict:
         )
     )
 
-    battery_shift_kwh = min(10.0, summary.buckets.get("peak", {}).get("kwh", 0.0))
-    battery_savings = battery_shift_kwh * settings.import_rates[peak_bucket] - battery_shift_kwh * settings.export_credit_rate
-    scenarios.append(
-        scenario_card(
-            "battery_shift_peak_imports",
-            "What if a 10 kWh home battery shifted Peak imports to solar?",
-            actual_bill - max(battery_savings, 0.0),
-            actual_bill,
-            scenario_confidence(summary),
-            f"Models up to {kwh(battery_shift_kwh)} of Peak imports avoided by stored solar.",
-        )
+    battery_comparison = financial_engine().compare_home_battery_sizes(
+        battery_intervals or [],
+        settings,
+        baseline_bill=actual_bill,
+        baseline_grid_import_kwh=summary.grid_import_kwh,
+        baseline_solar_exported_kwh=summary.solar_exported_kwh,
+        tariff_version=current_tariff,
     )
 
-    ev_window_cost = ev_kwh * settings.import_rates[cheapest_bucket]
+    ev_window_cost = ev_kwh * current_rates[cheapest_bucket]
     ev_window_savings = max(ev_actual_cost - ev_window_cost, 0.0)
     tariff_usage = summary.ev_session_analytics.get("tariff_usage", {}) if summary.ev_session_analytics else {}
     cheapest_pct = float(tariff_usage.get(cheapest_bucket, {}).get("pct") or 0.0)
@@ -1513,6 +1590,7 @@ def scenario_analysis(summary: Summary, settings: Settings) -> dict:
         "actual_bill": actual_bill,
         "scenarios": scenarios,
         "ev_insights": insights,
+        "battery_comparison": battery_comparison,
     }
 
 
@@ -1567,6 +1645,7 @@ def load_daily_trends(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[DailyTrend]:
     measurements = data_engine(conn).get_measurements(start, end)
+    resolver = tariff_resolver(settings)
     rows: dict[str, dict[str, float]] = {}
     for measurement in measurements:
         day_text = measurement.timestamp[:10]
@@ -1580,11 +1659,12 @@ def load_daily_trends(
                 "ev_charging": 0.0,
             },
         )
+        tariff = resolver.resolve(date.fromisoformat(day_text))
         if measurement.measurement_type == MeasurementType.GRID_IMPORT:
             kwh = float(measurement.value or 0.0)
             bucket = str(measurement.attributes.get("tariff_bucket") or "")
             row["grid_import"] += kwh
-            row["import_cost"] += kwh * settings.import_rates.get(bucket, 0)
+            row["import_cost"] += kwh * tariff.usage_rate(bucket)
             if bucket == "overnight":
                 power_w = float(measurement.attributes.get("power_w") or 0.0)
                 interval_minutes = float(measurement.attributes.get("interval_minutes") or 15)
@@ -1608,7 +1688,8 @@ def load_daily_trends(
         if actual_ev and float(actual_ev.get("energy_kwh") or 0) > 0:
             ev_value = float(actual_ev["energy_kwh"])
             ev_source = actual_ev["source"]
-        export_credit = float(row["exported"]) * settings.export_credit_rate
+        tariff = resolver.resolve(date.fromisoformat(day_text))
+        export_credit = float(row["exported"]) * tariff.primary_export_rate
         trends.append(
             DailyTrend(
                 day=date.fromisoformat(day_text),
@@ -1617,7 +1698,7 @@ def load_daily_trends(
                 solar_exported_kwh=float(row["exported"]),
                 import_cost=float(row["import_cost"]),
                 export_credit=export_credit,
-                net_cost=float(row["import_cost"]) + settings.supply_charge_per_day - export_credit,
+                net_cost=float(row["import_cost"]) + tariff.supply_charge_per_day - export_credit,
                 ev_charging_kwh=ev_value,
                 ev_charging_source=ev_source,
             )
@@ -7476,9 +7557,95 @@ def bills_actions_html(recommendations: list, plan: dict) -> str:
     """
 
 
+def battery_comparison_html(comparison: Optional[dict]) -> str:
+    if not comparison:
+        return ""
+    baseline = comparison.get("baseline", {})
+    options = comparison.get("options", [])
+    recommended = comparison.get("recommended", {})
+    data_quality = comparison.get("data_quality", {})
+    if not comparison.get("available"):
+        reason = data_quality.get("note") or "Battery modelling is unavailable for this period."
+        return f"""
+        <div class="scenario-insights">
+          <div class="chart-heading"><h3>Home battery sizing</h3><span>Actual interval model</span></div>
+          <p>{html.escape(str(reason))}</p>
+        </div>
+        """
+
+    recommended_capacity = float(recommended.get("capacity_kwh") or 0.0)
+    tariff_name = str(comparison.get("tariff_name") or comparison.get("tariff_metadata", {}).get("tariff_name") or "selected tariff")
+    effective_text = str(comparison.get("tariff_effective_from") or comparison.get("tariff_metadata", {}).get("effective_from") or "")
+    try:
+        effective_label = human_date(date.fromisoformat(effective_text))
+    except ValueError:
+        effective_label = effective_text
+    tariff_note = (
+        f"Calculated using {tariff_name} tariff effective from {effective_label}."
+        if effective_label
+        else f"Calculated using {tariff_name} tariff."
+    )
+    rows = []
+    rows.append(
+        f"""
+        <tr>
+          <td>No battery</td>
+          <td>{money(float(baseline.get("estimated_bill") or 0.0))}</td>
+          <td>{money(0.0)}</td>
+          <td>{kwh(0.0)}</td>
+          <td>{kwh(0.0)}</td>
+          <td>{kwh(float(baseline.get("remaining_grid_import_kwh") or 0.0))}</td>
+          <td>{kwh(float(baseline.get("remaining_solar_export_kwh") or 0.0))}</td>
+          <td>Baseline</td>
+        </tr>
+        """
+    )
+    for option in options:
+        capacity = float(option.get("capacity_kwh") or 0.0)
+        marker = "Recommended" if abs(capacity - recommended_capacity) < 1e-9 else ""
+        rows.append(
+            f"""
+            <tr>
+              <td>{html.escape(str(option.get("label") or f"{capacity:g} kWh"))}</td>
+              <td>{money(float(option.get("estimated_bill") or 0.0))}</td>
+              <td>{money(float(option.get("period_savings") or 0.0))}<br><span>{money(float(option.get("annualised_savings") or 0.0))}/yr</span></td>
+              <td>{kwh(float(option.get("peak_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("other_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("remaining_grid_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(option.get("remaining_solar_export_kwh") or 0.0))}</td>
+              <td>{html.escape(marker or f'{float(option.get("capacity_used_pct") or 0.0):.0f}% avg use')}</td>
+            </tr>
+            """
+        )
+
+    return f"""
+    <div class="scenario-insights battery-comparison">
+      <div class="chart-heading"><h3>Home battery sizing</h3><span>Tariff-aware actual interval model</span></div>
+      <p>{html.escape(str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period."))}</p>
+      <table class="responsive-table">
+        <thead>
+          <tr>
+            <th>Option</th>
+            <th>Estimated bill</th>
+            <th>Savings</th>
+            <th>Peak avoided</th>
+            <th>Other avoided</th>
+            <th>Import left</th>
+            <th>Export left</th>
+            <th>Signal</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+      <p class="scenario-note">{html.escape(tariff_note)}</p>
+      <p>{html.escape(str(comparison.get("methodology") or ""))}</p>
+    </div>
+    """
+
+
 def scenario_analysis_html(analysis: dict) -> str:
     scenarios = analysis.get("scenarios", [])
-    if not scenarios:
+    if not scenarios and not analysis.get("battery_comparison"):
         return ""
     cards = []
     for scenario in scenarios:
@@ -7514,6 +7681,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     <section class="report-section scenario-section">
       <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
+      {battery_comparison_html(analysis.get("battery_comparison"))}
       {insights_html}
     </section>
     """
@@ -7580,7 +7748,16 @@ def write_html(
         "current_billing_period", "Current billing period", period_summary.start, period_summary.end
     )
     plan = plan_comparison(period_summary, settings)
-    scenarios = scenario_analysis(period_summary, settings)
+    try:
+        battery_intervals = battery_dispatch_intervals(
+            data_engine(),
+            selected_period.start,
+            selected_period.end,
+            settings,
+        )
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        battery_intervals = []
+    scenarios = scenario_analysis(period_summary, settings, battery_intervals=battery_intervals)
     completeness = data_completeness(period_summary, settings)
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
     timeline = timeline or build_decision_timeline(

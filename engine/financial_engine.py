@@ -12,6 +12,10 @@ from typing import Any, Optional, Union
 from .models import EngineStatus, FinancialImpact, HouseholdContext
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
+BATTERY_USABLE_CAPACITIES_KWH = (5.0, 10.0, 15.0, 20.0)
+BATTERY_DIMINISHING_RETURN_PCT = 0.15
+BATTERY_MIN_UTILISATION_PCT = 20.0
+BATTERY_SAVINGS_CAPTURE_PCT = 0.90
 
 
 class FinancialEngine:
@@ -130,11 +134,23 @@ class FinancialEngine:
         comparison_plan_rates: dict[str, float],
         current_display_name: str = "Synergy EV Add On",
         comparison_display_name: str = "Previous Flat/Home Plan",
+        current_tariff_version: Optional[Any] = None,
+        comparison_tariff_version: Optional[Any] = None,
     ) -> dict[str, Any]:
-        flat_rate = float(comparison_plan_rates["flat_import_rate"])
+        comparison_usage_rates = self._tariff_usage_rates(comparison_tariff_version)
+        flat_rate = float(
+            comparison_usage_rates.get("peak")
+            if comparison_usage_rates
+            else comparison_plan_rates["flat_import_rate"]
+        )
         supply_days = int(self._number(summary, "supply_days"))
-        supply_rate = float(comparison_plan_rates.get("supply_charge_per_day", self._number(summary, "supply_cost") / supply_days if supply_days else 0.0))
-        export_rate = float(comparison_plan_rates.get("export_credit_rate", 0.0))
+        supply_rate = float(
+            self._value(comparison_tariff_version, "supply_charge_per_day")
+            if comparison_tariff_version is not None
+            else comparison_plan_rates.get("supply_charge_per_day", self._number(summary, "supply_cost") / supply_days if supply_days else 0.0)
+        )
+        version_export_rate = self._tariff_export_rate(comparison_tariff_version)
+        export_rate = float(version_export_rate if version_export_rate is not None else comparison_plan_rates.get("export_credit_rate", 0.0))
 
         grid_import_kwh = self._number(summary, "grid_import_kwh")
         solar_exported_kwh = self._number(summary, "solar_exported_kwh")
@@ -173,6 +189,7 @@ class FinancialEngine:
             "current_plan": {
                 "name": current_plan_name,
                 "display_name": current_display_name,
+                "tariff_version": self._tariff_metadata(current_tariff_version),
                 "grid_import_cost": current_import_cost,
                 "supply_charge": current_supply_cost,
                 "export_credit": current_export_credit,
@@ -183,6 +200,7 @@ class FinancialEngine:
             "comparison_plan": {
                 "name": comparison_plan_name,
                 "display_name": comparison_display_name,
+                "tariff_version": self._tariff_metadata(comparison_tariff_version),
                 "flat_import_rate": flat_rate,
                 "grid_import_cost": comparison_import_cost,
                 "supply_charge": comparison_supply_charge,
@@ -198,6 +216,112 @@ class FinancialEngine:
             "household_usage_cost_difference": current_household_cost - comparison_household_cost,
             "solar_export_value_difference": export_value_difference,
             "recommendation": recommendation,
+        }
+
+    def compare_home_battery_sizes(
+        self,
+        intervals: list[dict[str, Any]],
+        settings: Any,
+        *,
+        baseline_bill: float,
+        baseline_grid_import_kwh: float = 0.0,
+        baseline_solar_exported_kwh: float = 0.0,
+        capacities_kwh: tuple[float, ...] = BATTERY_USABLE_CAPACITIES_KWH,
+        tariff_version: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        """Model self-consumption battery sizing from observed interval data.
+
+        The simulator starts each day with an empty battery and resets at day
+        end. That avoids inventing state from the day before the period and is
+        intentionally conservative for partial billing periods.
+        """
+
+        normalised = [self._battery_interval(row, settings) for row in intervals]
+        normalised = [row for row in normalised if row["timestamp"]]
+        days = sorted({row["day"] for row in normalised})
+        import_rates = self._tariff_usage_rates(tariff_version) or self._value(settings, "import_rates", {}) or {}
+        known_rates = {str(bucket): float(rate or 0.0) for bucket, rate in import_rates.items()}
+        cheapest_bucket = min(known_rates, key=known_rates.get) if known_rates else None
+        cheapest_rate = known_rates.get(cheapest_bucket, 0.0) if cheapest_bucket else 0.0
+        export_credit_rate = self._tariff_export_rate(tariff_version)
+        if export_credit_rate is None:
+            export_credit_rate = float(self._value(settings, "export_credit_rate", 0.0) or 0.0)
+        tariff_metadata = self._tariff_metadata(tariff_version)
+        baseline = self._battery_baseline(
+            baseline_bill,
+            baseline_grid_import_kwh,
+            baseline_solar_exported_kwh,
+            len(days),
+        )
+        options = []
+        previous_savings = 0.0
+        for capacity in capacities_kwh:
+            option = self._simulate_battery_capacity(
+                capacity,
+                normalised,
+                days,
+                baseline_bill,
+                baseline_grid_import_kwh,
+                baseline_solar_exported_kwh,
+                export_credit_rate,
+                cheapest_rate,
+            )
+            option["marginal_savings"] = option["period_savings"] - previous_savings
+            previous_savings = option["period_savings"]
+            options.append(option)
+
+        recommendation = self._battery_sizing_recommendation(options)
+        data_quality = {
+            "intervals": len(normalised),
+            "days": len(days),
+            "has_verified_excess_solar": any(row["solar_export_kwh"] > 0 for row in normalised),
+            "has_grid_import": any(row["grid_import_kwh"] > 0 for row in normalised),
+            "confidence": "medium" if normalised else "low",
+            "note": (
+                "Uses actual interval imports and verified solar export."
+                if normalised
+                else "Battery modelling is unavailable because no interval data was supplied."
+            ),
+        }
+
+        return {
+            "available": bool(normalised),
+            "methodology": (
+                "Tariff-aware self-consumption simulation using actual interval readings. "
+                "The model charges only from verified excess solar export, never from the grid, "
+                "then discharges to observed grid imports by tariff value with Peak first. "
+                "Each local day starts empty and resets at day end; unused stored energy is not credited. "
+                "Intervals with verified export are not discharged in the same interval."
+            ),
+            "assumptions": {
+                "usable_capacities_kwh": [float(value) for value in capacities_kwh],
+                "daily_state": "starts_empty_and_resets_daily",
+                "grid_charging": False,
+                "charge_source": "verified_excess_solar_export",
+                "round_trip_efficiency_pct": 100.0,
+                "diminishing_return_rule": (
+                    "Recommend the smallest usable capacity that captures at least "
+                    f"{BATTERY_SAVINGS_CAPTURE_PCT:.0%} of the best observed period savings while using at least "
+                    f"{BATTERY_MIN_UTILISATION_PCT:.0f}% of capacity on an average day. "
+                    "Capacities beyond the point where marginal savings are below "
+                    f"{BATTERY_DIMINISHING_RETURN_PCT:.0%} of the previous size's savings are treated as diminishing returns."
+                ),
+            },
+            "tariff_context": {
+                "import_rates": known_rates,
+                "export_credit_rate": export_credit_rate,
+                "cheapest_bucket": cheapest_bucket,
+                "cheapest_rate": cheapest_rate,
+                "discharge_rule": "peak_first_then_other_non_cheapest_by_rate",
+            },
+            "tariff_version": tariff_metadata.get("version_id"),
+            "tariff_effective_from": tariff_metadata.get("effective_from"),
+            "tariff_name": tariff_metadata.get("tariff_name"),
+            "tariff_metadata": tariff_metadata,
+            "baseline": baseline,
+            "options": options,
+            "recommended": recommendation,
+            "data_quality": data_quality,
         }
 
     def explain_bill_change(
@@ -455,6 +579,260 @@ class FinancialEngine:
             return None
         distance_km = ev_energy_kwh / ev_efficiency * 100
         return distance_km / 100 * petrol_l_per_100km * petrol_price
+
+    def _battery_interval(self, row: dict[str, Any], settings: Any) -> dict[str, Any]:
+        timestamp = str(row.get("timestamp") or row.get("measurement_time") or row.get("start_time") or "")
+        bucket = str(row.get("tariff_bucket") or row.get("bucket") or "")
+        import_rates = self._value(settings, "import_rates", {}) or {}
+        rate = row.get("import_rate")
+        if rate is None:
+            rate = import_rates.get(bucket, 0.0) if isinstance(import_rates, dict) else 0.0
+        return {
+            "timestamp": timestamp,
+            "day": timestamp[:10],
+            "tariff_bucket": bucket,
+            "rate": float(rate or 0.0),
+            "grid_import_kwh": max(float(row.get("grid_import_kwh", row.get("grid_to_home_kwh", 0.0)) or 0.0), 0.0),
+            "solar_export_kwh": max(float(row.get("solar_export_kwh", row.get("solar_to_grid_kwh", 0.0)) or 0.0), 0.0),
+        }
+
+    def _tariff_usage_rates(self, tariff_version: Optional[Any]) -> dict[str, float]:
+        if tariff_version is None:
+            return {}
+        rates = self._value(tariff_version, "usage_rate_map")
+        if isinstance(rates, dict):
+            return {str(bucket): float(rate or 0.0) for bucket, rate in rates.items()}
+        rates = self._value(tariff_version, "usage_rates", {}) or {}
+        if isinstance(rates, dict):
+            return {str(bucket): float(rate or 0.0) for bucket, rate in rates.items()}
+        return {str(bucket): float(rate or 0.0) for bucket, rate in rates}
+
+    def _tariff_export_rate(self, tariff_version: Optional[Any]) -> Optional[float]:
+        if tariff_version is None:
+            return None
+        rate = self._value(tariff_version, "primary_export_rate")
+        if rate is not None:
+            return float(rate)
+        export_rates = self._value(tariff_version, "export_rate_map")
+        if isinstance(export_rates, dict) and export_rates:
+            return float(export_rates.get("standard", next(iter(export_rates.values()))))
+        export_rates = self._value(tariff_version, "export_rates", {}) or {}
+        if isinstance(export_rates, dict) and export_rates:
+            return float(export_rates.get("standard", next(iter(export_rates.values()))))
+        if export_rates:
+            return float(dict(export_rates).get("standard", next(iter(dict(export_rates).values()))))
+        return None
+
+    def _tariff_metadata(self, tariff_version: Optional[Any]) -> dict[str, Any]:
+        if tariff_version is None:
+            return {}
+        public = self._value(tariff_version, "public_metadata")
+        if callable(public):
+            return public()
+        as_dict = self._value(tariff_version, "as_dict")
+        if callable(as_dict):
+            data = as_dict()
+        elif isinstance(tariff_version, dict):
+            data = tariff_version
+        else:
+            data = {}
+        return {
+            "provider": data.get("provider") or self._value(tariff_version, "provider"),
+            "tariff_name": data.get("tariff_name") or self._value(tariff_version, "tariff_name"),
+            "version": data.get("version") or self._value(tariff_version, "version"),
+            "version_id": data.get("version_id") or self._value(tariff_version, "version_id"),
+            "effective_from": data.get("effective_from") or self._value(tariff_version, "effective_from"),
+            "effective_to": data.get("effective_to") or self._value(tariff_version, "effective_to"),
+            "currency": data.get("currency") or self._value(tariff_version, "currency"),
+            "source_identifier": data.get("source_identifier") or self._value(tariff_version, "source_identifier"),
+        }
+
+    def _battery_baseline(
+        self,
+        baseline_bill: float,
+        baseline_grid_import_kwh: float,
+        baseline_solar_exported_kwh: float,
+        days: int,
+    ) -> dict[str, Any]:
+        return {
+            "capacity_kwh": 0.0,
+            "label": "No battery",
+            "estimated_bill": float(baseline_bill),
+            "period_savings": 0.0,
+            "annualised_savings": 0.0,
+            "avoided_import_kwh": 0.0,
+            "peak_import_avoided_kwh": 0.0,
+            "other_import_avoided_kwh": 0.0,
+            "stored_solar_kwh": 0.0,
+            "discharged_kwh": 0.0,
+            "average_daily_utilisation_kwh": 0.0,
+            "capacity_used_pct": 0.0,
+            "days_full": 0,
+            "days_depleted": 0,
+            "remaining_grid_import_kwh": float(baseline_grid_import_kwh),
+            "remaining_solar_export_kwh": float(baseline_solar_exported_kwh),
+            "marginal_savings": 0.0,
+            "modelled_days": int(days),
+        }
+
+    def _simulate_battery_capacity(
+        self,
+        capacity_kwh: float,
+        intervals: list[dict[str, Any]],
+        days: list[str],
+        baseline_bill: float,
+        baseline_grid_import_kwh: float,
+        baseline_solar_exported_kwh: float,
+        export_credit_rate: float,
+        cheapest_rate: float,
+    ) -> dict[str, Any]:
+        by_day: dict[str, list[dict[str, Any]]] = {day: [] for day in days}
+        for row in intervals:
+            by_day.setdefault(row["day"], []).append(row)
+
+        stored_solar = 0.0
+        discharged = 0.0
+        avoided_cost = 0.0
+        peak_avoided = 0.0
+        other_avoided = 0.0
+        days_full = 0
+        days_depleted = 0
+        discharge_buckets: dict[str, float] = {}
+
+        for day_rows in by_day.values():
+            daily_export = sum(row["solar_export_kwh"] for row in day_rows)
+            daily_stored = min(float(capacity_kwh), daily_export)
+            remaining_state = daily_stored
+            stored_solar += daily_stored
+            if capacity_kwh > 0 and daily_stored >= float(capacity_kwh) - 1e-9:
+                days_full += 1
+
+            candidates = [
+                row
+                for row in day_rows
+                if row["grid_import_kwh"] > 0
+                and row["solar_export_kwh"] <= 1e-9
+                and row["rate"] > cheapest_rate + 1e-9
+            ]
+            candidates.sort(
+                key=lambda row: (
+                    1 if row["tariff_bucket"] == "peak" else 0,
+                    row["rate"],
+                    row["timestamp"],
+                ),
+                reverse=True,
+            )
+            for row in candidates:
+                if remaining_state <= 1e-9:
+                    break
+                amount = min(remaining_state, row["grid_import_kwh"])
+                remaining_state -= amount
+                discharged += amount
+                avoided_cost += amount * row["rate"]
+                discharge_buckets[row["tariff_bucket"]] = discharge_buckets.get(row["tariff_bucket"], 0.0) + amount
+                if row["tariff_bucket"] == "peak":
+                    peak_avoided += amount
+                else:
+                    other_avoided += amount
+
+            if daily_stored > 0 and remaining_state <= 1e-9:
+                days_depleted += 1
+
+        lost_export_credit = stored_solar * export_credit_rate
+        savings = avoided_cost - lost_export_credit
+        estimated_bill = float(baseline_bill) - savings
+        modelled_days = len(days)
+        average_daily_utilisation = discharged / modelled_days if modelled_days else 0.0
+        capacity_used_pct = average_daily_utilisation / float(capacity_kwh) * 100 if capacity_kwh else 0.0
+        annualised = self.projected_annual_cost(savings, modelled_days) if modelled_days else 0.0
+
+        return {
+            "capacity_kwh": float(capacity_kwh),
+            "label": f"{capacity_kwh:g} kWh usable",
+            "estimated_bill": estimated_bill,
+            "period_savings": savings,
+            "annualised_savings": annualised,
+            "avoided_import_kwh": discharged,
+            "avoided_import_cost": avoided_cost,
+            "lost_export_credit": lost_export_credit,
+            "peak_import_avoided_kwh": peak_avoided,
+            "other_import_avoided_kwh": other_avoided,
+            "stored_solar_kwh": stored_solar,
+            "discharged_kwh": discharged,
+            "average_daily_utilisation_kwh": average_daily_utilisation,
+            "capacity_used_pct": capacity_used_pct,
+            "days_full": days_full,
+            "days_depleted": days_depleted,
+            "remaining_grid_import_kwh": max(float(baseline_grid_import_kwh) - discharged, 0.0),
+            "remaining_solar_export_kwh": max(float(baseline_solar_exported_kwh) - stored_solar, 0.0),
+            "discharge_buckets": discharge_buckets,
+            "modelled_days": modelled_days,
+        }
+
+    def _battery_sizing_recommendation(self, options: list[dict[str, Any]]) -> dict[str, Any]:
+        if not options:
+            return {
+                "capacity_kwh": 0.0,
+                "status": "insufficient_data",
+                "summary": "Battery sizing is unavailable because interval data is missing.",
+                "diminishing_return_capacity_kwh": None,
+                "diminishing_return_reason": "No modelled battery options.",
+            }
+
+        best_savings = max(option["period_savings"] for option in options)
+        if best_savings <= 0.005:
+            return {
+                "capacity_kwh": 0.0,
+                "status": "no_financial_case",
+                "summary": "This period does not show useful battery savings from verified excess solar.",
+                "diminishing_return_capacity_kwh": options[0]["capacity_kwh"],
+                "diminishing_return_reason": "Modelled savings are zero or negative after lost export credits.",
+            }
+
+        target_savings = best_savings * BATTERY_SAVINGS_CAPTURE_PCT
+        selected = None
+        for option in options:
+            if option["period_savings"] >= target_savings and option["capacity_used_pct"] >= BATTERY_MIN_UTILISATION_PCT:
+                selected = option
+                break
+        if selected is None:
+            selected = max(options, key=lambda option: option["period_savings"])
+
+        diminishing_option = None
+        previous = None
+        for option in options:
+            if previous is not None:
+                threshold = max(previous["period_savings"], 0.0) * BATTERY_DIMINISHING_RETURN_PCT
+                if option["marginal_savings"] <= threshold or option["capacity_used_pct"] < BATTERY_MIN_UTILISATION_PCT:
+                    diminishing_option = option
+                    break
+            previous = option
+
+        extra_note = ""
+        if diminishing_option and diminishing_option["capacity_kwh"] > selected["capacity_kwh"]:
+            extra_note = (
+                f" The {diminishing_option['capacity_kwh']:g} kWh step is where returns start to flatten, "
+                f"adding only ${max(diminishing_option['marginal_savings'], 0.0):.2f} in this period."
+            )
+
+        return {
+            "capacity_kwh": selected["capacity_kwh"],
+            "status": "recommended",
+            "summary": (
+                f"Based on this period, {selected['capacity_kwh']:g} kWh usable storage captures most of the observed "
+                f"battery value, saving about ${selected['period_savings']:.2f} for the period "
+                f"(${selected['annualised_savings']:.0f} annualised on the same pattern)."
+                f"{extra_note}"
+            ),
+            "period_savings": selected["period_savings"],
+            "annualised_savings": selected["annualised_savings"],
+            "diminishing_return_capacity_kwh": diminishing_option["capacity_kwh"] if diminishing_option else None,
+            "diminishing_return_reason": (
+                "Marginal savings fall below the configured threshold or average utilisation falls below the minimum."
+                if diminishing_option
+                else "No tested capacity crossed the diminishing-return threshold."
+            ),
+        }
 
     def _join_phrases(self, phrases: list[str]) -> str:
         if not phrases:
