@@ -9394,9 +9394,7 @@ def build_live_html(
     )
 
 
-def main() -> None:
-    configure_demo_mode()
-    setup_logging()
+def generate_report(output_path: Optional[Path] = None) -> str:
     settings = load_settings()
     current_day = local_today()
     period_start, period_end = billing_period(current_day, settings)
@@ -9437,7 +9435,7 @@ def main() -> None:
     print_summary("Today summary", today_summary, settings)
     print()
     print_summary("Current billing period summary", period_summary, settings)
-    write_html(
+    return write_html(
         today_summary,
         period_summary,
         trends,
@@ -9450,12 +9448,16 @@ def main() -> None:
         recommendation_lifecycle_counts=recommendation_lifecycle_counts,
         hidden=hidden,
         overnight_baseload_watts=overnight_baseload_watts,
+        output_path=output_path,
     )
+
+
+def main() -> None:
+    configure_demo_mode()
+    setup_logging()
+    generate_report(REPORT_PATH)
     logging.info(
-        "Generated report for %s and billing period %s to %s at %s",
-        current_day,
-        period_start,
-        period_end,
+        "Generated report at %s",
         REPORT_PATH,
     )
     print()

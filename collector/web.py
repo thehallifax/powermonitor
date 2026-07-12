@@ -70,6 +70,14 @@ def api_json_dumps(payload: dict) -> str:
     return json.dumps(to_api_safe(payload), indent=2, sort_keys=True)
 
 
+def current_report_path() -> Path:
+    return report.REPORT_PATH
+
+
+def regenerate_dashboard_report() -> None:
+    report.generate_report(current_report_path())
+
+
 def resolve_web_bind(settings_path: Path = SETTINGS_PATH) -> tuple[str, int]:
     config = load_web_bind_config(settings_path)
     host = os.environ.get("POWMONITOR_HOST") or config.get("host") or DEFAULT_HOST
@@ -559,6 +567,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (FileNotFoundError, RuntimeError, sqlite3.Error):
             summary = None
         report.check_tariff_updates(settings, summary)
+        regenerate_dashboard_report()
         self.redirect("/#tariff-updates")
 
     def resolve_tariff_update(self, action: str) -> None:
@@ -574,6 +583,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             repository.dismiss(update_id)
         else:
             raise ValueError(f"Unsupported tariff update action: {action}")
+        regenerate_dashboard_report()
         self.redirect("/#tariff-updates")
 
     def preview_import(self) -> None:
@@ -642,14 +652,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(result_html.encode("utf-8"))
 
     def serve_dashboard(self, params: dict) -> None:
-        period = self.param(params, "period", "current_billing_period")
-        content = report.build_live_html(
-            period,
-            self.param(params, "start"),
-            self.param(params, "end"),
-            provider_flash=provider_flash_from_params(params),
-        ).encode("utf-8")
-        self.send_html(content)
+        self.serve_static_report()
 
     def serve_glance(self, params: dict) -> None:
         content = report.build_live_html(
@@ -661,13 +664,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(content, refresh_seconds=300)
 
     def serve_static_report(self) -> None:
-        if not REPORT_PATH.exists():
-            self.send_json(
-                {"error": "dashboard has not been generated; run python3 collector/report.py"},
-                status=503,
-            )
-            return
-        self.send_html(REPORT_PATH.read_bytes())
+        report_path = current_report_path()
+        if not report_path.exists():
+            regenerate_dashboard_report()
+        self.send_html(report_path.read_bytes())
 
     def read_uploaded_file(self) -> tuple[str, bytes]:
         length = int(self.headers.get("Content-Length", "0") or 0)

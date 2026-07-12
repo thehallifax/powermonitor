@@ -8,6 +8,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ import report
 import web
 import import_synergy_bill
 from engine.data_engine import DataEngine
+from engine.tariff_importing import TariffUpdateRepository
 
 SYNERGY_BILL_TEXT = """
 Synergy Tax Invoice
@@ -50,12 +52,19 @@ class WebImportUploadTests(unittest.TestCase):
         self.db_path = Path(self.temp_dir.name) / "power.sqlite"
         self.report_path = Path(self.temp_dir.name) / "index.html"
         self.collect_log_path = Path(self.temp_dir.name) / "collect.log"
+        self.settings_path = Path(self.temp_dir.name) / "settings.json"
         self.upload_dir = Path(self.temp_dir.name) / "uploads"
-        self.original_report_paths = (report.DB_PATH, report.REPORT_PATH, report.COLLECT_LOG_PATH)
+        self.original_report_paths = (
+            report.DB_PATH,
+            report.REPORT_PATH,
+            report.COLLECT_LOG_PATH,
+            report.SETTINGS_PATH,
+        )
         self.original_upload_dir = web.UPLOAD_DIR
         report.DB_PATH = self.db_path
         report.REPORT_PATH = self.report_path
         report.COLLECT_LOG_PATH = self.collect_log_path
+        report.SETTINGS_PATH = self.settings_path
         web.UPLOAD_DIR = self.upload_dir
         with sqlite3.connect(self.db_path) as conn:
             create_readings(conn)
@@ -63,7 +72,7 @@ class WebImportUploadTests(unittest.TestCase):
             DataEngine(connection=conn).validate_database()
 
     def tearDown(self):
-        report.DB_PATH, report.REPORT_PATH, report.COLLECT_LOG_PATH = self.original_report_paths
+        report.DB_PATH, report.REPORT_PATH, report.COLLECT_LOG_PATH, report.SETTINGS_PATH = self.original_report_paths
         web.UPLOAD_DIR = self.original_upload_dir
         self.temp_dir.cleanup()
 
@@ -154,6 +163,69 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
+    def test_generated_report_contains_tariff_update_section(self):
+        report.generate_report(self.report_path)
+
+        html = self.report_path.read_text(encoding="utf-8")
+
+        self.assertIn('id="tariff-updates"', html)
+        self.assertIn("Current active tariff", html)
+        self.assertIn("Check for tariff updates", html)
+
+    def test_live_root_serves_generated_tariff_update_section(self):
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
+
+            self.assertIn('id="tariff-updates"', html)
+            self.assertIn("Current active tariff", html)
+            self.assertIn("Check for tariff updates", html)
+        finally:
+            stop_server(server, thread)
+
+    def test_live_root_serves_regenerated_html_on_next_request(self):
+        self.report_path.write_text("<html><body><section id='tariff-updates'>first version</section></body></html>", encoding="utf-8")
+        server, thread, base_url = start_server()
+        try:
+            first = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
+            self.assertIn("first version", first)
+
+            self.report_path.write_text("<html><body><section id='tariff-updates'>second version</section></body></html>", encoding="utf-8")
+
+            second = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
+            self.assertIn("second version", second)
+            self.assertNotIn("first version", second)
+        finally:
+            stop_server(server, thread)
+
+    def test_tariff_update_post_routes_still_work(self):
+        report.generate_report(self.report_path)
+        repository = TariffUpdateRepository(report.tariff_updates_path())
+        server, thread, base_url = start_server()
+        try:
+            def fake_check(_settings, _summary=None):
+                repository.stage_pending(sample_tariff_update("pending-check"))
+                return {"status": "update_staged"}
+
+            with patch.object(report, "check_tariff_updates", side_effect=fake_check):
+                check_result = form_post(base_url, "/tariff-updates/check", {})
+            self.assertIn("Tariff updates", check_result)
+            self.assertEqual(len(repository.pending_updates()), 1)
+
+            approve_id = repository.pending_updates()[0]["update_id"]
+            approve_result = form_post(base_url, "/tariff-updates/approve", {"update_id": approve_id})
+            self.assertIn("Tariff updates", approve_result)
+            self.assertEqual(repository.pending_updates(), [])
+
+            repository.stage_pending(sample_tariff_update("pending-dismiss"))
+            dismiss_id = repository.pending_updates()[0]["update_id"]
+            dismiss_result = form_post(base_url, "/tariff-updates/dismiss", {"update_id": dismiss_id})
+            self.assertIn("Tariff updates", dismiss_result)
+            self.assertEqual(repository.pending_updates(), [])
+        finally:
+            stop_server(server, thread)
+
 
 def start_server():
     server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.DashboardHandler)
@@ -185,7 +257,7 @@ def multipart_post(base_url: str, path: str, filename: str, content: bytes) -> s
 
 
 def form_post(base_url: str, path: str, params: dict[str, str]) -> str:
-    body = "&".join(f"{key}={value}" for key, value in params.items()).encode("utf-8")
+    body = urlencode(params).encode("utf-8")
     request = Request(
         f"{base_url}{path}",
         data=body,
@@ -193,6 +265,57 @@ def form_post(base_url: str, path: str, params: dict[str, str]) -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     return urlopen(request, timeout=10).read().decode("utf-8")
+
+
+def sample_tariff_update(update_id: str) -> dict:
+    return {
+        "update_id": update_id,
+        "tariff_name": "Synergy EV Add On",
+        "date_detected": "2026-07-12",
+        "effective_date": "2026-08-01",
+        "current_checksum": "current-checksum",
+        "pending_checksum": "pending-checksum",
+        "current_version": {
+            "provider": "Synergy",
+            "tariff_name": "Synergy EV Add On",
+            "version": "2026.07",
+            "effective_from": "2026-07-01",
+            "version_hash": "current-checksum",
+            "supply_charge_per_day": 1.2923,
+            "usage_rates": {
+                "super_off_peak": 0.086151,
+                "overnight": 0.193841,
+                "off_peak": 0.236916,
+                "peak": 0.538446,
+            },
+            "export_rates": {"standard": 0.02525},
+        },
+        "pending_version": {
+            "provider": "Synergy",
+            "tariff_name": "Synergy EV Add On",
+            "version": "2026.08",
+            "effective_from": "2026-08-01",
+            "version_hash": "pending-checksum",
+            "supply_charge_per_day": 1.3023,
+            "usage_rates": {
+                "super_off_peak": 0.096151,
+                "overnight": 0.203841,
+                "off_peak": 0.246916,
+                "peak": 0.548446,
+            },
+            "export_rates": {"standard": 0.02625},
+        },
+        "diff": [
+            {"label": "Peak usage", "before": "$0.538446", "after": "$0.548446"},
+        ],
+        "financial_preview": {
+            "available": True,
+            "annual_bill_difference": 42.0,
+            "summary": "Higher peak pricing would increase the annual bill.",
+            "battery_recommendation_impact": "",
+            "plan_recommendation_impact": "",
+        },
+    }
 
 
 def create_readings(conn):
