@@ -54,6 +54,7 @@ class TariffVersion:
     source_url: Optional[str]
     created_at: str
     version_hash: str
+    gst_included: Optional[bool] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider", str(self.provider))
@@ -66,6 +67,8 @@ class TariffVersion:
         object.__setattr__(self, "currency", str(self.currency or "AUD"))
         object.__setattr__(self, "source_identifier", str(self.source_identifier))
         object.__setattr__(self, "source_url", str(self.source_url) if self.source_url else None)
+        if self.gst_included is not None:
+            object.__setattr__(self, "gst_included", bool(self.gst_included))
         if self.effective_to is not None and self.effective_to < self.effective_from:
             raise TariffVersionError("effective_to cannot be before effective_from")
         expected = self.calculate_hash()
@@ -90,6 +93,7 @@ class TariffVersion:
         source_identifier: str = "catalog",
         source_url: Optional[str] = None,
         created_at: Optional[str] = None,
+        gst_included: Optional[bool] = None,
     ) -> "TariffVersion":
         created = created_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
         draft = cls(
@@ -107,6 +111,7 @@ class TariffVersion:
             source_url=source_url,
             created_at=created,
             version_hash="",
+            gst_included=gst_included,
         )
         return draft
 
@@ -134,6 +139,27 @@ class TariffVersion:
             currency="AUD",
             source_identifier=source_identifier,
             created_at=created_at,
+            gst_included=True,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TariffVersion":
+        effective_to = data.get("effective_to")
+        return cls.create(
+            provider=str(data["provider"]),
+            tariff_name=str(data["tariff_name"]),
+            version=str(data["version"]),
+            effective_from=date.fromisoformat(str(data["effective_from"])),
+            effective_to=date.fromisoformat(str(effective_to)) if effective_to else None,
+            supply_charge_per_day=float(data["supply_charge_per_day"]),
+            usage_rates=dict(data.get("usage_rates") or {}),
+            export_rates=dict(data.get("export_rates") or {}),
+            tariff_windows=tuple(data.get("tariff_windows") or ()),
+            currency=str(data.get("currency") or "AUD"),
+            source_identifier=str(data.get("source_identifier") or "imported"),
+            source_url=data.get("source_url"),
+            created_at=data.get("created_at"),
+            gst_included=data.get("gst_included"),
         )
 
     @classmethod
@@ -158,6 +184,7 @@ class TariffVersion:
             tariff_windows=tuple(_value(settings, "tariff_windows", ()) or ()),
             currency="AUD",
             source_identifier=source_identifier,
+            gst_included=True,
         )
 
     @property
@@ -195,6 +222,7 @@ class TariffVersion:
             "source_identifier": self.source_identifier,
             "source_url": self.source_url,
             "created_at": self.created_at,
+            "gst_included": self.gst_included,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -221,6 +249,7 @@ class TariffVersion:
             "source_identifier": self.source_identifier,
             "source_url": self.source_url,
             "created_at": self.created_at,
+            "gst_included": self.gst_included,
             "version_hash": self.version_hash,
         }
 
@@ -234,6 +263,7 @@ class TariffVersion:
             "effective_to": self.effective_to.isoformat() if self.effective_to else None,
             "currency": self.currency,
             "source_identifier": self.source_identifier,
+            "gst_included": self.gst_included,
         }
 
 
@@ -320,6 +350,11 @@ def default_tariff_store(settings: Optional[Any] = None) -> TariffVersionStore:
         store.add_version(current)
     if settings is not None and str(_value(settings, "current_plan") or "") == MANUAL_TARIFF_ID:
         store.add_version(TariffVersion.from_settings(settings, effective_from=LEGACY_TARIFF_EFFECTIVE_FROM))
+    for raw_version in _value(settings, "approved_tariff_versions", []) or []:
+        try:
+            store.add_version(TariffVersion.from_dict(raw_version))
+        except (KeyError, TypeError, ValueError, TariffVersionError, TariffVersionImmutableError):
+            continue
     return store
 
 

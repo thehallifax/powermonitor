@@ -105,6 +105,10 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Battery charged", markup)
         self.assertIn("Battery discharged", markup)
         self.assertIn("Recommended", markup)
+        self.assertIn("Solar-only saving", markup)
+        self.assertIn("Solar plus cheap-grid charging saving", markup)
+        self.assertIn("Additional grid-arbitrage benefit", markup)
+        self.assertIn("scheduled grid charging", markup)
         self.assertIn("How was this calculated?", markup)
         self.assertNotIn("<th>Peak avoided</th>", markup.split("How was this calculated?", 1)[0])
         self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 July 2026.", markup)
@@ -136,8 +140,11 @@ class BatteryReportPresentationTests(unittest.TestCase):
         markup = report.battery_dispatch_diagnostics_html(analysis["battery_comparison"])
 
         self.assertIn("Battery dispatch diagnostics", markup)
-        self.assertIn("Selected size", markup)
+        self.assertIn("Solar plus cheap-grid charging", markup)
         self.assertIn("Start SOC", markup)
+        self.assertIn("Solar charged", markup)
+        self.assertIn("Grid charged", markup)
+        self.assertIn("Losses", markup)
         self.assertIn("Rejected", markup)
         self.assertIn("No battery dispatch invariant warnings", markup)
 

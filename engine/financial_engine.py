@@ -16,6 +16,8 @@ BATTERY_USABLE_CAPACITIES_KWH = (5.0, 10.0, 15.0, 20.0)
 BATTERY_DIMINISHING_RETURN_PCT = 0.15
 BATTERY_MIN_UTILISATION_PCT = 20.0
 BATTERY_SAVINGS_CAPTURE_PCT = 0.90
+BATTERY_ROUND_TRIP_EFFICIENCY = 0.90
+BATTERY_GRID_ARBITRAGE_MATERIAL_SAVINGS = 5.0
 
 
 class FinancialEngine:
@@ -253,6 +255,10 @@ class FinancialEngine:
             baseline_solar_exported_kwh,
             len(days),
         )
+        round_trip_efficiency = self._battery_round_trip_efficiency(settings)
+        reserve_kwh = max(float(self._value(settings, "battery_min_soc_reserve_kwh", 0.0) or 0.0), 0.0)
+        charge_limit_kwh, discharge_limit_kwh = self._battery_daily_limits(settings)
+
         options = []
         previous_savings = 0.0
         for capacity in capacities_kwh:
@@ -265,6 +271,25 @@ class FinancialEngine:
                 baseline_solar_exported_kwh,
                 export_credit_rate,
                 cheapest_rate,
+            )
+            option["strategy"] = "solar_only"
+            option["grid_energy_used_to_charge_battery_kwh"] = 0.0
+            option["charging_losses_kwh"] = 0.0
+            option["additional_savings_from_grid_charging"] = 0.0
+            option["average_cost_per_delivered_battery_kwh"] = (
+                option["lost_export_credit"] / option["discharged_kwh"]
+                if option["discharged_kwh"] > 0
+                else 0.0
+            )
+            option["average_avoided_grid_rate_per_discharged_kwh"] = (
+                option["avoided_import_cost"] / option["discharged_kwh"]
+                if option["discharged_kwh"] > 0
+                else 0.0
+            )
+            option["equivalent_full_cycles"] = (
+                option["discharged_kwh"] / float(capacity)
+                if capacity
+                else 0.0
             )
             option["marginal_savings"] = option["period_savings"] - previous_savings
             previous_savings = option["period_savings"]
@@ -280,6 +305,45 @@ class FinancialEngine:
         recommendation = self._battery_sizing_recommendation(options)
         self._apply_battery_option_signals(options, recommendation)
         opportunity = self._battery_opportunity_metrics(options, normalised, days, cheapest_rate)
+        grid_options = []
+        previous_grid_savings = 0.0
+        solar_by_capacity = {option["capacity_kwh"]: option for option in options}
+        for capacity in capacities_kwh:
+            grid_option = self._simulate_battery_grid_arbitrage_capacity(
+                capacity,
+                normalised,
+                days,
+                baseline_bill,
+                baseline_grid_import_kwh,
+                baseline_solar_exported_kwh,
+                export_credit_rate,
+                cheapest_bucket,
+                cheapest_rate,
+                round_trip_efficiency,
+                reserve_kwh,
+                charge_limit_kwh,
+                discharge_limit_kwh,
+            )
+            solar_option = solar_by_capacity.get(float(capacity), {})
+            grid_option["additional_savings_from_grid_charging"] = (
+                grid_option["period_savings"] - float(solar_option.get("period_savings") or 0.0)
+            )
+            grid_option["marginal_savings"] = grid_option["period_savings"] - previous_grid_savings
+            previous_grid_savings = grid_option["period_savings"]
+            grid_options.append(grid_option)
+        for index, option in enumerate(grid_options):
+            next_option = grid_options[index + 1] if index + 1 < len(grid_options) else None
+            option["marginal_savings_to_next_capacity"] = (
+                next_option["period_savings"] - option["period_savings"]
+                if next_option is not None
+                else None
+            )
+            if float(option.get("additional_savings_from_grid_charging") or 0.0) >= BATTERY_GRID_ARBITRAGE_MATERIAL_SAVINGS:
+                option["recommendation_signal"] = "Optional tariff benefit"
+            else:
+                option["recommendation_signal"] = "Limited additional benefit"
+        grid_recommendation = self._battery_grid_strategy_summary(grid_options, recommendation)
+        grid_opportunity = self._battery_opportunity_metrics(grid_options, normalised, days, cheapest_rate)
         diagnostics = {
             "methodology": "Daily reset: each day starts at 0 kWh state of charge and does not carry unused energy into the next day.",
             "options": [
@@ -292,9 +356,31 @@ class FinancialEngine:
                 }
                 for option in options
             ],
+            "strategies": {
+                "solar_only": [
+                    {
+                        "capacity_kwh": option["capacity_kwh"],
+                        "label": option["label"],
+                        "signal": option["recommendation_signal"],
+                        "summary": option["diagnostics_summary"],
+                        "daily_rows": option["daily_diagnostics"],
+                    }
+                    for option in options
+                ],
+                "solar_plus_grid_arbitrage": [
+                    {
+                        "capacity_kwh": option["capacity_kwh"],
+                        "label": option["label"],
+                        "signal": option["recommendation_signal"],
+                        "summary": option["diagnostics_summary"],
+                        "daily_rows": option["daily_diagnostics"],
+                    }
+                    for option in grid_options
+                ],
+            },
             "warnings": [
                 warning
-                for option in options
+                for option in options + grid_options
                 for warning in option["diagnostics_summary"].get("warnings", [])
             ],
         }
@@ -315,17 +401,22 @@ class FinancialEngine:
             "available": bool(normalised),
             "methodology": (
                 "Tariff-aware self-consumption simulation using actual interval readings. "
-                "The model charges only from verified excess solar export, never from the grid, "
-                "then discharges to observed grid imports by tariff value with Peak first. "
-                "Each local day starts empty and resets at day end; unused stored energy is not credited. "
-                "Intervals with verified export are not discharged in the same interval."
+                "The solar-only strategy charges only from verified excess solar export, never from the grid. "
+                "The cheap-grid strategy also allows scheduled grid charging during the cheapest configured tariff window "
+                "when the avoided higher-rate import is worth more than the loss-adjusted charging cost. "
+                "Both strategies discharge to observed grid imports by tariff value with Peak first. "
+                "Each local day starts empty and resets at day end; unused stored energy is not credited."
             ),
             "assumptions": {
                 "usable_capacities_kwh": [float(value) for value in capacities_kwh],
                 "daily_state": "starts_empty_and_resets_daily",
-                "grid_charging": False,
-                "charge_source": "verified_excess_solar_export",
-                "round_trip_efficiency_pct": 100.0,
+                "strategies": ["solar_only", "solar_plus_grid_arbitrage"],
+                "grid_charging": "only_during_cheapest_configured_tariff_window_when_economic",
+                "charge_source": "verified_excess_solar_export_first_then_cheapest_tariff_grid_charging",
+                "round_trip_efficiency_pct": round_trip_efficiency * 100,
+                "minimum_reserve_kwh": reserve_kwh,
+                "charge_limit_kwh_per_day": charge_limit_kwh,
+                "discharge_limit_kwh_per_day": discharge_limit_kwh,
                 "diminishing_return_rule": (
                     "Recommend the smallest usable capacity that captures at least "
                     f"{BATTERY_SAVINGS_CAPTURE_PCT:.0%} of the best observed period savings while using at least "
@@ -347,6 +438,20 @@ class FinancialEngine:
             "tariff_metadata": tariff_metadata,
             "baseline": baseline,
             "options": options,
+            "strategies": {
+                "solar_only": {
+                    "baseline": baseline,
+                    "options": options,
+                    "recommended": recommendation,
+                    "opportunity_metrics": opportunity,
+                },
+                "solar_plus_grid_arbitrage": {
+                    "baseline": baseline,
+                    "options": grid_options,
+                    "recommended": grid_recommendation,
+                    "opportunity_metrics": grid_opportunity,
+                },
+            },
             "recommended": recommendation,
             "opportunity_metrics": opportunity,
             "diagnostics": diagnostics,
@@ -866,9 +971,337 @@ class FinancialEngine:
             "diagnostics_summary": diagnostics_summary,
         }
 
+    def _simulate_battery_grid_arbitrage_capacity(
+        self,
+        capacity_kwh: float,
+        intervals: list[dict[str, Any]],
+        days: list[str],
+        baseline_bill: float,
+        baseline_grid_import_kwh: float,
+        baseline_solar_exported_kwh: float,
+        export_credit_rate: float,
+        cheapest_bucket: Optional[str],
+        cheapest_rate: float,
+        round_trip_efficiency: float,
+        reserve_kwh: float,
+        charge_limit_kwh: Optional[float],
+        discharge_limit_kwh: Optional[float],
+    ) -> dict[str, Any]:
+        by_day: dict[str, list[dict[str, Any]]] = {day: [] for day in days}
+        for row in intervals:
+            by_day.setdefault(row["day"], []).append(row)
+
+        usable_capacity = max(float(capacity_kwh) - float(reserve_kwh), 0.0)
+        effective_grid_charge_cost = cheapest_rate / round_trip_efficiency if round_trip_efficiency > 0 else float("inf")
+        stored_solar = 0.0
+        grid_import_for_charging = 0.0
+        grid_delivered_charge = 0.0
+        charging_losses = 0.0
+        discharged = 0.0
+        avoided_cost = 0.0
+        peak_avoided = 0.0
+        other_avoided = 0.0
+        lost_export_credit = 0.0
+        days_full = 0
+        days_depleted = 0
+        discharge_buckets: dict[str, float] = {}
+        daily_diagnostics = []
+
+        for day, day_rows in by_day.items():
+            daily_export = sum(row["solar_export_kwh"] for row in day_rows)
+            solar_charge_limit = min(usable_capacity, charge_limit_kwh) if charge_limit_kwh is not None else usable_capacity
+            daily_solar_stored = min(max(solar_charge_limit, 0.0), daily_export)
+            rejected_solar = max(daily_export - daily_solar_stored, 0.0)
+            remaining_capacity = max(usable_capacity - daily_solar_stored, 0.0)
+            remaining_charge_limit = (
+                max(float(charge_limit_kwh) - daily_solar_stored, 0.0)
+                if charge_limit_kwh is not None
+                else remaining_capacity
+            )
+            remaining_discharge_limit = max(float(discharge_limit_kwh), 0.0) if discharge_limit_kwh is not None else None
+
+            peak_before = sum(row["grid_import_kwh"] for row in day_rows if row["tariff_bucket"] == "peak")
+            other_before = sum(
+                row["grid_import_kwh"]
+                for row in day_rows
+                if row["grid_import_kwh"] > 0 and row["tariff_bucket"] != "peak" and row["rate"] > cheapest_rate + 1e-9
+            )
+            cheapest_before = sum(row["grid_import_kwh"] for row in day_rows if row["grid_import_kwh"] > 0 and row["rate"] <= cheapest_rate + 1e-9)
+            candidates = [
+                {**row, "remaining_import_kwh": row["grid_import_kwh"]}
+                for row in day_rows
+                if row["grid_import_kwh"] > 0
+                and row["solar_export_kwh"] <= 1e-9
+                and row["rate"] > cheapest_rate + 1e-9
+            ]
+            candidates.sort(
+                key=lambda row: (
+                    1 if row["tariff_bucket"] == "peak" else 0,
+                    row["rate"],
+                    row["timestamp"],
+                ),
+                reverse=True,
+            )
+
+            day_solar_discharge = 0.0
+            day_grid_discharge = 0.0
+            day_peak_discharge = 0.0
+            day_other_discharge = 0.0
+            day_avoided_cost = 0.0
+            solar_state = daily_solar_stored
+
+            for row in candidates:
+                if solar_state <= 1e-9:
+                    break
+                if remaining_discharge_limit is not None and remaining_discharge_limit <= 1e-9:
+                    break
+                amount = min(solar_state, row["remaining_import_kwh"])
+                if remaining_discharge_limit is not None:
+                    amount = min(amount, remaining_discharge_limit)
+                if amount <= 1e-9:
+                    continue
+                solar_state -= amount
+                row["remaining_import_kwh"] -= amount
+                if remaining_discharge_limit is not None:
+                    remaining_discharge_limit -= amount
+                day_solar_discharge += amount
+                day_peak_discharge += amount if row["tariff_bucket"] == "peak" else 0.0
+                day_other_discharge += amount if row["tariff_bucket"] != "peak" else 0.0
+                day_avoided_cost += amount * row["rate"]
+                discharge_buckets[row["tariff_bucket"]] = discharge_buckets.get(row["tariff_bucket"], 0.0) + amount
+
+            beneficial_grid_demand = sum(
+                row["remaining_import_kwh"]
+                for row in candidates
+                if row["remaining_import_kwh"] > 0 and row["rate"] > effective_grid_charge_cost + 1e-9
+            )
+            grid_delivered = 0.0
+            if cheapest_bucket is not None and remaining_capacity > 1e-9 and remaining_charge_limit > 1e-9 and beneficial_grid_demand > 1e-9:
+                grid_delivered = min(remaining_capacity, remaining_charge_limit, beneficial_grid_demand)
+                if remaining_discharge_limit is not None:
+                    grid_delivered = min(grid_delivered, remaining_discharge_limit)
+
+            grid_state = grid_delivered
+            for row in candidates:
+                if grid_state <= 1e-9:
+                    break
+                if row["remaining_import_kwh"] <= 1e-9 or row["rate"] <= effective_grid_charge_cost + 1e-9:
+                    continue
+                amount = min(grid_state, row["remaining_import_kwh"])
+                grid_state -= amount
+                row["remaining_import_kwh"] -= amount
+                day_grid_discharge += amount
+                day_peak_discharge += amount if row["tariff_bucket"] == "peak" else 0.0
+                day_other_discharge += amount if row["tariff_bucket"] != "peak" else 0.0
+                day_avoided_cost += amount * row["rate"]
+                discharge_buckets[row["tariff_bucket"]] = discharge_buckets.get(row["tariff_bucket"], 0.0) + amount
+
+            day_discharge = day_solar_discharge + day_grid_discharge
+            grid_charge_import = grid_delivered / round_trip_efficiency if grid_delivered > 0 and round_trip_efficiency > 0 else 0.0
+            day_charging_losses = max(grid_charge_import - grid_delivered, 0.0)
+            day_lost_export_credit = daily_solar_stored * export_credit_rate
+            day_grid_charge_cost = grid_charge_import * cheapest_rate
+            day_savings = day_avoided_cost - day_lost_export_credit - day_grid_charge_cost
+            ending_state = solar_state + grid_state
+            stored_solar += daily_solar_stored
+            grid_import_for_charging += grid_charge_import
+            grid_delivered_charge += grid_delivered
+            charging_losses += day_charging_losses
+            discharged += day_discharge
+            avoided_cost += day_avoided_cost
+            lost_export_credit += day_lost_export_credit
+            peak_avoided += day_peak_discharge
+            other_avoided += day_other_discharge
+            if capacity_kwh > 0 and daily_solar_stored + grid_delivered >= usable_capacity - 1e-9:
+                days_full += 1
+            if daily_solar_stored + grid_delivered > 0 and ending_state <= 1e-9:
+                days_depleted += 1
+
+            destination_tariffs: dict[str, dict[str, float]] = {}
+            for row in candidates:
+                discharged_to_bucket = row["grid_import_kwh"] - row["remaining_import_kwh"]
+                if discharged_to_bucket <= 1e-9:
+                    continue
+                bucket = row["tariff_bucket"]
+                detail = destination_tariffs.setdefault(bucket, {"discharged_kwh": 0.0, "avoided_cost": 0.0})
+                detail["discharged_kwh"] += discharged_to_bucket
+                detail["avoided_cost"] += discharged_to_bucket * row["rate"]
+
+            remaining_peak = max(peak_before - day_peak_discharge, 0.0)
+            remaining_other = max(other_before - day_other_discharge, 0.0)
+            checks = []
+            if daily_solar_stored > daily_export + 1e-9:
+                checks.append("charged_more_than_verified_export")
+            if day_discharge > daily_solar_stored + grid_delivered + 1e-9:
+                checks.append("discharged_more_than_stored")
+            if grid_delivered > 1e-9 and cheapest_bucket is None:
+                checks.append("grid_charged_without_cheapest_tariff")
+            if grid_delivered > 1e-9 and beneficial_grid_demand <= 1e-9:
+                checks.append("grid_charged_without_economic_discharge")
+            if any(row["remaining_import_kwh"] < -1e-9 for row in candidates):
+                checks.append("discharged_more_than_interval_import")
+            if cheapest_before > 0 and day_discharge > peak_before + other_before + 1e-9:
+                checks.append("cheapest_window_discharged")
+            if abs((daily_solar_stored + grid_delivered - day_discharge) - ending_state) > 1e-9:
+                checks.append("daily_state_reconciliation_failed")
+
+            daily_diagnostics.append(
+                {
+                    "date": day,
+                    "strategy": "solar_plus_grid_arbitrage",
+                    "starting_state_of_charge_kwh": 0.0,
+                    "verified_solar_export_available_kwh": daily_export,
+                    "solar_charged_kwh": daily_solar_stored,
+                    "grid_charged_delivered_kwh": grid_delivered,
+                    "grid_energy_used_to_charge_battery_kwh": grid_charge_import,
+                    "grid_charge_tariff_bucket": cheapest_bucket,
+                    "grid_charge_rate": cheapest_rate,
+                    "grid_charge_effective_delivered_rate": effective_grid_charge_cost,
+                    "charging_losses_kwh": day_charging_losses,
+                    "charged_into_battery_kwh": daily_solar_stored + grid_delivered,
+                    "rejected_solar_because_battery_full_kwh": rejected_solar,
+                    "peak_import_before_battery_kwh": peak_before,
+                    "other_non_cheapest_import_before_battery_kwh": other_before,
+                    "cheapest_window_import_before_battery_kwh": cheapest_before,
+                    "battery_discharge_into_peak_kwh": day_peak_discharge,
+                    "battery_discharge_into_other_non_cheapest_kwh": day_other_discharge,
+                    "total_battery_discharge_kwh": day_discharge,
+                    "solar_battery_discharge_kwh": day_solar_discharge,
+                    "grid_charged_battery_discharge_kwh": day_grid_discharge,
+                    "discharge_destination_tariffs": destination_tariffs,
+                    "avoided_cost": day_avoided_cost,
+                    "grid_charging_cost": day_grid_charge_cost,
+                    "lost_export_credit": day_lost_export_credit,
+                    "net_daily_saving_after_charging_cost": day_savings,
+                    "ending_state_of_charge_kwh": ending_state,
+                    "remaining_peak_import_kwh": remaining_peak,
+                    "remaining_other_non_cheapest_import_kwh": remaining_other,
+                    "remaining_cheapest_window_import_kwh": cheapest_before + grid_charge_import,
+                    "remaining_solar_export_kwh": rejected_solar,
+                    "estimated_savings": day_savings,
+                    "energy_conservation_check": "pass" if not checks else "fail",
+                    "warnings": checks,
+                }
+            )
+
+        savings = avoided_cost - lost_export_credit - grid_import_for_charging * cheapest_rate
+        estimated_bill = float(baseline_bill) - savings
+        modelled_days = len(days)
+        average_daily_utilisation = discharged / modelled_days if modelled_days else 0.0
+        capacity_used_pct = average_daily_utilisation / float(capacity_kwh) * 100 if capacity_kwh else 0.0
+        annualised = self.projected_annual_cost(savings, modelled_days) if modelled_days else 0.0
+        diagnostics_summary = self._battery_diagnostics_summary(daily_diagnostics)
+
+        return {
+            "strategy": "solar_plus_grid_arbitrage",
+            "capacity_kwh": float(capacity_kwh),
+            "label": f"{capacity_kwh:g} kWh usable",
+            "estimated_bill": estimated_bill,
+            "period_savings": savings,
+            "annualised_savings": annualised,
+            "avoided_import_kwh": discharged,
+            "avoided_import_cost": avoided_cost,
+            "lost_export_credit": lost_export_credit,
+            "grid_charging_cost": grid_import_for_charging * cheapest_rate,
+            "peak_import_avoided_kwh": peak_avoided,
+            "other_import_avoided_kwh": other_avoided,
+            "stored_solar_kwh": stored_solar,
+            "solar_energy_stored_kwh": stored_solar,
+            "grid_energy_used_to_charge_battery_kwh": grid_import_for_charging,
+            "grid_charged_delivered_kwh": grid_delivered_charge,
+            "charging_losses_kwh": charging_losses,
+            "discharged_kwh": discharged,
+            "battery_energy_discharged_kwh": discharged,
+            "average_daily_utilisation_kwh": average_daily_utilisation,
+            "capacity_used_pct": capacity_used_pct,
+            "equivalent_full_cycles": discharged / float(capacity_kwh) if capacity_kwh else 0.0,
+            "days_full": days_full,
+            "days_depleted": days_depleted,
+            "remaining_grid_import_kwh": max(float(baseline_grid_import_kwh) - discharged + grid_import_for_charging, 0.0),
+            "remaining_solar_export_kwh": max(float(baseline_solar_exported_kwh) - stored_solar, 0.0),
+            "discharge_buckets": discharge_buckets,
+            "average_cost_per_delivered_battery_kwh": (
+                (lost_export_credit + grid_import_for_charging * cheapest_rate) / discharged
+                if discharged > 0
+                else 0.0
+            ),
+            "average_avoided_grid_rate_per_discharged_kwh": avoided_cost / discharged if discharged > 0 else 0.0,
+            "modelled_days": modelled_days,
+            "daily_diagnostics": daily_diagnostics,
+            "diagnostics_summary": diagnostics_summary,
+        }
+
+    def _battery_round_trip_efficiency(self, settings: Any) -> float:
+        value = self._value(settings, "battery_round_trip_efficiency", BATTERY_ROUND_TRIP_EFFICIENCY)
+        try:
+            efficiency = float(value)
+        except (TypeError, ValueError):
+            return BATTERY_ROUND_TRIP_EFFICIENCY
+        if efficiency > 1.0:
+            efficiency = efficiency / 100.0
+        if efficiency <= 0.0 or efficiency > 1.0:
+            return BATTERY_ROUND_TRIP_EFFICIENCY
+        return efficiency
+
+    def _battery_daily_limits(self, settings: Any) -> tuple[Optional[float], Optional[float]]:
+        charge_limit = self._value(settings, "battery_charge_limit_kwh_per_day")
+        discharge_limit = self._value(settings, "battery_discharge_limit_kwh_per_day")
+        return self._optional_positive_float(charge_limit), self._optional_positive_float(discharge_limit)
+
+    def _optional_positive_float(self, value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(number, 0.0)
+
+    def _battery_grid_strategy_summary(
+        self,
+        options: list[dict[str, Any]],
+        solar_recommendation: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not options:
+            return {
+                "capacity_kwh": 0.0,
+                "status": "insufficient_data",
+                "summary": "Cheap-grid battery modelling is unavailable because interval data is missing.",
+            }
+        best = max(options, key=lambda option: option.get("period_savings") or 0.0)
+        matching = next(
+            (
+                option for option in options
+                if abs(float(option.get("capacity_kwh") or 0.0) - float(solar_recommendation.get("capacity_kwh") or 0.0)) < 1e-9
+            ),
+            best,
+        )
+        additional = float(matching.get("additional_savings_from_grid_charging") or 0.0)
+        if additional >= BATTERY_GRID_ARBITRAGE_MATERIAL_SAVINGS:
+            summary = (
+                f"With scheduled cheap-grid charging, the {matching['capacity_kwh']:g} kWh option adds about "
+                f"${additional:.2f} of extra period savings on top of the solar-only model."
+            )
+        else:
+            summary = (
+                "Scheduled cheap-grid charging does not materially change the conservative battery sizing signal for this period."
+            )
+        return {
+            "capacity_kwh": matching.get("capacity_kwh"),
+            "status": "modelled",
+            "summary": summary,
+            "period_savings": matching.get("period_savings"),
+            "annualised_savings": matching.get("annualised_savings"),
+            "additional_savings_from_grid_charging": additional,
+            "best_capacity_kwh": best.get("capacity_kwh"),
+            "best_period_savings": best.get("period_savings"),
+        }
+
     def _battery_diagnostics_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         fields = (
             "verified_solar_export_available_kwh",
+            "solar_charged_kwh",
+            "grid_charged_delivered_kwh",
+            "grid_energy_used_to_charge_battery_kwh",
+            "charging_losses_kwh",
             "charged_into_battery_kwh",
             "rejected_solar_because_battery_full_kwh",
             "peak_import_before_battery_kwh",
@@ -877,6 +1310,12 @@ class FinancialEngine:
             "battery_discharge_into_peak_kwh",
             "battery_discharge_into_other_non_cheapest_kwh",
             "total_battery_discharge_kwh",
+            "solar_battery_discharge_kwh",
+            "grid_charged_battery_discharge_kwh",
+            "avoided_cost",
+            "grid_charging_cost",
+            "lost_export_credit",
+            "net_daily_saving_after_charging_cost",
             "ending_state_of_charge_kwh",
             "remaining_peak_import_kwh",
             "remaining_other_non_cheapest_import_kwh",

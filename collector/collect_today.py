@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -597,6 +598,26 @@ def generate_report() -> None:
     logging.info("Dashboard report generation succeeded")
 
 
+def check_tariff_updates() -> None:
+    try:
+        import report
+
+        settings = report.load_settings()
+        current_day = report.local_today()
+        period = report.resolve_period("current_billing_period", settings, current_day)
+        summary = None
+        try:
+            with sqlite3.connect(report.DB_PATH) as conn:
+                report.validate_database(conn)
+                summary = report.load_summary(conn, period.start, period.end, settings)
+        except (FileNotFoundError, RuntimeError, sqlite3.Error, ValueError):
+            summary = None
+        result = report.check_tariff_updates(settings, summary)
+        logging.info("Tariff update check completed: %s", result.get("status"))
+    except Exception as exc:
+        logging.warning("Tariff update check failed: %s", safe_error_message(exc))
+
+
 def read_session_header() -> str:
     if not COOKIE_PATH.exists():
         raise AuthenticationFailure("SolarEdge cookie is missing")
@@ -777,6 +798,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
     if failed:
         print(f"Partial collection: {failed}/{backfill_days} days failed; see {LOG_PATH}")
 
+    check_tariff_updates()
     generate_report()
     print("Dashboard report regenerated")
     log_solaredge_action(

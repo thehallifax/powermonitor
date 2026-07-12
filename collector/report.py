@@ -93,6 +93,13 @@ from engine.tariff_catalog import (
     supported_plan_options,
 )
 from engine.tariff_versioning import TariffResolver, TariffVersion, resolver_for_settings
+from engine.tariff_importing import (
+    TariffImportManager,
+    TariffProviderRegistry,
+    TariffUpdateRepository,
+    SynergyTariffProvider,
+    usage_profile_from_summary,
+)
 from presentation.briefing import BriefingItem
 from presentation.energy_score import build_energy_score
 from presentation.glance import GlanceState, build_glance_state
@@ -125,6 +132,14 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
         report_path=REPORT_PATH,
         health_loader=public_health,
     )
+
+
+def tariff_updates_path() -> Path:
+    return SETTINGS_PATH.parent / "tariff_updates.json"
+
+
+def tariff_update_repository() -> TariffUpdateRepository:
+    return TariffUpdateRepository(tariff_updates_path())
 
 
 def activate_demo_mode(today: Optional[date] = None):
@@ -183,6 +198,44 @@ def tariff_for_date(settings: Any, when: date) -> TariffVersion:
 
 def tariff_metadata(settings: Any, when: date) -> dict[str, Any]:
     return tariff_for_date(settings, when).public_metadata()
+
+
+def tariff_import_manager(settings: Any, repository: Optional[TariffUpdateRepository] = None) -> TariffImportManager:
+    registry = TariffProviderRegistry([SynergyTariffProvider()])
+    return TariffImportManager(
+        registry=registry,
+        active_store=tariff_resolver(settings).store,
+        repository=repository or tariff_update_repository(),
+    )
+
+
+def check_tariff_updates(settings: Any, summary: Optional[Any] = None) -> dict[str, Any]:
+    profile = usage_profile_from_summary(summary) if summary is not None else {}
+    return tariff_import_manager(settings).check_for_updates("Synergy", usage_profile=profile)
+
+
+def tariff_update_overview(settings: Any, summary: Optional[Any] = None) -> dict[str, Any]:
+    repository = tariff_update_repository()
+    active_tariff = tariff_for_date(settings, local_today())
+    pending = repository.pending_updates()
+    usage_profile = usage_profile_from_summary(summary) if summary is not None else {}
+    for update in pending:
+        if update.get("financial_preview", {}).get("available"):
+            continue
+        try:
+            current = TariffVersion.from_dict(update["current_version"])
+            pending_version = TariffVersion.from_dict(update["pending_version"])
+            from engine.tariff_importing import financial_impact_preview
+
+            update["financial_preview"] = financial_impact_preview(current, pending_version, usage_profile)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return {
+        "current_active_tariff": active_tariff.as_dict(),
+        "pending": pending,
+        "diagnostics": repository.diagnostics(),
+        "approved_versions": repository.approved_version_dicts(),
+    }
 
 
 def human_date(value: date) -> str:
@@ -811,6 +864,7 @@ def dashboard_data(
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
+    tariff_updates = tariff_update_overview(settings, billing_summary)
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,
@@ -865,6 +919,7 @@ def dashboard_data(
         "tariff_scenario": tariff_scenario(period_summary, settings),
         "plan_comparison": plan,
         "current_tariff": tariff_metadata(settings, selected.end),
+        "tariff_updates": tariff_updates,
         "bill_change_explanation": bill_change,
         "actual_bill_comparison": actual_bill_comparison,
         "bill_reconciliation": actual_bill_comparison,
@@ -1041,6 +1096,10 @@ def load_settings() -> Settings:
         },
         home_profile=load_home_profile(HOME_PROFILE_PATH, settings=raw),
     )
+    try:
+        settings.approved_tariff_versions = tariff_update_repository().approved_version_dicts()
+    except (OSError, ValueError, json.JSONDecodeError):
+        settings.approved_tariff_versions = []
     if settings.supply_charge_per_day < 0 or settings.export_credit_rate < 0:
         raise ValueError("Supply charge and export credit rate cannot be negative")
     if settings.ev_baseline_watts < 0 or any(rate < 0 for rate in settings.import_rates.values()):
@@ -4644,6 +4703,7 @@ def setup_page_html(
     promotion_summary: Optional[dict] = None,
     notification_preferences: Optional[dict] = None,
     provider_management: Optional[ProviderManager] = None,
+    tariff_updates: Optional[dict] = None,
 ) -> str:
     if not setup:
         return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
@@ -4670,6 +4730,7 @@ def setup_page_html(
     {notification_notice}
     {first_time_intro_html(setup)}
     {billing_cycle_setup_html(settings)}
+    {tariff_updates_html(tariff_updates)}
     {first_time_finish_html(setup, settings)}
     {setup_integrations_html(provider_management)}
     <section class="report-section compact-section">
@@ -4810,6 +4871,120 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
       </form>
       <p class="notice">Saving this gives PowerMonitor enough local setup to explain bills and tariff timing. Optional services can be connected later.</p>
     </section>
+    """
+
+
+def tariff_updates_html(tariff_updates: Optional[dict]) -> str:
+    if tariff_updates is None:
+        return ""
+    current = tariff_updates.get("current_active_tariff") or {}
+    pending = tariff_updates.get("pending") or []
+    diagnostics_by_provider = tariff_updates.get("diagnostics") or {}
+    current_rates = current.get("usage_rates") or {}
+    current_rows = "".join(
+        f"<div><span>{html.escape(bucket.replace('_', ' ').title())}</span><strong>{money(float(rate or 0.0))}/kWh</strong></div>"
+        for bucket, rate in current_rates.items()
+    )
+    pending_html = "".join(tariff_update_card_html(update) for update in pending)
+    if not pending_html:
+        pending_html = '<p class="notice">No pending tariff updates. Run a tariff check to stage retailer changes for review.</p>'
+    diagnostics_html = "".join(
+        tariff_update_diagnostics_html(provider, diagnostics)
+        for provider, diagnostics in diagnostics_by_provider.items()
+    ) or '<p class="scenario-note">No tariff import checks have run yet.</p>'
+    return f"""
+    <section id="tariff-updates" class="report-section setup-section tariff-updates-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Settings</span><h2>Tariff updates</h2></div>
+        <p>PowerMonitor can stage retailer tariff changes for review. New tariffs are not activated until you approve them.</p>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Current active tariff</h3><span>{html.escape(str(current.get("provider") or ""))}</span></div>
+        <div class="config-grid">
+          <div><span>Tariff</span><strong>{html.escape(str(current.get("tariff_name") or "Unknown"))}</strong></div>
+          <div><span>Version</span><strong>{html.escape(str(current.get("version") or "Unknown"))}</strong></div>
+          <div><span>Effective from</span><strong>{html.escape(str(current.get("effective_from") or "Unknown"))}</strong></div>
+          <div><span>Supply charge</span><strong>{money(float(current.get("supply_charge_per_day") or 0.0))}/day</strong></div>
+          <div><span>Export credit</span><strong>{money(float((current.get("export_rates") or {}).get("standard") or 0.0))}/kWh</strong></div>
+          <div><span>Checksum</span><strong>{html.escape(str(current.get("version_hash") or "")[:12])}</strong></div>
+          {current_rows}
+        </div>
+      </div>
+      <form method="post" action="/tariff-updates/check" class="inline-action-form">
+        <button type="submit">Check for tariff updates</button>
+      </form>
+      {pending_html}
+      <details class="battery-calculation-details">
+        <summary>Tariff import diagnostics</summary>
+        {diagnostics_html}
+      </details>
+    </section>
+    """
+
+
+def tariff_update_card_html(update: dict) -> str:
+    pending_version = update.get("pending_version") or {}
+    current_version = update.get("current_version") or {}
+    preview = update.get("financial_preview") or {}
+    diff_rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(str(change.get("label") or ""))}</td>
+          <td>{html.escape(str(change.get("before") or ""))}</td>
+          <td>{html.escape(str(change.get("after") or ""))}</td>
+        </tr>
+        """
+        for change in update.get("diff") or []
+    ) or '<tr><td colspan="3">Checksum changed with no rate-level difference.</td></tr>'
+    update_id = html.escape(str(update.get("update_id") or ""))
+    preview_summary = preview.get("summary") or preview.get("basis") or "Financial preview is unavailable."
+    impact = preview.get("annual_bill_difference")
+    impact_label = money(float(impact)) if impact is not None else "Unknown"
+    return f"""
+    <article class="system-card tariff-update-card">
+      <div class="chart-heading">
+        <h3>Pending tariff update</h3>
+        <span>{html.escape(str(update.get("date_detected") or ""))}</span>
+      </div>
+      <div class="provider-guidance-grid">
+        <div><span>Tariff</span><strong>{html.escape(str(pending_version.get("tariff_name") or update.get("tariff_name") or ""))}</strong></div>
+        <div><span>Effective date</span><strong>{html.escape(str(update.get("effective_date") or pending_version.get("effective_from") or ""))}</strong></div>
+        <div><span>Current checksum</span><strong>{html.escape(str(update.get("current_checksum") or current_version.get("version_hash") or "")[:12])}</strong></div>
+        <div><span>Pending checksum</span><strong>{html.escape(str(update.get("pending_checksum") or pending_version.get("version_hash") or "")[:12])}</strong></div>
+        <div><span>Estimated annual impact</span><strong>{html.escape(impact_label)}</strong></div>
+        <div><span>Preview</span><strong>{html.escape(str(preview_summary))}</strong></div>
+      </div>
+      <table class="responsive-table">
+        <thead><tr><th>Item</th><th>Current</th><th>Pending</th></tr></thead>
+        <tbody>{diff_rows}</tbody>
+      </table>
+      <p class="scenario-note">{html.escape(str(preview.get("battery_recommendation_impact") or ""))}</p>
+      <p class="scenario-note">{html.escape(str(preview.get("plan_recommendation_impact") or ""))}</p>
+      <div class="provider-actions">
+        <form method="post" action="/tariff-updates/approve"><input type="hidden" name="update_id" value="{update_id}"><button type="submit">Approve update</button></form>
+        <form method="post" action="/tariff-updates/dismiss"><input type="hidden" name="update_id" value="{update_id}"><button type="submit">Dismiss update</button></form>
+      </div>
+      <details class="evidence-trail"><summary>View raw changes</summary><pre>{html.escape(json.dumps(update, indent=2, sort_keys=True))}</pre></details>
+    </article>
+    """
+
+
+def tariff_update_diagnostics_html(provider: str, diagnostics: dict) -> str:
+    rows = [
+        ("Last successful tariff check", diagnostics.get("last_successful_check")),
+        ("Provider", diagnostics.get("provider") or provider),
+        ("Tariff version", diagnostics.get("tariff_version")),
+        ("Current checksum", diagnostics.get("current_checksum")),
+        ("Pending checksum", diagnostics.get("pending_checksum")),
+        ("Import status", diagnostics.get("import_status")),
+        ("Last error", diagnostics.get("last_error") or "None"),
+        ("Source URL", diagnostics.get("source_url")),
+        ("Next scheduled check", diagnostics.get("next_scheduled_check")),
+    ]
+    return f"""
+    <div class="config-grid">
+      {"".join(f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'n/a'))}</strong></div>" for label, value in rows)}
+    </div>
     """
 
 
@@ -7265,7 +7440,9 @@ def battery_dispatch_diagnostics_html(comparison: Optional[dict]) -> str:
     if not comparison or not comparison.get("diagnostics"):
         return ""
     diagnostics = comparison.get("diagnostics") or {}
-    options = diagnostics.get("options") or []
+    strategy_options = (diagnostics.get("strategies") or {}).get("solar_plus_grid_arbitrage")
+    strategy_label = "Solar plus cheap-grid charging" if strategy_options else "Solar-only charging"
+    options = strategy_options or diagnostics.get("options") or []
     recommended_capacity = float((comparison.get("recommended") or {}).get("capacity_kwh") or 0.0)
     selected = next(
         (option for option in options if abs(float(option.get("capacity_kwh") or 0.0) - recommended_capacity) < 1e-9),
@@ -7289,31 +7466,37 @@ def battery_dispatch_diagnostics_html(comparison: Optional[dict]) -> str:
               <td>{html.escape(str(row.get("date") or ""))}</td>
               <td>{kwh(float(row.get("starting_state_of_charge_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("verified_solar_export_available_kwh") or 0.0))}</td>
-              <td>{kwh(float(row.get("charged_into_battery_kwh") or 0.0))}</td>
+              <td>{kwh(float(row.get("solar_charged_kwh", row.get("charged_into_battery_kwh")) or 0.0))}</td>
+              <td>{kwh(float(row.get("grid_energy_used_to_charge_battery_kwh") or 0.0))}</td>
+              <td>{money(float(row.get("grid_charge_rate") or 0.0))}</td>
+              <td>{kwh(float(row.get("charging_losses_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("rejected_solar_because_battery_full_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("peak_import_before_battery_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("other_non_cheapest_import_before_battery_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("cheapest_window_import_before_battery_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("battery_discharge_into_peak_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("battery_discharge_into_other_non_cheapest_kwh") or 0.0))}</td>
+              <td>{money(float(row.get("avoided_cost") or 0.0))}</td>
               <td>{kwh(float(row.get("total_battery_discharge_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("ending_state_of_charge_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("remaining_peak_import_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("remaining_other_non_cheapest_import_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("remaining_cheapest_window_import_kwh") or 0.0))}</td>
               <td>{kwh(float(row.get("remaining_solar_export_kwh") or 0.0))}</td>
-              <td>{money(float(row.get("estimated_savings") or 0.0))}</td>
+              <td>{money(float(row.get("net_daily_saving_after_charging_cost", row.get("estimated_savings")) or 0.0))}</td>
               <td>{html.escape(str(row.get("energy_conservation_check") or ""))}</td>
             </tr>
             """
         )
     return f"""
     <div class="system-card battery-diagnostics">
-      <div class="chart-heading"><h3>Battery dispatch diagnostics</h3><span>Selected size: {html.escape(str(selected.get("label") or ""))}</span></div>
+      <div class="chart-heading"><h3>Battery dispatch diagnostics</h3><span>{html.escape(strategy_label)} · {html.escape(str(selected.get("label") or ""))}</span></div>
       <p>{html.escape(str(diagnostics.get("methodology") or ""))}</p>
       <div class="config-grid">
         {battery_metric("Solar export", kwh(float(totals.get("verified_solar_export_available_kwh") or 0.0)), "Verified available")}
-        {battery_metric("Charged", kwh(float(totals.get("charged_into_battery_kwh") or 0.0)), "Into battery")}
+        {battery_metric("Solar charged", kwh(float(totals.get("solar_charged_kwh", totals.get("charged_into_battery_kwh")) or 0.0)), "Verified export into battery")}
+        {battery_metric("Grid charged", kwh(float(totals.get("grid_energy_used_to_charge_battery_kwh") or 0.0)), "Cheapest tariff input")}
+        {battery_metric("Charging losses", kwh(float(totals.get("charging_losses_kwh") or 0.0)), "Round-trip efficiency")}
         {battery_metric("Discharged", kwh(float(totals.get("total_battery_discharge_kwh") or 0.0)), "From battery")}
         {battery_metric("Rejected solar", kwh(float(totals.get("rejected_solar_because_battery_full_kwh") or 0.0)), "Battery full")}
         {battery_metric("Savings", money(float(totals.get("estimated_savings") or 0.0)), "Daily rows total")}
@@ -7322,7 +7505,7 @@ def battery_dispatch_diagnostics_html(comparison: Optional[dict]) -> str:
       {warning_html}
       <div class="battery-diagnostics-table">
         <table class="responsive-table">
-          <thead><tr><th>Date</th><th>Start SOC</th><th>Solar export</th><th>Charged</th><th>Rejected</th><th>Peak before</th><th>Other before</th><th>Cheapest before</th><th>Peak discharge</th><th>Other discharge</th><th>Total discharge</th><th>End SOC</th><th>Peak left</th><th>Other left</th><th>Cheapest left</th><th>Export left</th><th>Savings</th><th>Check</th></tr></thead>
+          <thead><tr><th>Date</th><th>Start SOC</th><th>Solar export</th><th>Solar charged</th><th>Grid charged</th><th>Grid rate</th><th>Losses</th><th>Rejected</th><th>Peak before</th><th>Other before</th><th>Cheapest before</th><th>Peak discharge</th><th>Other discharge</th><th>Avoided cost</th><th>Total discharge</th><th>End SOC</th><th>Peak left</th><th>Other left</th><th>Cheapest left</th><th>Export left</th><th>Net saving</th><th>Check</th></tr></thead>
           <tbody>{''.join(rows)}</tbody>
         </table>
       </div>
@@ -7631,6 +7814,9 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         return ""
     baseline = comparison.get("baseline", {})
     options = comparison.get("options", [])
+    strategies = comparison.get("strategies") or {}
+    grid_options = (strategies.get("solar_plus_grid_arbitrage") or {}).get("options") or []
+    grid_by_capacity = {float(option.get("capacity_kwh") or 0.0): option for option in grid_options}
     recommended = comparison.get("recommended", {})
     data_quality = comparison.get("data_quality", {})
     if not comparison.get("available"):
@@ -7654,26 +7840,35 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         if effective_label
         else f"Calculated using {tariff_name} tariff."
     )
-    rows = [
-        battery_option_row_html(
-            {
-                **baseline,
-                "label": "No battery",
-                "recommendation_signal": "Current baseline",
-                "marginal_savings_to_next_capacity": options[0].get("period_savings") if options else None,
-            },
-            recommended_capacity,
-            baseline=True,
-        )
-    ]
+    rows = [battery_strategy_row_html(baseline, None, recommended_capacity, baseline=True)]
     for option in options:
-        rows.append(battery_option_row_html(option, recommended_capacity))
+        rows.append(battery_strategy_row_html(option, grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0)), recommended_capacity))
     opportunity = comparison.get("opportunity_metrics", {}) or {}
+    grid_strategy = strategies.get("solar_plus_grid_arbitrage") or {}
+    grid_recommended = grid_strategy.get("recommended") or {}
+    matching_grid = grid_by_capacity.get(recommended_capacity) or (grid_options[0] if grid_options else {})
+    additional_grid = float(matching_grid.get("additional_savings_from_grid_charging") or 0.0)
+    grid_energy = float(matching_grid.get("grid_energy_used_to_charge_battery_kwh") or 0.0)
+    grid_delivered = float(matching_grid.get("grid_charged_delivered_kwh") or 0.0)
+    cheapest_bucket = str((comparison.get("tariff_context") or {}).get("cheapest_bucket") or "the cheapest window").replace("_", " ")
+    cheapest_rate = float((comparison.get("tariff_context") or {}).get("cheapest_rate") or 0.0)
+    efficiency = float((comparison.get("assumptions") or {}).get("round_trip_efficiency_pct") or 0.0)
+    if grid_energy > 0 and additional_grid > 0:
+        grid_explanation = (
+            f"Charging a {recommended_capacity:g} kWh battery during the {cheapest_bucket} window at {money(cheapest_rate)}/kWh "
+            f"adds about {money(additional_grid)} this period after charging losses, based on {kwh(grid_energy)} of grid energy "
+            f"delivering {kwh(grid_delivered)} from the battery."
+        )
+    else:
+        grid_explanation = (
+            "Cheap-grid charging was modelled, but this period does not show a material extra benefit beyond the solar-only battery case."
+        )
 
     return f"""
     <div class="scenario-insights battery-comparison">
       <div class="chart-heading"><h3>Home battery sizing</h3><span>Tariff-aware actual interval model</span></div>
       <p class="battery-conclusion">{html.escape(str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period."))}</p>
+      <p class="battery-conclusion secondary">{html.escape(str(grid_recommended.get("summary") or grid_explanation))}</p>
       <div class="battery-metrics">
         {battery_metric("Solar export available", kwh(float(opportunity.get("average_daily_solar_export_available_kwh") or 0.0)), "Average per day for charging")}
         {battery_metric("Non-cheapest import", kwh(float(opportunity.get("average_daily_non_cheapest_grid_import_kwh") or 0.0)), "Average daily import a battery can economically offset")}
@@ -7687,33 +7882,41 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
       <table class="responsive-table battery-homeowner-table">
         <thead>
           <tr>
-            <th>Usable capacity</th>
+            <th>Battery size</th>
+            <th>Solar-only saving</th>
+            <th>Solar plus cheap-grid charging saving</th>
+            <th>Additional grid-arbitrage benefit</th>
             <th>Estimated bill</th>
-            <th>Period savings</th>
-            <th>Annualised estimate</th>
-            <th>Signal</th>
+            <th>Recommendation signal</th>
           </tr>
         </thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
+      <p class="scenario-note">{html.escape(grid_explanation)}</p>
       <p class="scenario-note">{html.escape(tariff_note)}</p>
-      <p class="scenario-note">{html.escape(str(comparison.get("diagnostics", {}).get("methodology") or comparison.get("methodology") or ""))}</p>
+      <p class="scenario-note">Battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the current period pattern. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>
       {battery_calculation_details_html(comparison)}
     </div>
     """
 
 
-def battery_option_row_html(option: dict, recommended_capacity: float, baseline: bool = False) -> str:
-    capacity = float(option.get("capacity_kwh") or 0.0)
+def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], recommended_capacity: float, baseline: bool = False) -> str:
+    capacity = float(solar_option.get("capacity_kwh") or 0.0)
     is_recommended = not baseline and abs(capacity - recommended_capacity) < 1e-9
-    signal = str(option.get("recommendation_signal") or ("Current baseline" if baseline else "Limited additional benefit"))
-    capacity_label = "No battery" if baseline else str(option.get("label") or f"{capacity:g} kWh usable")
+    signal = str(solar_option.get("recommendation_signal") or ("Current baseline" if baseline else "Limited additional benefit"))
+    capacity_label = "No battery" if baseline else str(solar_option.get("label") or f"{capacity:g} kWh usable")
+    grid_option = grid_option or {}
+    solar_saving = float(solar_option.get("period_savings") or 0.0)
+    grid_saving = float(grid_option.get("period_savings", solar_saving) or 0.0)
+    additional = float(grid_option.get("additional_savings_from_grid_charging") or 0.0)
+    estimated_bill = float(grid_option.get("estimated_bill", solar_option.get("estimated_bill", 0.0)) or 0.0)
     return f"""
     <tr class="{'recommended' if is_recommended else 'baseline' if baseline else ''}">
       <td><strong>{html.escape(capacity_label)}</strong></td>
-      <td>{money(float(option.get("estimated_bill") or 0.0))}</td>
-      <td>{money(float(option.get("period_savings") or 0.0))}</td>
-      <td>{money(float(option.get("annualised_savings") or 0.0))}</td>
+      <td>{money(solar_saving)}</td>
+      <td>{money(grid_saving)}</td>
+      <td>{money(additional)}</td>
+      <td>{money(estimated_bill)}</td>
       <td><span class="battery-signal">{html.escape(signal)}</span></td>
     </tr>
     """
@@ -7732,26 +7935,45 @@ def battery_metric(label: str, value: str, note: str) -> str:
 def battery_calculation_details_html(comparison: dict) -> str:
     baseline = comparison.get("baseline", {})
     options = comparison.get("options", [])
+    grid_options = ((comparison.get("strategies") or {}).get("solar_plus_grid_arbitrage") or {}).get("options") or []
+    grid_by_capacity = {float(option.get("capacity_kwh") or 0.0): option for option in grid_options}
     rows = [
         f"""
         <tr>
-          <td>No battery</td><td>{kwh(0.0)}</td><td>{kwh(0.0)}</td>
+          <td>No battery</td><td>Baseline</td><td>{kwh(0.0)}</td><td>{kwh(0.0)}</td><td>{kwh(0.0)}</td>
           <td>{kwh(float(baseline.get("remaining_grid_import_kwh") or 0.0))}</td>
           <td>{kwh(float(baseline.get("remaining_solar_export_kwh") or 0.0))}</td>
-          <td>{money(0.0)}</td>
+          <td>{money(0.0)}</td><td>{money(0.0)}</td><td>{money(0.0)}</td>
         </tr>
         """
     ]
     for option in options:
+        grid = grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0), {})
         rows.append(
             f"""
             <tr>
               <td>{html.escape(str(option.get("label") or ""))}</td>
+              <td>Solar only</td>
               <td>{kwh(float(option.get("peak_import_avoided_kwh") or 0.0))}</td>
               <td>{kwh(float(option.get("other_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(0.0)}</td>
               <td>{kwh(float(option.get("remaining_grid_import_kwh") or 0.0))}</td>
               <td>{kwh(float(option.get("remaining_solar_export_kwh") or 0.0))}</td>
               <td>{money(float(option.get("marginal_savings_to_next_capacity") or 0.0))}</td>
+              <td>{money(float(option.get("average_cost_per_delivered_battery_kwh") or 0.0))}</td>
+              <td>{money(float(option.get("average_avoided_grid_rate_per_discharged_kwh") or 0.0))}</td>
+            </tr>
+            <tr>
+              <td>{html.escape(str(option.get("label") or ""))}</td>
+              <td>Solar + cheap grid</td>
+              <td>{kwh(float(grid.get("peak_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(grid.get("other_import_avoided_kwh") or 0.0))}</td>
+              <td>{kwh(float(grid.get("grid_energy_used_to_charge_battery_kwh") or 0.0))} input / {kwh(float(grid.get("charging_losses_kwh") or 0.0))} losses</td>
+              <td>{kwh(float(grid.get("remaining_grid_import_kwh") or 0.0))}</td>
+              <td>{kwh(float(grid.get("remaining_solar_export_kwh") or 0.0))}</td>
+              <td>{money(float(grid.get("marginal_savings_to_next_capacity") or 0.0))}</td>
+              <td>{money(float(grid.get("average_cost_per_delivered_battery_kwh") or 0.0))}</td>
+              <td>{money(float(grid.get("average_avoided_grid_rate_per_discharged_kwh") or 0.0))}</td>
             </tr>
             """
         )
@@ -7760,7 +7982,7 @@ def battery_calculation_details_html(comparison: dict) -> str:
       <summary>How was this calculated?</summary>
       <p>{html.escape(str(comparison.get("methodology") or ""))}</p>
       <table class="responsive-table">
-        <thead><tr><th>Option</th><th>Peak avoided</th><th>Other avoided</th><th>Import left</th><th>Export left</th><th>Next-size gain</th></tr></thead>
+        <thead><tr><th>Option</th><th>Strategy</th><th>Peak avoided</th><th>Other avoided</th><th>Grid charge / losses</th><th>Import left</th><th>Export left</th><th>Next-size gain</th><th>Battery kWh cost</th><th>Avoided rate</th></tr></thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
     </details>
@@ -8164,6 +8386,7 @@ def write_html(
     notification_readiness_summary = notification_readiness.as_dict()
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
+    tariff_updates = tariff_update_overview(settings, billing_summary)
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,
@@ -8224,7 +8447,7 @@ def write_html(
   <section id="system" class="page">
     {page_heading_html("Settings", "Setup, imports, provider status, confidence, and privacy-safe diagnostics.")}
     <div id="setup">
-      {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management)}
+      {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management, tariff_updates)}
     </div>
     <div id="imports">
       {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}

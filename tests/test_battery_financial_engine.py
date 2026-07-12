@@ -49,9 +49,15 @@ class BatteryFinancialEngineTests(unittest.TestCase):
         self.assertEqual(comparison["baseline"]["label"], "No battery")
         self.assertEqual([item["capacity_kwh"] for item in comparison["options"]], [5.0, 10.0, 15.0, 20.0])
         self.assertIn("charges only from verified excess solar export", comparison["methodology"])
-        self.assertFalse(comparison["assumptions"]["grid_charging"])
+        self.assertIn("solar_only", comparison["assumptions"]["strategies"])
+        self.assertIn("solar_plus_grid_arbitrage", comparison["assumptions"]["strategies"])
+        self.assertIn("cheapest", comparison["assumptions"]["grid_charging"])
+        self.assertEqual(comparison["assumptions"]["round_trip_efficiency_pct"], 90.0)
         self.assertIn("diagnostics", comparison)
         self.assertIn("opportunity_metrics", comparison)
+        self.assertIn("strategies", comparison)
+        self.assertEqual([item["capacity_kwh"] for item in comparison["strategies"]["solar_only"]["options"]], [5.0, 10.0, 15.0, 20.0])
+        self.assertEqual([item["capacity_kwh"] for item in comparison["strategies"]["solar_plus_grid_arbitrage"]["options"]], [5.0, 10.0, 15.0, 20.0])
         self.assertEqual(comparison["options"][0]["daily_diagnostics"][0]["starting_state_of_charge_kwh"], 0.0)
         self.assertEqual(comparison["options"][0]["daily_diagnostics"][0]["energy_conservation_check"], "pass")
 
@@ -184,6 +190,89 @@ class BatteryFinancialEngineTests(unittest.TestCase):
 
         self.assertEqual(summary["energy_conservation_check"], "fail")
         self.assertIn("discharged_more_than_stored", summary["warnings"][0])
+
+    def test_grid_arbitrage_charges_only_when_loss_adjusted_spread_is_positive(self):
+        comparison = self.compare([
+            interval("2026-07-01", 12, "super_off_peak", solar_export=2.0),
+            interval("2026-07-01", 18, "peak", grid_import=5.0),
+            interval("2026-07-01", 20, "off_peak", grid_import=4.0),
+        ], baseline_bill=20.0, import_kwh=9.0, export_kwh=2.0)
+        solar = self.option(comparison, 5.0)
+        grid = comparison["strategies"]["solar_plus_grid_arbitrage"]["options"][0]
+        row = grid["daily_diagnostics"][0]
+
+        self.assertAlmostEqual(solar["period_savings"], 2.0 * (0.60 - 0.02))
+        self.assertAlmostEqual(grid["grid_energy_used_to_charge_battery_kwh"], 3.0 / 0.90)
+        self.assertAlmostEqual(grid["grid_charged_delivered_kwh"], 3.0)
+        self.assertAlmostEqual(grid["charging_losses_kwh"], (3.0 / 0.90) - 3.0)
+        self.assertGreater(grid["period_savings"], solar["period_savings"])
+        self.assertAlmostEqual(grid["additional_savings_from_grid_charging"], grid["period_savings"] - solar["period_savings"])
+        self.assertEqual(row["grid_charge_tariff_bucket"], "super_off_peak")
+        self.assertAlmostEqual(row["grid_charge_rate"], 0.08)
+        self.assertEqual(row["energy_conservation_check"], "pass")
+        self.assertEqual(row["warnings"], [])
+        self.assertIn("peak", row["discharge_destination_tariffs"])
+
+    def test_grid_arbitrage_does_not_charge_when_peak_value_is_below_effective_cost(self):
+        expensive_settings = Settings()
+        expensive_settings.import_rates = {
+            "super_off_peak": 0.50,
+            "off_peak": 0.52,
+            "peak": 0.55,
+        }
+        expensive_settings.export_credit_rate = 0.02
+        expensive_settings.battery_round_trip_efficiency = 0.80
+        result = self.engine.compare_home_battery_sizes(
+            [
+                interval("2026-07-01", 12, "super_off_peak", solar_export=0.0),
+                interval("2026-07-01", 18, "peak", grid_import=5.0),
+            ],
+            expensive_settings,
+            baseline_bill=10.0,
+            baseline_grid_import_kwh=5.0,
+            baseline_solar_exported_kwh=0.0,
+            capacities_kwh=(5.0,),
+        )
+        grid = result["strategies"]["solar_plus_grid_arbitrage"]["options"][0]
+
+        self.assertAlmostEqual(grid["grid_energy_used_to_charge_battery_kwh"], 0.0)
+        self.assertAlmostEqual(grid["period_savings"], 0.0)
+        self.assertAlmostEqual(grid["average_avoided_grid_rate_per_discharged_kwh"], 0.0)
+
+    def test_grid_arbitrage_respects_capacity_and_daily_limits(self):
+        limited_settings = Settings()
+        limited_settings.battery_charge_limit_kwh_per_day = 3.0
+        limited_settings.battery_discharge_limit_kwh_per_day = 2.0
+        result = self.engine.compare_home_battery_sizes(
+            [
+                interval("2026-07-01", 12, "super_off_peak", solar_export=1.0),
+                interval("2026-07-01", 18, "peak", grid_import=10.0),
+            ],
+            limited_settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=10.0,
+            baseline_solar_exported_kwh=1.0,
+            capacities_kwh=(5.0,),
+        )
+        grid = result["strategies"]["solar_plus_grid_arbitrage"]["options"][0]
+        row = grid["daily_diagnostics"][0]
+
+        self.assertAlmostEqual(row["solar_charged_kwh"], 1.0)
+        self.assertAlmostEqual(row["grid_charged_delivered_kwh"], 1.0)
+        self.assertAlmostEqual(row["total_battery_discharge_kwh"], 2.0)
+        self.assertLessEqual(row["charged_into_battery_kwh"], 3.0)
+
+    def test_solar_only_strategy_values_remain_unchanged_when_grid_strategy_is_added(self):
+        rows = [
+            interval("2026-07-01", 12, "super_off_peak", solar_export=5.0),
+            interval("2026-07-01", 18, "peak", grid_import=5.0),
+        ]
+        comparison = self.compare(rows, baseline_bill=20.0, import_kwh=5.0, export_kwh=5.0)
+        top_level = self.option(comparison, 5.0)
+        strategy = comparison["strategies"]["solar_only"]["options"][0]
+
+        self.assertAlmostEqual(top_level["period_savings"], 5.0 * (0.60 - 0.02))
+        self.assertEqual(top_level, strategy)
 
 
 if __name__ == "__main__":

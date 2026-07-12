@@ -1,5 +1,46 @@
 # Changelog
 
+## FIN-006 - Tariff Import Approval Workflow
+
+- Added a provider-based tariff import foundation with a `TariffProvider`
+  contract, registry, Synergy provider adapter, and pluggable structured source
+  loading for future retailers.
+- Added pending tariff update management so detected retailer changes are
+  staged with human-readable diffs, checksums, diagnostics, and financial
+  impact previews without activating automatically.
+- Added explicit approval and dismissal workflow: approval serializes the new
+  tariff version for resolver use, while dismissal archives the pending update
+  and keeps active tariffs unchanged.
+- Extended tariff versions with GST status and approved-version hydration while
+  preserving historical effective-date resolution.
+- Added a Settings tariff update section with current tariff metadata, pending
+  side-by-side comparisons, annual impact preview, raw changes, diagnostics,
+  and explicit check/approve/dismiss actions.
+- Added a non-blocking scheduled collection hook that stages tariff updates for
+  review before report regeneration.
+- Added regression tests for no-change imports, rate/window/supply/export
+  changes, checksum changes, pending creation, approval, dismissal, historical
+  preservation, financial previews, provider registration, diagnostics, and
+  Settings rendering.
+
+## FIN-005 - Tariff-Aware Grid Battery Charging
+
+- Extended the Financial Engine battery comparison with separate `solar_only`
+  and `solar_plus_grid_arbitrage` strategies while preserving the existing
+  solar-only option payload.
+- Added scheduled cheap-grid charging logic that prefers verified solar,
+  charges from the grid only during the cheapest configured tariff window when
+  loss-adjusted discharge value is positive, and records round-trip efficiency,
+  charging losses, avoided tariffs, and invariant diagnostics.
+- Updated the Decisions battery table to compare solar-only savings,
+  solar-plus-cheap-grid savings, additional grid-arbitrage benefit, estimated
+  bill, and the conservative recommendation signal.
+- Kept engineering metrics in the calculation disclosure and added daily
+  dispatch diagnostics for solar charging, grid charging, tariff rate, losses,
+  avoided cost, state of charge, and warnings.
+- Added tests for grid-arbitrage charging, no-arbitrage fallback, daily battery
+  limits, solar-only regression stability, and updated Decisions presentation.
+
 ## FIN-004 - Battery Model Validation View
 
 - Simplified the Decisions-page battery sizing comparison so homeowners see

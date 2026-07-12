@@ -300,6 +300,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.update_recommendation_lifecycle()
             elif request.path == "/setup/billing-cycle":
                 self.update_billing_cycle()
+            elif request.path == "/tariff-updates/check":
+                self.check_tariff_updates()
+            elif request.path == "/tariff-updates/approve":
+                self.resolve_tariff_update("approve")
+            elif request.path == "/tariff-updates/dismiss":
+                self.resolve_tariff_update("dismiss")
             elif request.path == "/imports/preview":
                 self.preview_import()
             elif request.path == "/imports/commit":
@@ -319,6 +325,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     success=False,
                 )
                 self.send_html(result_html.encode("utf-8"))
+            elif request.path.startswith("/tariff-updates/"):
+                self.redirect("/#tariff-updates")
             elif request.path.startswith("/api/providers/") and not self.provider_request_wants_json():
                 parts = [part for part in request.path.split("/") if part]
                 provider_id = parts[2] if len(parts) >= 3 else "provider"
@@ -538,6 +546,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
         )
         self.redirect("/#setup")
+
+    def check_tariff_updates(self) -> None:
+        settings = report.load_settings()
+        current_day = report.local_today()
+        period = report.resolve_period("current_billing_period", settings, current_day)
+        summary = None
+        try:
+            with sqlite3.connect(report.DB_PATH) as conn:
+                report.validate_database(conn)
+                summary = report.load_summary(conn, period.start, period.end, settings)
+        except (FileNotFoundError, RuntimeError, sqlite3.Error):
+            summary = None
+        report.check_tariff_updates(settings, summary)
+        self.redirect("/#tariff-updates")
+
+    def resolve_tariff_update(self, action: str) -> None:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        params = parse_qs(self.rfile.read(length).decode("utf-8"))
+        update_id = self.param(params, "update_id", "")
+        if not update_id:
+            raise ValueError("Tariff update id is required.")
+        repository = report.tariff_update_repository()
+        if action == "approve":
+            repository.approve(update_id)
+        elif action == "dismiss":
+            repository.dismiss(update_id)
+        else:
+            raise ValueError(f"Unsupported tariff update action: {action}")
+        self.redirect("/#tariff-updates")
 
     def preview_import(self) -> None:
         filename, content = self.read_uploaded_file()
