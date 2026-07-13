@@ -34,7 +34,6 @@ from engine.tariff_catalog import (
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
 LOG_PATH = PROJECT_ROOT / "logs" / "web.log"
 UPLOAD_DIR = PROJECT_ROOT / "data" / "import_uploads"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"

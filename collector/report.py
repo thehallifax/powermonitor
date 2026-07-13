@@ -504,11 +504,25 @@ def runtime_check_data() -> dict:
         host, port = web_bind_for_runtime_check()
     except Exception:
         host, port = None, None
+    try:
+        settings = load_settings()
+        active_tariff = tariff_metadata(settings, local_today())
+    except Exception:
+        active_tariff = None
+    try:
+        health_summary = public_health()
+    except Exception:
+        health_summary = {}
     return runtime_diagnostics(
         project_root=PROJECT_ROOT,
         database_path=DB_PATH,
+        report_path=REPORT_PATH,
+        settings_path=SETTINGS_PATH,
+        active_tariff_version=active_tariff,
+        health_summary=health_summary,
         web_host=host,
         web_port=port,
+        working_directory=Path.cwd(),
     )
 
 
@@ -7303,28 +7317,40 @@ def runtime_check_html(runtime_check: Optional[dict]) -> str:
           <p class="notice">Local environment details are not available for this report.</p>
         </div>
         """
+    tariff = runtime_check.get("active_tariff_version") or {}
+    health_summary = runtime_check.get("runtime_health_summary") or {}
     rows = [
+        ("Git commit", runtime_check.get("git_commit")),
         ("Python version", runtime_check.get("python_version")),
         ("Python executable", runtime_check.get("executable")),
+        ("Working directory", runtime_check.get("working_directory")),
         ("Project .venv", "Yes" if runtime_check.get("running_in_project_venv") else "No"),
         ("Playwright", "Available" if runtime_check.get("playwright_available") else "Missing"),
         ("Playwright Chromium", "Available" if runtime_check.get("playwright_chromium_available") else "Missing"),
         ("pypdf", "Available" if runtime_check.get("pypdf_available") else "Missing"),
         ("pdftotext", "Available" if runtime_check.get("pdftotext_available") else "Not found"),
         ("Project root", runtime_check.get("project_root")),
+        ("Report path", runtime_check.get("report_path")),
+        ("Report generated", runtime_check.get("report_generation_timestamp")),
         ("Database", runtime_check.get("database_path")),
-        ("Web bind", f"{runtime_check.get('web_host') or 'unknown'}:{runtime_check.get('web_port') or 'unknown'}"),
+        ("Settings/config", runtime_check.get("settings_path")),
+        ("Web bind", runtime_check.get("web_bind_address") or f"{runtime_check.get('web_host') or 'unknown'}:{runtime_check.get('web_port') or 'unknown'}"),
+        ("Active tariff version", tariff.get("version_id") or tariff.get("version") or tariff.get("tariff_name")),
+        ("Runtime health", health_summary.get("status") or health_summary.get("failure_type") or "n/a"),
     ]
     row_html = "".join(
         f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'n/a'))}</strong></div>"
         for label, value in rows
     )
+    launch_labels = runtime_check.get("active_launch_agent_labels") or []
+    launch_html = "".join(f"<li>{html.escape(str(label))}</li>" for label in launch_labels) or "<li>No active PowerMonitor LaunchAgents detected.</li>"
     warning_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in runtime_check.get("warnings") or [])
     warnings = f"<ul>{warning_rows}</ul>" if warning_rows else "<p>No runtime setup warnings detected.</p>"
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Local environment details</h3><span>Python environment</span></div>
+      <div class="chart-heading"><h3>Runtime diagnostics</h3><span>Canonical paths</span></div>
       <div class="config-grid">{row_html}</div>
+      <details class="evidence-trail"><summary>Active LaunchAgents</summary><ul>{launch_html}</ul></details>
       <details class="evidence-trail"><summary>Runtime setup warnings</summary>{warnings}</details>
     </div>
     """
