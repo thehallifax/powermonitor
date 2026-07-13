@@ -224,11 +224,153 @@ class TariffImportingTests(unittest.TestCase):
 
         self.assertEqual(result["diagnostics"]["import_status"], "pending_review")
         self.assertIn("Tariff updates", markup)
-        self.assertIn("Pending tariff update", markup)
-        self.assertIn("Approve update", markup)
+        self.assertIn("Update detected", markup)
+        self.assertIn("Approve tariff update", markup)
         self.assertIn("Dismiss update", markup)
-        self.assertIn("Tariff import diagnostics", markup)
+        self.assertIn("View diagnostics", markup)
         self.assertIn("View raw changes", markup)
+
+    def test_tariff_updates_no_update_state_is_plain_language(self):
+        active = version()
+        markup = report.tariff_updates_html(
+            {
+                "current_active_tariff": active.as_dict(),
+                "pending": [],
+                "diagnostics": {
+                    "synergy": {
+                        "provider": "Synergy",
+                        "last_successful_check": "2026-07-12T01:00:00+00:00",
+                        "import_status": "no_change",
+                    }
+                },
+            }
+        )
+
+        self.assertIn("Synergy EV Add On is current.", markup)
+        self.assertIn("Current tariff name", markup)
+        self.assertIn("Provider", markup)
+        self.assertIn("Effective date", markup)
+        self.assertIn("Last checked", markup)
+        self.assertIn("Current status", markup)
+        self.assertIn("Check for tariff updates", markup)
+        self.assertNotIn("Review changes", markup)
+        self.assertIn("View diagnostics", markup)
+        self.assertIn("<summary>View diagnostics</summary>", markup)
+
+    def test_tariff_update_pending_state_shows_summary_impact_and_decisions(self):
+        active = version()
+        pending = version(effective_from=date(2026, 8, 1), rate=0.55, supply=1.10, export=0.03)
+        update = pending_update(active, pending, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}, "solar_exported_kwh": 40})
+
+        markup = report.tariff_updates_html({"current_active_tariff": active.as_dict(), "pending": [update], "diagnostics": {}})
+
+        self.assertIn("Update detected", markup)
+        self.assertIn("Synergy has published updated rates for your plan.", markup)
+        self.assertIn("Based on your recent usage, this change may increase", markup)
+        self.assertIn("Estimated annual bill change", markup)
+        self.assertIn("Estimated monthly bill change", markup)
+        self.assertIn("Usage period used", markup)
+        self.assertIn("Review changes", markup)
+        self.assertIn("Approve tariff update", markup)
+        self.assertIn("Dismiss update", markup)
+        self.assertIn("Historical periods will keep the tariff that applied at the time", markup)
+        self.assertIn("Approval does not rewrite previous reports", markup)
+        self.assertIn("The pending version will be archived", markup)
+        self.assertIn("current active tariff remains unchanged", markup)
+
+    def test_tariff_update_comparison_only_shows_changed_fields(self):
+        active = version()
+        pending = version(effective_from=date(2026, 8, 1), rate=0.55, supply=1.10, export=0.02)
+        update = pending_update(active, pending, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}})
+
+        markup = report.tariff_updates_html({"current_active_tariff": active.as_dict(), "pending": [update], "diagnostics": {}})
+
+        self.assertIn("Daily supply charge", markup)
+        self.assertIn("Peak rate", markup)
+        self.assertIn("Effective date", markup)
+        self.assertNotIn("Off-peak rate", markup)
+        self.assertNotIn("Overnight rate", markup)
+        self.assertNotIn("Super off-peak rate", markup)
+
+    def test_tariff_update_styles_beneficial_adverse_and_structural_changes(self):
+        active = version(export=0.02)
+        pending = version(
+            effective_from=date(2026, 8, 1),
+            rate=0.55,
+            supply=1.10,
+            export=0.03,
+            windows=("Peak: 4pm-9pm", "Off peak: other"),
+        )
+        update = pending_update(active, pending, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}, "solar_exported_kwh": 40})
+
+        markup = report.tariff_updates_html({"current_active_tariff": active.as_dict(), "pending": [update], "diagnostics": {}})
+
+        self.assertIn("adverse", markup)
+        self.assertIn("cost increase", markup)
+        self.assertIn("beneficial", markup)
+        self.assertIn("Export credit", markup)
+        self.assertIn("neutral", markup)
+        self.assertIn("Tariff windows", markup)
+
+    def test_tariff_update_impact_wording_for_unchanged_and_changed_recommendations(self):
+        active = version()
+        unchanged = version(effective_from=date(2026, 8, 1), rate=0.50, supply=1.00, export=0.02)
+        unchanged_update = pending_update(active, unchanged, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}})
+        unchanged_update["financial_preview"]["annual_bill_difference"] = 0.0
+        unchanged_update["financial_preview"]["summary"] = "No material impact."
+        unchanged_markup = report.tariff_updates_html({"current_active_tariff": active.as_dict(), "pending": [unchanged_update], "diagnostics": {}})
+
+        changed = version(effective_from=date(2026, 8, 1), rate=0.70, supply=1.00, export=0.02)
+        changed_update = pending_update(active, changed, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}})
+        changed_markup = report.tariff_updates_html({"current_active_tariff": active.as_dict(), "pending": [changed_update], "diagnostics": {}})
+
+        self.assertIn("The recommended battery size is unchanged.", unchanged_markup)
+        self.assertIn("Your current plan still appears to be the better option.", unchanged_markup)
+        self.assertIn("Super off-peak charging remains the cheapest window.", unchanged_markup)
+        self.assertIn("Battery recommendation may change", changed_markup)
+        self.assertIn("Plan comparisons should be reviewed after approval.", changed_markup)
+
+    def test_tariff_update_confirmations_flash_and_diagnostics(self):
+        active = version()
+        pending = version(effective_from=date(2026, 8, 1), rate=0.55)
+        update = pending_update(active, pending, {"supply_days": 30, "grid_import_by_bucket": {"peak": 120}})
+        markup = report.tariff_updates_html(
+            {"current_active_tariff": active.as_dict(), "pending": [update], "diagnostics": {"synergy": {"provider": "Synergy", "import_status": "pending_review", "last_successful_check": "2026-07-12T00:00:00+00:00", "next_scheduled_check": "2026-07-19"}}},
+            {"action": "approve", "status": "success"},
+        )
+
+        self.assertIn("Tariff update approved.", markup)
+        self.assertIn("data-confirm=\"Approve this tariff update?", markup)
+        self.assertIn("data-confirm=\"Dismiss this tariff update?", markup)
+        self.assertIn("Provider check", markup)
+        self.assertIn("Active version", markup)
+        self.assertIn("Pending version", markup)
+        self.assertIn("Source and retrieval", markup)
+        self.assertIn("Last result", markup)
+        self.assertIn("Next scheduled check", markup)
+        self.assertIn("tariff-raw-table", markup)
+
+    def test_tariff_update_dismissed_flash_copy(self):
+        markup = report.tariff_updates_html(
+            {"current_active_tariff": version().as_dict(), "pending": [], "diagnostics": {}},
+            {"action": "dismiss", "status": "success"},
+        )
+
+        self.assertIn("Tariff update dismissed.", markup)
+        self.assertIn("current active tariff remains unchanged", markup)
+
+
+def pending_update(active: TariffVersion, pending: TariffVersion, usage_profile: dict) -> dict:
+    from engine.tariff_importing import pending_update_payload
+
+    return pending_update_payload(
+        active,
+        pending,
+        tariff_content_checksum(pending),
+        tariff_version_diff(active, pending),
+        usage_profile=usage_profile,
+        detected_at="2026-07-12T00:00:00+00:00",
+    )
 
 
 if __name__ == "__main__":

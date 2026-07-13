@@ -216,12 +216,16 @@ class WebImportUploadTests(unittest.TestCase):
             approve_id = repository.pending_updates()[0]["update_id"]
             approve_result = form_post(base_url, "/tariff-updates/approve", {"update_id": approve_id})
             self.assertIn("Tariff updates", approve_result)
+            self.assertIn("Tariff update approved.", approve_result)
+            self.assertIn("Historical periods were not rewritten", approve_result)
             self.assertEqual(repository.pending_updates(), [])
 
             repository.stage_pending(sample_tariff_update("pending-dismiss"))
             dismiss_id = repository.pending_updates()[0]["update_id"]
             dismiss_result = form_post(base_url, "/tariff-updates/dismiss", {"update_id": dismiss_id})
             self.assertIn("Tariff updates", dismiss_result)
+            self.assertIn("Tariff update dismissed.", dismiss_result)
+            self.assertIn("current active tariff remains unchanged", dismiss_result)
             self.assertEqual(repository.pending_updates(), [])
         finally:
             stop_server(server, thread)

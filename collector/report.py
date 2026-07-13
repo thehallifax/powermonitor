@@ -4718,6 +4718,7 @@ def setup_page_html(
     notification_preferences: Optional[dict] = None,
     provider_management: Optional[ProviderManager] = None,
     tariff_updates: Optional[dict] = None,
+    tariff_update_flash: Optional[dict] = None,
 ) -> str:
     if not setup:
         return '<section class="report-section"><p class="notice">Setup guidance is unavailable.</p></section>'
@@ -4744,7 +4745,7 @@ def setup_page_html(
     {notification_notice}
     {first_time_intro_html(setup)}
     {billing_cycle_setup_html(settings)}
-    {tariff_updates_html(tariff_updates)}
+    {tariff_updates_html(tariff_updates, tariff_update_flash)}
     {first_time_finish_html(setup, settings)}
     {setup_integrations_html(provider_management)}
     <section class="report-section compact-section">
@@ -4888,48 +4889,36 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     """
 
 
-def tariff_updates_html(tariff_updates: Optional[dict]) -> str:
+def tariff_updates_html(tariff_updates: Optional[dict], tariff_update_flash: Optional[dict] = None) -> str:
     if tariff_updates is None:
         return ""
     current = tariff_updates.get("current_active_tariff") or {}
     pending = tariff_updates.get("pending") or []
     diagnostics_by_provider = tariff_updates.get("diagnostics") or {}
-    current_rates = current.get("usage_rates") or {}
-    current_rows = "".join(
-        f"<div><span>{html.escape(bucket.replace('_', ' ').title())}</span><strong>{money(float(rate or 0.0))}/kWh</strong></div>"
-        for bucket, rate in current_rates.items()
-    )
     pending_html = "".join(tariff_update_card_html(update) for update in pending)
-    if not pending_html:
-        pending_html = '<p class="notice">No pending tariff updates. Run a tariff check to stage retailer changes for review.</p>'
     diagnostics_html = "".join(
-        tariff_update_diagnostics_html(provider, diagnostics)
+        tariff_update_diagnostics_html(provider, diagnostics, current, pending[0] if pending else None)
         for provider, diagnostics in diagnostics_by_provider.items()
     ) or '<p class="scenario-note">No tariff import checks have run yet.</p>'
+    last_checked = _tariff_last_checked(diagnostics_by_provider)
+    current_status = "Update ready for review" if pending else "Current"
+    no_update = not pending
+    flash_html = tariff_update_flash_html(tariff_update_flash)
+    body = (
+        tariff_no_update_state_html(current, last_checked, current_status)
+        if no_update else
+        pending_html
+    )
     return f"""
     <section id="tariff-updates" class="report-section setup-section tariff-updates-section">
       <div class="section-title">
         <div><span class="eyebrow">Settings</span><h2>Tariff updates</h2></div>
-        <p>PowerMonitor can stage retailer tariff changes for review. New tariffs are not activated until you approve them.</p>
+        <p>Review retailer tariff changes before they affect new calculations.</p>
       </div>
-      <div class="system-card">
-        <div class="chart-heading"><h3>Current active tariff</h3><span>{html.escape(str(current.get("provider") or ""))}</span></div>
-        <div class="config-grid">
-          <div><span>Tariff</span><strong>{html.escape(str(current.get("tariff_name") or "Unknown"))}</strong></div>
-          <div><span>Version</span><strong>{html.escape(str(current.get("version") or "Unknown"))}</strong></div>
-          <div><span>Effective from</span><strong>{html.escape(str(current.get("effective_from") or "Unknown"))}</strong></div>
-          <div><span>Supply charge</span><strong>{money(float(current.get("supply_charge_per_day") or 0.0))}/day</strong></div>
-          <div><span>Export credit</span><strong>{money(float((current.get("export_rates") or {}).get("standard") or 0.0))}/kWh</strong></div>
-          <div><span>Checksum</span><strong>{html.escape(str(current.get("version_hash") or "")[:12])}</strong></div>
-          {current_rows}
-        </div>
-      </div>
-      <form method="post" action="/tariff-updates/check" class="inline-action-form">
-        <button type="submit">Check for tariff updates</button>
-      </form>
-      {pending_html}
-      <details class="battery-calculation-details">
-        <summary>Tariff import diagnostics</summary>
+      {flash_html}
+      {body}
+      <details class="battery-calculation-details tariff-diagnostics-disclosure">
+        <summary>View diagnostics</summary>
         {diagnostics_html}
       </details>
     </section>
@@ -4940,66 +4929,291 @@ def tariff_update_card_html(update: dict) -> str:
     pending_version = update.get("pending_version") or {}
     current_version = update.get("current_version") or {}
     preview = update.get("financial_preview") or {}
-    diff_rows = "".join(
+    update_id = html.escape(str(update.get("update_id") or ""))
+    impact = tariff_impact_summary(preview, current_version, pending_version)
+    comparison_rows = tariff_changed_fields_html(update, current_version, pending_version)
+    raw_rows = "".join(
         f"""
-        <tr>
+        <tr class="{html.escape(tariff_change_tone(change))}">
           <td>{html.escape(str(change.get("label") or ""))}</td>
           <td>{html.escape(str(change.get("before") or ""))}</td>
           <td>{html.escape(str(change.get("after") or ""))}</td>
+          <td>{html.escape(tariff_change_text(change))}</td>
         </tr>
         """
         for change in update.get("diff") or []
-    ) or '<tr><td colspan="3">Checksum changed with no rate-level difference.</td></tr>'
-    update_id = html.escape(str(update.get("update_id") or ""))
-    preview_summary = preview.get("summary") or preview.get("basis") or "Financial preview is unavailable."
-    impact = preview.get("annual_bill_difference")
-    impact_label = money(float(impact)) if impact is not None else "Unknown"
+    ) or '<tr><td colspan="4">Checksum changed with no rate-level difference.</td></tr>'
     return f"""
-    <article class="system-card tariff-update-card">
-      <div class="chart-heading">
-        <h3>Pending tariff update</h3>
-        <span>{html.escape(str(update.get("date_detected") or ""))}</span>
+    <article class="system-card tariff-update-card tariff-update-review">
+      <div class="tariff-update-hero">
+        <div>
+          <span>Update detected</span>
+          <h3>{html.escape(str(update.get("provider") or pending_version.get("provider") or "Provider"))} has published updated rates for your plan.</h3>
+          <p>{html.escape(impact["summary_sentence"])}</p>
+        </div>
+        <strong>{html.escape(impact["annual_label"])}</strong>
       </div>
-      <div class="provider-guidance-grid">
-        <div><span>Tariff</span><strong>{html.escape(str(pending_version.get("tariff_name") or update.get("tariff_name") or ""))}</strong></div>
-        <div><span>Effective date</span><strong>{html.escape(str(update.get("effective_date") or pending_version.get("effective_from") or ""))}</strong></div>
-        <div><span>Current checksum</span><strong>{html.escape(str(update.get("current_checksum") or current_version.get("version_hash") or "")[:12])}</strong></div>
-        <div><span>Pending checksum</span><strong>{html.escape(str(update.get("pending_checksum") or pending_version.get("version_hash") or "")[:12])}</strong></div>
-        <div><span>Estimated annual impact</span><strong>{html.escape(impact_label)}</strong></div>
-        <div><span>Preview</span><strong>{html.escape(str(preview_summary))}</strong></div>
+      <div class="tariff-update-summary-list">
+        <div><span>Provider</span><strong>{html.escape(str(update.get("provider") or pending_version.get("provider") or "Unknown"))}</strong></div>
+        <div><span>Tariff name</span><strong>{html.escape(str(pending_version.get("tariff_name") or update.get("tariff_name") or "Unknown"))}</strong></div>
+        <div><span>Date detected</span><strong>{html.escape(display_timestamp(update.get("date_detected")))}</strong></div>
+        <div><span>Effective date</span><strong>{html.escape(str(update.get("effective_date") or pending_version.get("effective_from") or "Unknown"))}</strong></div>
+        <div><span>Current version</span><strong>{html.escape(str(current_version.get("version") or "Unknown"))}</strong></div>
+        <div><span>Proposed version</span><strong>{html.escape(str(pending_version.get("version") or "Unknown"))}</strong></div>
       </div>
-      <table class="responsive-table">
-        <thead><tr><th>Item</th><th>Current</th><th>Pending</th></tr></thead>
-        <tbody>{diff_rows}</tbody>
-      </table>
-      <p class="scenario-note">{html.escape(str(preview.get("battery_recommendation_impact") or ""))}</p>
-      <p class="scenario-note">{html.escape(str(preview.get("plan_recommendation_impact") or ""))}</p>
-      <div class="provider-actions">
-        <form method="post" action="/tariff-updates/approve"><input type="hidden" name="update_id" value="{update_id}"><button type="submit">Approve update</button></form>
-        <form method="post" action="/tariff-updates/dismiss"><input type="hidden" name="update_id" value="{update_id}"><button type="submit">Dismiss update</button></form>
+      <div class="tariff-impact-card">
+        <div><span>Estimated annual bill change</span><strong>{html.escape(impact["annual_label"])}</strong></div>
+        <div><span>Estimated monthly bill change</span><strong>{html.escape(impact["monthly_label"])}</strong></div>
+        <div><span>Current plan</span><strong>{html.escape(impact["plan_label"])}</strong></div>
+        <div><span>Battery recommendation</span><strong>{html.escape(impact["battery_label"])}</strong></div>
+        <div><span>EV charging guidance</span><strong>{html.escape(impact["ev_label"])}</strong></div>
+        <div><span>Confidence</span><strong>{html.escape(impact["confidence"])}</strong></div>
+        <div><span>Usage period used</span><strong>{html.escape(impact["basis"])}</strong></div>
       </div>
-      <details class="evidence-trail"><summary>View raw changes</summary><pre>{html.escape(json.dumps(update, indent=2, sort_keys=True))}</pre></details>
+      <div class="tariff-comparison-list">
+        <div class="tariff-comparison-header"><span>Review changes</span><strong>Changed fields only</strong></div>
+        {comparison_rows}
+      </div>
+      <div class="tariff-decision-actions">
+        <form method="post" action="/tariff-updates/approve">
+          <input type="hidden" name="update_id" value="{update_id}">
+          <p>New calculations from the effective date will use the approved version. Historical periods will keep the tariff that applied at the time. Approval does not rewrite previous reports.</p>
+          <button type="submit" data-confirm="Approve this tariff update? New calculations from the effective date will use the approved version. Historical reports will not be rewritten.">Approve tariff update</button>
+        </form>
+        <form method="post" action="/tariff-updates/dismiss">
+          <input type="hidden" name="update_id" value="{update_id}">
+          <p>The pending version will be archived. Your current active tariff remains unchanged.</p>
+          <button type="submit" data-confirm="Dismiss this tariff update? The pending version will be archived and the current active tariff will remain unchanged.">Dismiss update</button>
+        </form>
+      </div>
+      <details class="evidence-trail tariff-raw-changes"><summary>View raw changes</summary><div class="tariff-raw-table"><table class="responsive-table"><thead><tr><th>Item</th><th>Current</th><th>New</th><th>Change</th></tr></thead><tbody>{raw_rows}</tbody></table></div><pre>{html.escape(json.dumps(update, indent=2, sort_keys=True))}</pre></details>
     </article>
     """
 
 
-def tariff_update_diagnostics_html(provider: str, diagnostics: dict) -> str:
-    rows = [
-        ("Last successful tariff check", diagnostics.get("last_successful_check")),
-        ("Provider", diagnostics.get("provider") or provider),
-        ("Tariff version", diagnostics.get("tariff_version")),
-        ("Current checksum", diagnostics.get("current_checksum")),
-        ("Pending checksum", diagnostics.get("pending_checksum")),
-        ("Import status", diagnostics.get("import_status")),
-        ("Last error", diagnostics.get("last_error") or "None"),
-        ("Source URL", diagnostics.get("source_url")),
-        ("Next scheduled check", diagnostics.get("next_scheduled_check")),
+def tariff_update_diagnostics_html(provider: str, diagnostics: dict, current: dict, pending_update: Optional[dict]) -> str:
+    pending = (pending_update or {}).get("pending_version") or {}
+    groups = [
+        ("Provider check", [("Provider", diagnostics.get("provider") or provider), ("Current status", diagnostics.get("import_status"))]),
+        ("Active version", [("Tariff", current.get("tariff_name")), ("Version", current.get("version")), ("Effective date", current.get("effective_from"))]),
+        ("Pending version", [("Tariff", pending.get("tariff_name") or "None pending"), ("Version", pending.get("version")), ("Effective date", pending.get("effective_from"))]),
+        ("Source and retrieval", [("Source URL", diagnostics.get("source_url")), ("Current checksum", diagnostics.get("current_checksum")), ("Pending checksum", diagnostics.get("pending_checksum"))]),
+        ("Last result", [("Last successful tariff check", diagnostics.get("last_successful_check")), ("Last error", diagnostics.get("last_error") or "None")]),
+        ("Next scheduled check", [("Next scheduled check", diagnostics.get("next_scheduled_check"))]),
     ]
+    group_html = "".join(
+        f"""
+        <div class="tariff-diagnostics-group">
+          <span>{html.escape(title)}</span>
+          <div class="config-grid">{"".join(f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'n/a'))}</strong></div>" for label, value in rows)}</div>
+        </div>
+        """
+        for title, rows in groups
+    )
     return f"""
-    <div class="config-grid">
-      {"".join(f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value or 'n/a'))}</strong></div>" for label, value in rows)}
+    <div class="tariff-diagnostics">{group_html}</div>
+    """
+
+
+def tariff_no_update_state_html(current: dict, last_checked: str, current_status: str) -> str:
+    provider = str(current.get("provider") or "Your retailer")
+    tariff_name = str(current.get("tariff_name") or "Current tariff")
+    return f"""
+    <div class="system-card tariff-current-card">
+      <div class="chart-heading"><h3>{html.escape(tariff_name)} is current.</h3><span>Current active tariff</span></div>
+      <p>Your {html.escape(provider)} {html.escape(tariff_name)} tariff is current. PowerMonitor will keep historical versions separate so past periods continue to use the tariff that applied at the time.</p>
+      <div class="tariff-update-summary-list">
+        <div><span>Current tariff name</span><strong>{html.escape(tariff_name)}</strong></div>
+        <div><span>Provider</span><strong>{html.escape(provider)}</strong></div>
+        <div><span>Effective date</span><strong>{html.escape(str(current.get("effective_from") or "Unknown"))}</strong></div>
+        <div><span>Last checked</span><strong>{html.escape(last_checked or "Not checked yet")}</strong></div>
+        <div><span>Current status</span><strong>{html.escape(current_status)}</strong></div>
+      </div>
+      <form method="post" action="/tariff-updates/check" class="inline-action-form tariff-primary-action">
+        <button type="submit">Check for tariff updates</button>
+      </form>
     </div>
     """
+
+
+def tariff_update_flash_html(flash: Optional[dict]) -> str:
+    if not flash:
+        return ""
+    status = str(flash.get("status") or "success")
+    action = str(flash.get("action") or "")
+    if action == "approve":
+        title = "Tariff update approved."
+        message = "Future calculations from the effective date will use the approved tariff version. Historical periods were not rewritten."
+    elif action == "dismiss":
+        title = "Tariff update dismissed."
+        message = "The pending tariff version was archived. The current active tariff remains unchanged."
+    elif action == "check":
+        title = "Tariff check complete."
+        message = str(flash.get("message") or "PowerMonitor checked for retailer tariff updates.")
+    else:
+        title = "Tariff update action complete."
+        message = str(flash.get("message") or "Review the tariff update status below.")
+    return f"""
+    <div class="provider-action-result visible {html.escape(status)} provider-flash tariff-update-flash" role="status">
+      <span>{html.escape(friendly_label(action or "tariff update"))}</span>
+      <strong>{html.escape(title)}</strong>
+      <small>{html.escape(message)}</small>
+    </div>
+    """
+
+
+def _tariff_last_checked(diagnostics_by_provider: dict) -> str:
+    values = [
+        diagnostics.get("last_successful_check")
+        for diagnostics in diagnostics_by_provider.values()
+        if isinstance(diagnostics, dict) and diagnostics.get("last_successful_check")
+    ]
+    return display_timestamp(max(values)) if values else "Not checked yet"
+
+
+def tariff_changed_fields_html(update: dict, current_version: dict, pending_version: dict) -> str:
+    changes = list(update.get("diff") or [])
+    current_effective = str(current_version.get("effective_from") or "")
+    pending_effective = str(update.get("effective_date") or pending_version.get("effective_from") or "")
+    if current_effective and pending_effective and current_effective != pending_effective:
+        changes.append(
+            {
+                "field": "effective_date",
+                "label": "Effective date",
+                "before": current_effective,
+                "after": pending_effective,
+                "summary": f"Effective date: {current_effective} -> {pending_effective}",
+            }
+        )
+    rows = []
+    for change in changes:
+        tone = tariff_change_tone(change)
+        rows.append(
+            f"""
+            <div class="tariff-comparison-row {html.escape(tone)}">
+              <span>{html.escape(tariff_change_label(change))}</span>
+              <div><small>Current</small><strong>{html.escape(str(change.get("before") or ""))}</strong></div>
+              <div><small>New</small><strong>{html.escape(str(change.get("after") or ""))}</strong></div>
+              <div><small>Change</small><strong>{html.escape(tariff_change_text(change))}</strong></div>
+            </div>
+            """
+        )
+    return "".join(rows) or '<p class="notice">No rate-level fields changed.</p>'
+
+
+def tariff_change_label(change: dict) -> str:
+    field = str(change.get("field") or "")
+    label = str(change.get("label") or field)
+    labels = {
+        "supply_charge": "Daily supply charge",
+        "usage:peak": "Peak rate",
+        "usage:off_peak": "Off-peak rate",
+        "usage:overnight": "Overnight rate",
+        "usage:super_off_peak": "Super off-peak rate",
+        "export:standard": "Export credit",
+        "tariff_windows": "Tariff windows",
+        "effective_date": "Effective date",
+    }
+    return labels.get(field, label)
+
+
+def tariff_change_tone(change: dict) -> str:
+    field = str(change.get("field") or "")
+    before = _tariff_number(change.get("before"))
+    after = _tariff_number(change.get("after"))
+    if field in {"tariff_windows", "effective_date", "gst_status", "currency", "checksum"} or before is None or after is None:
+        return "neutral"
+    delta = after - before
+    if abs(delta) < 1e-9:
+        return "neutral"
+    if field.startswith("export:"):
+        return "beneficial" if delta > 0 else "adverse"
+    return "adverse" if delta > 0 else "beneficial"
+
+
+def tariff_change_text(change: dict) -> str:
+    field = str(change.get("field") or "")
+    before = _tariff_number(change.get("before"))
+    after = _tariff_number(change.get("after"))
+    if field in {"tariff_windows", "effective_date"}:
+        return "Changed"
+    if before is None or after is None:
+        return "Changed"
+    delta = after - before
+    if abs(delta) < 1e-9:
+        return "No material change"
+    unit = " c/kWh" if "c" in f"{change.get('before')} {change.get('after')}" else "/day" if "$" in f"{change.get('before')} {change.get('after')}" else ""
+    sign = "+" if delta > 0 else "-"
+    text = f"{sign}{abs(delta):.2f}{unit}"
+    tone = tariff_change_tone(change)
+    if tone == "beneficial":
+        text += " (beneficial)"
+    elif tone == "adverse":
+        text += " (cost increase)" if delta > 0 and not field.startswith("export:") else " (less favourable)"
+    return text
+
+
+def _tariff_number(value: Any) -> Optional[float]:
+    text = str(value or "").replace("$", "").replace("c/kWh", "").replace("c", "").replace("/kWh", "").replace("/day", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def tariff_impact_summary(preview: dict, current_version: dict, pending_version: dict) -> dict[str, str]:
+    annual = preview.get("annual_bill_difference")
+    available = bool(preview.get("available")) and annual is not None
+    if available:
+        annual_value = float(annual)
+        monthly_value = annual_value / 12
+        direction = "increase" if annual_value > 0 else "decrease" if annual_value < 0 else "not materially change"
+        annual_label = f"{'+' if annual_value > 0 else '-' if annual_value < 0 else ''}{money(abs(annual_value))}/year" if annual_value else "$0/year"
+        monthly_label = f"{'+' if monthly_value > 0 else '-' if monthly_value < 0 else ''}{money(abs(monthly_value))}/month" if monthly_value else "$0/month"
+        summary_sentence = f"Based on your recent usage, this change may {direction} your electricity costs by about {money(abs(annual_value))} per year."
+        confidence = "Medium"
+    else:
+        annual_label = "Unavailable"
+        monthly_label = "Unavailable"
+        summary_sentence = str(preview.get("basis") or "PowerMonitor needs recent usage before estimating household impact.")
+        confidence = "Low"
+    basis = str(preview.get("basis") or "Recent household usage unavailable.")
+    battery_raw = str(preview.get("battery_recommendation_impact") or "")
+    battery_label = (
+        "The recommended battery size is unchanged."
+        if "minimal" in battery_raw.lower() or "unchanged" in battery_raw.lower()
+        else "Battery recommendation may change; review the battery scenario after approval."
+        if battery_raw else
+        "Battery recommendation impact is unavailable."
+    )
+    plan_label_text = (
+        "Your current plan still appears to be the better option."
+        if available and abs(float(annual or 0.0)) < 1.0
+        else "Plan comparisons should be reviewed after approval."
+        if available else
+        "Plan comparison impact is unavailable."
+    )
+    ev_label = tariff_ev_guidance_label(pending_version)
+    return {
+        "annual_label": annual_label,
+        "monthly_label": monthly_label,
+        "summary_sentence": summary_sentence,
+        "battery_label": battery_label,
+        "plan_label": plan_label_text,
+        "ev_label": ev_label,
+        "confidence": confidence,
+        "basis": basis,
+    }
+
+
+def tariff_ev_guidance_label(pending_version: dict) -> str:
+    rates = dict(pending_version.get("usage_rates") or {})
+    if not rates:
+        return "EV charging guidance is unavailable until tariff rates are known."
+    cheapest = min(rates, key=lambda bucket: float(rates.get(bucket) or 0.0))
+    if cheapest == "super_off_peak":
+        return "Super off-peak charging remains the cheapest window."
+    return f"{cheapest.replace('_', ' ').title()} appears to be the cheapest charging window."
 
 
 def setup_choice_select(name: str, selected: str, options: tuple[tuple[str, str], ...]) -> str:
@@ -8212,6 +8426,7 @@ def write_html(
     glance_only: bool = False,
     overnight_baseload_watts: Optional[float] = None,
     provider_flash: Optional[dict] = None,
+    tariff_update_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
@@ -8574,7 +8789,7 @@ def write_html(
   <section id="system" class="page">
     {page_heading_html("Settings", "Setup, imports, provider status, confidence, and privacy-safe diagnostics.")}
     <div id="setup">
-      {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management, tariff_updates)}
+    {setup_page_html(setup_checklist, settings, promotion_summary, notification_preferences.as_dict(), provider_management, tariff_updates, tariff_update_flash)}
     </div>
     <div id="imports">
       {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}
@@ -9124,6 +9339,33 @@ def write_html(
     .provider-action-result span {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-action-result strong {{ margin-top:3px; font-size:13px; }} .provider-action-result small {{ margin-top:4px; color:var(--muted); font-size:11px; }}
     .provider-action-result pre {{ max-height:220px; overflow:auto; margin:9px 0 0; padding:10px; background:#fff; border:1px solid var(--line); border-radius:10px; font-size:10px; white-space:pre-wrap; }}
+    .tariff-update-hero {{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:start; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
+    .tariff-update-hero span,.tariff-update-summary-list span,.tariff-impact-card span,.tariff-comparison-header span,.tariff-comparison-row small,.tariff-diagnostics-group > span {{ display:block; color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .tariff-update-hero h3 {{ margin:5px 0 0; font-size:22px; line-height:1.15; letter-spacing:-.02em; }}
+    .tariff-update-hero p {{ margin:8px 0 0; color:var(--ink); font-size:13px; line-height:1.45; }}
+    .tariff-update-hero > strong {{ white-space:nowrap; font-size:30px; line-height:1; font-variant-numeric:tabular-nums; }}
+    .tariff-update-summary-list,.tariff-impact-card {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:10px; margin-top:12px; }}
+    .tariff-update-summary-list div,.tariff-impact-card div {{ padding:12px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
+    .tariff-update-summary-list strong,.tariff-impact-card strong {{ display:block; margin-top:4px; font-size:13px; line-height:1.35; }}
+    .tariff-comparison-list {{ display:grid; gap:8px; margin-top:14px; }}
+    .tariff-comparison-header {{ display:flex; justify-content:space-between; gap:10px; align-items:end; padding:0 2px; }}
+    .tariff-comparison-header strong {{ font-size:12px; color:var(--muted); }}
+    .tariff-comparison-row {{ display:grid; grid-template-columns:minmax(160px,1.2fr) repeat(3,minmax(120px,1fr)); gap:10px; align-items:center; padding:12px; background:#fff; border:1px solid var(--line); border-left-width:5px; border-radius:12px; }}
+    .tariff-comparison-row > span {{ font-weight:850; }}
+    .tariff-comparison-row strong {{ display:block; margin-top:3px; font-size:13px; font-variant-numeric:tabular-nums; }}
+    .tariff-comparison-row.beneficial {{ border-left-color:#2f8f68; background:#f3fbf7; }}
+    .tariff-comparison-row.adverse {{ border-left-color:#b84a3a; background:#fff5f3; }}
+    .tariff-comparison-row.neutral {{ border-left-color:#c49a3a; background:#fffaf0; }}
+    .tariff-decision-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px; }}
+    .tariff-decision-actions form {{ display:grid; gap:10px; align-content:start; padding:12px; background:#fff; border:1px solid var(--line); border-radius:12px; }}
+    .tariff-decision-actions p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
+    .tariff-decision-actions button {{ min-height:42px; padding:10px 12px; color:#fff; background:var(--deep-2); border:1px solid var(--deep-2); border-radius:10px; font:inherit; font-size:13px; font-weight:800; cursor:pointer; }}
+    .tariff-decision-actions form:nth-child(2) button {{ color:#74571a; background:#fffaf0; border-color:#eeddb0; }}
+    .tariff-raw-table {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
+    .tariff-raw-changes pre {{ max-height:260px; overflow:auto; }}
+    .tariff-diagnostics {{ display:grid; gap:12px; }}
+    .tariff-diagnostics-group {{ display:grid; gap:8px; }}
+    .tariff-current-card > p {{ color:var(--ink); }}
     .import-panel {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
     .import-panel table {{ width:100%; border-collapse:collapse; }}
     .import-panel th,.import-panel td {{ padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; font-size:12px; }}
@@ -9292,7 +9534,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics,.tariff-update-hero,.tariff-decision-actions {{ grid-template-columns:1fr; }} .tariff-update-hero > strong {{ white-space:normal; }} .tariff-comparison-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
@@ -9462,6 +9704,14 @@ def write_html(
       runProviderAction(form, actionName);
     }});
   }});
+
+  document.querySelectorAll(".tariff-decision-actions form").forEach((form) => {{
+    form.addEventListener("submit", (event) => {{
+      const submitter = event.submitter;
+      const confirmation = submitter && submitter.dataset.confirm ? submitter.dataset.confirm : "";
+      if (confirmation && !window.confirm(confirmation)) event.preventDefault();
+    }});
+  }});
 }})();
 </script>
 </body></html>
@@ -9478,6 +9728,7 @@ def build_live_html(
     end: Optional[str] = None,
     glance_only: bool = False,
     provider_flash: Optional[dict] = None,
+    tariff_update_flash: Optional[dict] = None,
 ) -> str:
     configure_demo_mode()
     settings = load_settings()
@@ -9533,6 +9784,7 @@ def build_live_html(
         glance_only=glance_only,
         overnight_baseload_watts=overnight_baseload_watts,
         provider_flash=provider_flash,
+        tariff_update_flash=tariff_update_flash,
         runtime_check=runtime_check,
         energy_timeline=energy_timeline,
     )

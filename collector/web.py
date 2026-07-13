@@ -130,6 +130,28 @@ def provider_flash_from_params(params: dict) -> Optional[dict]:
     }
 
 
+def tariff_update_flash_from_params(params: dict) -> Optional[dict]:
+    action = DashboardHandler.param(params, "tariff_update_action")
+    if not action:
+        return None
+    return {
+        "action": action,
+        "status": DashboardHandler.param(params, "tariff_update_status", "success"),
+        "message": DashboardHandler.param(params, "tariff_update_message", ""),
+    }
+
+
+def tariff_update_redirect(action: str, *, status: str = "success", message: str = "") -> str:
+    query = urlencode(
+        {
+            "tariff_update_action": action,
+            "tariff_update_status": status,
+            "tariff_update_message": message,
+        }
+    )
+    return f"/?{query}#tariff-updates"
+
+
 def provider_action_redirect(provider_id: str, action: str, result) -> str:
     message = str(result.user_message or "Provider action completed.")
     next_step = str(result.next_step or "Review provider status.")
@@ -565,9 +587,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 summary = report.load_summary(conn, period.start, period.end, settings)
         except (FileNotFoundError, RuntimeError, sqlite3.Error):
             summary = None
-        report.check_tariff_updates(settings, summary)
+        result = report.check_tariff_updates(settings, summary)
         regenerate_dashboard_report()
-        self.redirect("/#tariff-updates")
+        status = str(result.get("status") or "checked")
+        message = (
+            "A tariff update is ready for review."
+            if status == "pending_review"
+            else "No tariff update was found."
+            if status == "no_change"
+            else "PowerMonitor could not complete the tariff check."
+            if status == "error"
+            else "Tariff check complete."
+        )
+        self.redirect(tariff_update_redirect("check", status="failure" if status == "error" else "success", message=message))
 
     def resolve_tariff_update(self, action: str) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -583,7 +615,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             raise ValueError(f"Unsupported tariff update action: {action}")
         regenerate_dashboard_report()
-        self.redirect("/#tariff-updates")
+        message = (
+            "Approved. Future calculations from the effective date will use the new version; historical periods were not rewritten."
+            if action == "approve"
+            else "Dismissed. The pending version was archived and the active tariff was left unchanged."
+        )
+        self.redirect(tariff_update_redirect(action, message=message))
 
     def preview_import(self) -> None:
         filename, content = self.read_uploaded_file()
@@ -651,6 +688,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(result_html.encode("utf-8"))
 
     def serve_dashboard(self, params: dict) -> None:
+        provider_flash = provider_flash_from_params(params)
+        tariff_flash = tariff_update_flash_from_params(params)
+        if provider_flash or tariff_flash:
+            content = report.build_live_html(
+                provider_flash=provider_flash,
+                tariff_update_flash=tariff_flash,
+            ).encode("utf-8")
+            self.send_html(content)
+            return
         self.serve_static_report()
 
     def serve_glance(self, params: dict) -> None:
