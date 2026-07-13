@@ -179,6 +179,13 @@
 
 - Removed the deprecated `cgi` dependency from the local web server upload path
   and replaced it with Python 3.14-compatible multipart parsing.
+- Added LaunchAgent namespace cleanup and validation so installs retire obsolete
+  PowerMonitor jobs and report duplicate or mismatched collector, web, and OCPP
+  services.
+- Added runtime diagnostics and canonical report-path auditing for Settings and
+  the `collector/diagnostics.py` CLI, including live/report hash checks,
+  duplicate process/listener detection, stale report detection, and
+  LaunchAgent working-directory/executable drift.
 - Added runtime diagnostics for the active Python executable, project venv
   status, Playwright/Chromium, pypdf, pdftotext, project root, database path,
   and web bind address.

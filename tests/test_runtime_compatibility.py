@@ -14,6 +14,7 @@ for path in (PROJECT_ROOT, COLLECTOR_DIR):
         sys.path.insert(0, str(path))
 
 import install_launch_agents
+import validate_launch_agents
 import web
 from engine.runtime_diagnostics import runtime_diagnostics
 
@@ -93,6 +94,48 @@ class RuntimeCompatibilityTests(unittest.TestCase):
                     plist = plistlib.load(handle)
                 self.assertEqual(plist["ProgramArguments"][0], str(python_path.resolve()))
                 self.assertNotEqual(plist["ProgramArguments"][0], "/usr/bin/python3")
+
+    def test_launch_agent_generator_removes_obsolete_namespace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+            old_plist = launch_dir / "com.penrite.powermonitor.plist"
+            with old_plist.open("wb") as handle:
+                plistlib.dump({"Label": "com.penrite.powermonitor"}, handle)
+
+            with patch("install_launch_agents.subprocess.run") as run:
+                messages = install_launch_agents.remove_obsolete_launch_agents(launch_dir)
+
+            self.assertFalse(old_plist.exists())
+            self.assertTrue(any("Removed obsolete plist" in message for message in messages))
+            run.assert_called()
+
+    def test_launch_agent_validator_detects_duplicate_obsolete_collector(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+            supported = launch_dir / "com.local.powermonitor.collector.plist"
+            obsolete = launch_dir / "com.penrite.powermonitor.plist"
+            for path, label in (
+                (supported, "com.local.powermonitor.collector"),
+                (obsolete, "com.penrite.powermonitor"),
+            ):
+                with path.open("wb") as handle:
+                    plistlib.dump(
+                        {
+                            "Label": label,
+                            "ProgramArguments": [sys.executable, str(PROJECT_ROOT / "collector" / "collect_today.py")],
+                            "WorkingDirectory": str(PROJECT_ROOT),
+                        },
+                        handle,
+                    )
+
+            with patch("validate_launch_agents.launchctl_labels", return_value=[]):
+                result = validate_launch_agents.validate(launch_dir)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("duplicate LaunchAgent plists for collector" in issue for issue in result["issues"]))
+            self.assertTrue(any("obsolete namespace plist present" in issue for issue in result["issues"]))
 
 
 if __name__ == "__main__":

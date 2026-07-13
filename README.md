@@ -664,6 +664,10 @@ The helper writes plists for:
 - `com.local.powermonitor.ocpp` when the Home Assistant OCPP importer is
   present
 
+These are the only supported LaunchAgent labels. Older installs may have used
+an obsolete namespace; the installer unloads and removes those plists
+automatically before writing the supported `com.local` jobs.
+
 It prefers `<project>/.venv/bin/python` and prints the exact reload commands.
 Reload manually with:
 
@@ -672,6 +676,8 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.col
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.collector.plist
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.ocpp.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.ocpp.plist
 ```
 
 Restart a loaded job immediately with:
@@ -679,6 +685,7 @@ Restart a loaded job immediately with:
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.collector
 launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.web
+launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.ocpp
 ```
 
 Check the interpreter used by a generated plist:
@@ -686,6 +693,27 @@ Check the interpreter used by a generated plist:
 ```sh
 plutil -p ~/Library/LaunchAgents/com.local.powermonitor.collector.plist | grep ProgramArguments -A3
 ```
+
+Validate the installed jobs and loaded services:
+
+```sh
+python3 collector/validate_launch_agents.py
+python3 collector/diagnostics.py
+launchctl list | grep powermonitor
+```
+
+The validator reports duplicate LaunchAgent plists, duplicate loaded services,
+obsolete namespace services, mismatched plist labels or scripts, incorrect
+working directories, and missing collector/web/OCPP jobs.
+
+`collector/diagnostics.py` adds a broader runtime audit: canonical report path,
+live-dashboard/report hash matching, loaded LaunchAgents, duplicate
+PowerMonitor processes, duplicate listeners on port `8765`, report staleness,
+LaunchAgent working directory/executable drift, and missing config, database, or
+report files. The Settings page also shows privacy-safe runtime diagnostics such
+as the Git commit, active Python, working directory, report path, web bind
+address, database/config paths, active tariff version, and current health
+summary.
 
 The collector safely refreshes existing readings by timestamp. The web server
 binds to `0.0.0.0` by default unless `POWMONITOR_HOST` or `web_server.host`
