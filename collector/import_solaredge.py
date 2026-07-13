@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -9,6 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 DEFAULT_HOUSEHOLD_ID = "default_household"
 LOCAL_TIMEZONE = ZoneInfo("Australia/Perth")
+SOLAREDGE_PROVIDER_ID = "solaredge"
+SOLAREDGE_SOURCE_ID = "solaredge_dashboard_power"
+SOLAREDGE_SOURCE_RESOLUTION = "interval_15m"
 
 RATES = {
     "super_off_peak": 0.086151,
@@ -95,6 +99,17 @@ def main():
     present = {row[1] for row in cur.execute("PRAGMA table_info(readings)")}
     if "household_id" not in present:
         cur.execute("ALTER TABLE readings ADD COLUMN household_id TEXT")
+    reading_metadata_columns = {
+        "provider_id": "ALTER TABLE readings ADD COLUMN provider_id TEXT",
+        "source_id": "ALTER TABLE readings ADD COLUMN source_id TEXT",
+        "source_resolution": "ALTER TABLE readings ADD COLUMN source_resolution TEXT",
+        "source_record_id": "ALTER TABLE readings ADD COLUMN source_record_id TEXT",
+        "import_job_id": "ALTER TABLE readings ADD COLUMN import_job_id TEXT",
+        "imported_at": "ALTER TABLE readings ADD COLUMN imported_at TEXT",
+    }
+    for column, statement in reading_metadata_columns.items():
+        if column not in present:
+            cur.execute(statement)
     cur.execute(
         "UPDATE readings SET household_id = ? WHERE household_id IS NULL OR household_id = ''",
         (DEFAULT_HOUSEHOLD_ID,),
@@ -106,6 +121,8 @@ def main():
     duplicates_ignored = 0
     zero_payload_skipped = 0
     imported_times = []
+    import_job_id = os.environ.get("POWERMONITOR_IMPORT_JOB_ID")
+    imported_at = datetime.now(LOCAL_TIMEZONE).isoformat(timespec="seconds")
 
     for m in data.get("measurements", []):
         received += 1
@@ -117,6 +134,7 @@ def main():
 
         dt = parse_measurement_time(ts)
         normalized_ts = dt.isoformat()
+        source_record_id = f"{SOLAREDGE_SOURCE_ID}:{normalized_ts}"
 
         bucket = bucket_for_time(dt)
 
@@ -176,7 +194,13 @@ def main():
                     solar_to_home_kwh = ?,
                     solar_to_grid_kwh = ?,
                     grid_to_home_kwh = ?,
-                    import_cost = ?
+                    import_cost = ?,
+                    provider_id = ?,
+                    source_id = ?,
+                    source_resolution = ?,
+                    source_record_id = ?,
+                    import_job_id = COALESCE(?, import_job_id),
+                    imported_at = ?
                 WHERE household_id = ? AND measurement_time = ?
                 """, (
                     bucket,
@@ -191,6 +215,12 @@ def main():
                     solar_to_grid_kwh,
                     grid_to_home_kwh,
                     import_cost,
+                    SOLAREDGE_PROVIDER_ID,
+                    SOLAREDGE_SOURCE_ID,
+                    SOLAREDGE_SOURCE_RESOLUTION,
+                    source_record_id,
+                    import_job_id,
+                    imported_at,
                     DEFAULT_HOUSEHOLD_ID,
                     normalized_ts,
                 ))
@@ -220,9 +250,15 @@ def main():
             solar_to_grid_kwh,
             grid_to_home_kwh,
 
-            import_cost
+            import_cost,
+            provider_id,
+            source_id,
+            source_resolution,
+            source_record_id,
+            import_job_id,
+            imported_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             DEFAULT_HOUSEHOLD_ID,
             normalized_ts,
@@ -242,7 +278,13 @@ def main():
             solar_to_grid_kwh,
             grid_to_home_kwh,
 
-            import_cost
+            import_cost,
+            SOLAREDGE_PROVIDER_ID,
+            SOLAREDGE_SOURCE_ID,
+            SOLAREDGE_SOURCE_RESOLUTION,
+            source_record_id,
+            import_job_id,
+            imported_at,
         ))
 
         imported += 1

@@ -12,6 +12,7 @@ data/power.sqlite
 data/collector_health.json
 data/demo/
 data/import_uploads/
+data/runtime/
 
 # Logs
 logs/

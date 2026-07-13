@@ -1,5 +1,21 @@
 # Changelog
 
+## PROVIDER-004 - SolarEdge Historical Backfill and Seasonal Coverage
+
+- Added provider-neutral historical coverage and backfill job tracking, with
+  SolarEdge as the first source.
+- Added SolarEdge historical preview data for previous summer, last 90 days,
+  last 12 months, previous calendar year, custom ranges, and lifetime planning.
+- Added a SolarEdge backfill runner that imports one day at a time, records
+  progress, supports resume/cancel state, preserves duplicate handling, and
+  regenerates the dashboard after successful imports.
+- Exposed historical coverage, seasonal history, historical backfill jobs, and
+  SolarEdge capability details in the dashboard payload and Settings UI.
+- Added interval-grade/daily/monthly-lifetime suitability wording so aggregate
+  history is not treated as sufficient for tariff-aware battery dispatch.
+- Moved tariff update runtime state from tracked config into ignored
+  `data/runtime/tariff_updates.json`.
+
 ## FIN-006 - Tariff Import Approval Workflow
 
 - Added a provider-based tariff import foundation with a `TariffProvider`
