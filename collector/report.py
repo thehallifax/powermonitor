@@ -330,6 +330,18 @@ DEFAULT_SETTINGS = {
     "solar_setup_choice": "none",
     "ev_setup_choice": "none",
     "battery_setup_choice": "none",
+    "battery_installed_costs": {
+        "5": 6500.0,
+        "10": 9500.0,
+        "15": 12500.0,
+        "20": 15500.0,
+    },
+    "battery_round_trip_efficiency": 0.90,
+    "battery_life_years": 15,
+    "battery_annual_degradation_pct": 2.0,
+    "battery_electricity_inflation_pct": 3.0,
+    "battery_discount_rate_pct": 0.0,
+    "battery_government_rebate": 0.0,
     "billing_period_start_day": 1,
     "current_billing_period_start": None,
     "current_billing_period_end": None,
@@ -377,6 +389,13 @@ class Settings:
     solar_setup_choice: str
     ev_setup_choice: str
     battery_setup_choice: str
+    battery_installed_costs: dict
+    battery_round_trip_efficiency: float
+    battery_life_years: int
+    battery_annual_degradation_pct: float
+    battery_electricity_inflation_pct: float
+    battery_discount_rate_pct: float
+    battery_government_rebate: float
     billing_period_start_day: int
     current_billing_period_start: Optional[date]
     current_billing_period_end: Optional[date]
@@ -942,6 +961,7 @@ def dashboard_data(
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
         "battery_comparison": scenarios["battery_comparison"],
+        "battery_investment": scenarios["battery_investment"],
         "timeline": display_timeline.as_dict(),
         "comparison": comparison,
         "advisors": advisors.as_dict(),
@@ -1054,6 +1074,10 @@ def load_settings() -> Settings:
             **DEFAULT_SETTINGS["comparison_plan_rates"],
             **loaded.get("comparison_plan_rates", {}),
         }
+        raw["battery_installed_costs"] = {
+            **DEFAULT_SETTINGS["battery_installed_costs"],
+            **loaded.get("battery_installed_costs", {}),
+        }
     raw = apply_structured_tariff(raw)
     if raw.get("current_plan") == "synergy_ev_add_on":
         raw["comparison_plan_rates"] = {
@@ -1087,6 +1111,16 @@ def load_settings() -> Settings:
         solar_setup_choice=str(raw.get("solar_setup_choice") or "none"),
         ev_setup_choice=str(raw.get("ev_setup_choice") or "none"),
         battery_setup_choice=str(raw.get("battery_setup_choice") or "none"),
+        battery_installed_costs={
+            str(key): float(value)
+            for key, value in raw.get("battery_installed_costs", {}).items()
+        },
+        battery_round_trip_efficiency=float(raw.get("battery_round_trip_efficiency", 0.90)),
+        battery_life_years=int(raw.get("battery_life_years", 15)),
+        battery_annual_degradation_pct=float(raw.get("battery_annual_degradation_pct", 2.0)),
+        battery_electricity_inflation_pct=float(raw.get("battery_electricity_inflation_pct", 3.0)),
+        battery_discount_rate_pct=float(raw.get("battery_discount_rate_pct", 0.0)),
+        battery_government_rebate=float(raw.get("battery_government_rebate", 0.0) or 0.0),
         billing_period_start_day=int(raw["billing_period_start_day"]),
         current_billing_period_start=optional_date("current_billing_period_start"),
         current_billing_period_end=optional_date("current_billing_period_end"),
@@ -1139,6 +1173,14 @@ def load_settings() -> Settings:
         raise ValueError("Recommendation thresholds cannot be negative")
     if any(value < 0 for value in settings.comparison_plan_rates.values()):
         raise ValueError("Comparison plan rates cannot be negative")
+    if any(value < 0 for value in settings.battery_installed_costs.values()):
+        raise ValueError("Battery installed costs cannot be negative")
+    if settings.battery_life_years < 1:
+        raise ValueError("Battery life must be at least 1 year")
+    if settings.battery_round_trip_efficiency <= 0:
+        raise ValueError("Battery round-trip efficiency must be positive")
+    if settings.battery_government_rebate < 0:
+        raise ValueError("Battery government rebate cannot be negative")
     return settings
 
 
@@ -1637,6 +1679,7 @@ def scenario_analysis(
         baseline_solar_exported_kwh=summary.solar_exported_kwh,
         tariff_version=current_tariff,
     )
+    battery_investment = battery_investment_analysis(battery_comparison, settings)
 
     ev_window_cost = ev_kwh * current_rates[cheapest_bucket]
     ev_window_savings = max(ev_actual_cost - ev_window_cost, 0.0)
@@ -1664,7 +1707,225 @@ def scenario_analysis(
         "scenarios": scenarios,
         "ev_insights": insights,
         "battery_comparison": battery_comparison,
+        "battery_investment": battery_investment,
     }
+
+
+def battery_investment_analysis(comparison: Optional[dict], settings: Settings) -> dict[str, Any]:
+    assumptions = battery_investment_assumptions(settings)
+    if not comparison or not comparison.get("available"):
+        return {
+            "available": False,
+            "recommended_size": None,
+            "options": [],
+            "confidence": "Low",
+            "confidence_reason": "Battery investment analysis needs the existing battery sizing simulation first.",
+            "assumptions": assumptions,
+        }
+
+    recommended = comparison.get("recommended") or {}
+    recommended_size = float(recommended.get("capacity_kwh") or 0.0)
+    source_options = battery_investment_source_options(comparison)
+    options = [
+        battery_investment_option(option, assumptions, comparison)
+        for option in source_options
+        if float(option.get("capacity_kwh") or 0.0) > 0
+    ]
+    selected = next(
+        (
+            option for option in options
+            if abs(float(option["capacity_kwh"]) - recommended_size) < 1e-9
+        ),
+        options[0] if options else None,
+    )
+    if not selected:
+        return {
+            "available": False,
+            "recommended_size": None,
+            "options": [],
+            "confidence": "Low",
+            "confidence_reason": "No simulated battery size was available for investment analysis.",
+            "assumptions": assumptions,
+        }
+    selected = {**selected, "recommended": True}
+    options = [
+        {**option, "recommended": abs(float(option["capacity_kwh"]) - recommended_size) < 1e-9}
+        for option in options
+    ]
+    summary = battery_investment_summary(selected, assumptions)
+    return {
+        "available": True,
+        "recommended_size": selected["capacity_kwh"],
+        "installed_cost": selected["installed_cost"],
+        "rebate": selected["rebate"],
+        "net_cost": selected["net_cost"],
+        "annual_saving": selected["annual_saving"],
+        "simple_payback_years": selected["simple_payback_years"],
+        "ten_year_estimated_savings": selected["ten_year_estimated_savings"],
+        "fifteen_year_estimated_savings": selected["fifteen_year_estimated_savings"],
+        "ten_year_net": selected["ten_year_net"],
+        "fifteen_year_net": selected["fifteen_year_net"],
+        "confidence": selected["confidence"],
+        "confidence_reason": selected["confidence_reason"],
+        "overall_recommendation": selected["overall_recommendation"],
+        "summary": summary,
+        "options": options,
+        "assumptions": assumptions,
+    }
+
+
+def battery_investment_assumptions(settings: Settings) -> dict[str, Any]:
+    efficiency = float(getattr(settings, "battery_round_trip_efficiency", 0.90) or 0.90)
+    if efficiency > 1.0:
+        efficiency = efficiency / 100.0
+    return {
+        "installed_costs": {
+            str(key): float(value)
+            for key, value in getattr(settings, "battery_installed_costs", DEFAULT_SETTINGS["battery_installed_costs"]).items()
+        },
+        "round_trip_efficiency_pct": efficiency * 100,
+        "battery_life_years": int(getattr(settings, "battery_life_years", 15) or 15),
+        "annual_degradation_pct": float(getattr(settings, "battery_annual_degradation_pct", 2.0) or 0.0),
+        "electricity_inflation_pct": float(getattr(settings, "battery_electricity_inflation_pct", 3.0) or 0.0),
+        "discount_rate_pct": float(getattr(settings, "battery_discount_rate_pct", 0.0) or 0.0),
+        "government_rebate": float(getattr(settings, "battery_government_rebate", 0.0) or 0.0),
+    }
+
+
+def battery_investment_source_options(comparison: dict) -> list[dict[str, Any]]:
+    grid_options = ((comparison.get("strategies") or {}).get("solar_plus_grid_arbitrage") or {}).get("options") or []
+    return grid_options or comparison.get("options", []) or []
+
+
+def battery_investment_option(option: dict[str, Any], assumptions: dict[str, Any], comparison: dict[str, Any]) -> dict[str, Any]:
+    capacity = float(option.get("capacity_kwh") or 0.0)
+    installed_cost = battery_installed_cost(capacity, assumptions)
+    rebate = min(float(assumptions["government_rebate"] or 0.0), installed_cost)
+    net_cost = max(installed_cost - rebate, 0.0)
+    annual_saving = max(float(option.get("annualised_savings") or 0.0), 0.0)
+    simple_payback = net_cost / annual_saving if annual_saving > 0 else None
+    ten_year_savings = battery_projected_savings(
+        annual_saving,
+        10,
+        assumptions["annual_degradation_pct"],
+        assumptions["electricity_inflation_pct"],
+        assumptions["discount_rate_pct"],
+    )
+    fifteen_year_savings = battery_projected_savings(
+        annual_saving,
+        15,
+        assumptions["annual_degradation_pct"],
+        assumptions["electricity_inflation_pct"],
+        assumptions["discount_rate_pct"],
+    )
+    confidence, confidence_reason = battery_investment_confidence(comparison)
+    recommendation = battery_investment_recommendation(simple_payback, net_cost, ten_year_savings, fifteen_year_savings, assumptions)
+    return {
+        "capacity_kwh": capacity,
+        "label": option.get("label") or f"{capacity:g} kWh usable",
+        "installed_cost": installed_cost,
+        "rebate": rebate,
+        "net_cost": net_cost,
+        "annual_saving": annual_saving,
+        "simple_payback_years": simple_payback,
+        "ten_year_estimated_savings": ten_year_savings,
+        "fifteen_year_estimated_savings": fifteen_year_savings,
+        "ten_year_net": ten_year_savings - net_cost,
+        "fifteen_year_net": fifteen_year_savings - net_cost,
+        "confidence": confidence,
+        "confidence_reason": confidence_reason,
+        "overall_recommendation": recommendation,
+    }
+
+
+def battery_installed_cost(capacity: float, assumptions: dict[str, Any]) -> float:
+    costs = assumptions.get("installed_costs") or {}
+    exact = costs.get(f"{capacity:g}")
+    if exact is None and capacity.is_integer():
+        exact = costs.get(str(int(capacity)))
+    if exact is None:
+        exact = costs.get(str(capacity))
+    if exact is not None:
+        return float(exact)
+    numeric_costs = sorted((float(size), float(cost)) for size, cost in costs.items())
+    if not numeric_costs:
+        return 0.0
+    return min(numeric_costs, key=lambda item: abs(item[0] - capacity))[1]
+
+
+def battery_projected_savings(
+    annual_saving: float,
+    years: int,
+    degradation_pct: float,
+    inflation_pct: float,
+    discount_rate_pct: float,
+) -> float:
+    total = 0.0
+    degradation = 1 - max(float(degradation_pct), 0.0) / 100
+    inflation = 1 + float(inflation_pct) / 100
+    discount = 1 + max(float(discount_rate_pct), 0.0) / 100
+    for year in range(years):
+        value = float(annual_saving) * (degradation ** year) * (inflation ** year)
+        total += value / (discount ** year)
+    return total
+
+
+def battery_investment_confidence(comparison: dict[str, Any]) -> tuple[str, str]:
+    data_quality = comparison.get("data_quality") or {}
+    days = int(data_quality.get("days") or 0)
+    if days >= 30:
+        return "High", f"Based on {days} days of interval history."
+    if days >= 7:
+        return "Medium", f"Based on {days} days of interval history."
+    if days > 0:
+        return "Low", f"Based on only {days} day{'s' if days != 1 else ''} of interval history."
+    return "Low", "No interval history was available for the investment projection."
+
+
+def battery_investment_recommendation(
+    simple_payback: Optional[float],
+    net_cost: float,
+    ten_year_savings: float,
+    fifteen_year_savings: float,
+    assumptions: dict[str, Any],
+) -> str:
+    if simple_payback is None or net_cost <= 0:
+        return "Not recommended"
+    battery_life = float(assumptions["battery_life_years"])
+    ten_year_net = ten_year_savings - net_cost
+    fifteen_year_net = fifteen_year_savings - net_cost
+    if simple_payback > battery_life:
+        return "Not recommended"
+    if simple_payback <= 7 and ten_year_net > 0 and fifteen_year_net > 0:
+        return "★★★★★ Excellent investment"
+    if simple_payback <= 10 and fifteen_year_net > 0:
+        return "★★★★ Good investment"
+    if fifteen_year_net >= 0:
+        return "★★★ Borderline"
+    return "★★ Poor investment"
+
+
+def battery_investment_summary(selected: dict[str, Any], assumptions: dict[str, Any]) -> str:
+    payback = selected.get("simple_payback_years")
+    battery_life = int(assumptions["battery_life_years"])
+    if payback is None:
+        return (
+            f"Based on your household, a {selected['capacity_kwh']:g} kWh battery does not show measurable annual savings yet. "
+            "A purchase is not recommended from the available data."
+        )
+    if payback > battery_life:
+        return (
+            f"Based on your household, a {selected['capacity_kwh']:g} kWh battery is expected to save approximately "
+            f"{money(selected['annual_saving'])} per year. Assuming an installed cost of {money(selected['installed_cost'])}, "
+            f"the estimated simple payback is approximately {payback:.1f} years, which is longer than the assumed "
+            f"{battery_life}-year battery life."
+        )
+    return (
+        f"Based on your household, a {selected['capacity_kwh']:g} kWh battery is expected to save approximately "
+        f"{money(selected['annual_saving'])} per year. Assuming an installed cost of {money(selected['installed_cost'])}, "
+        f"your estimated simple payback is approximately {payback:.1f} years. After 10 years you are projected to be "
+        f"{'ahead' if selected['ten_year_net'] >= 0 else 'behind'} by approximately {money(abs(selected['ten_year_net']))}."
+    )
 
 
 def car_comparison(settings: Settings) -> dict:
@@ -4808,6 +5069,14 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
     solar_choice = getattr(settings, "solar_setup_choice", "none")
     ev_choice = getattr(settings, "ev_setup_choice", "none")
     battery_choice = getattr(settings, "battery_setup_choice", "none")
+    battery_costs = getattr(settings, "battery_installed_costs", DEFAULT_SETTINGS["battery_installed_costs"])
+    battery_efficiency = float(getattr(settings, "battery_round_trip_efficiency", 0.90) or 0.90)
+    battery_efficiency_pct = battery_efficiency * 100 if battery_efficiency <= 1.0 else battery_efficiency
+    battery_life_years = int(getattr(settings, "battery_life_years", 15) or 15)
+    battery_degradation = float(getattr(settings, "battery_annual_degradation_pct", 2.0) or 0.0)
+    battery_inflation = float(getattr(settings, "battery_electricity_inflation_pct", 3.0) or 0.0)
+    battery_discount = float(getattr(settings, "battery_discount_rate_pct", 0.0) or 0.0)
+    battery_rebate = float(getattr(settings, "battery_government_rebate", 0.0) or 0.0)
     previews = tariff_catalog_previews_html()
     return f"""
     <section id="setup-billing" class="report-section setup-section">
@@ -4872,6 +5141,20 @@ def billing_cycle_setup_html(settings: Optional[Settings]) -> str:
         <div class="catalogue-tariff-previews">
           {previews}
         </div>
+        <fieldset class="manual-tariff-fields">
+          <legend>Battery investment assumptions</legend>
+          <p class="notice">Used only for battery purchase projections. Battery dispatch still uses the existing simulation.</p>
+          <label><span>5 kWh installed cost</span><input type="number" step="1" min="0" name="battery_installed_cost_5" value="{float(battery_costs.get("5", battery_costs.get(5, 6500.0))):.0f}"></label>
+          <label><span>10 kWh installed cost</span><input type="number" step="1" min="0" name="battery_installed_cost_10" value="{float(battery_costs.get("10", battery_costs.get(10, 9500.0))):.0f}"></label>
+          <label><span>15 kWh installed cost</span><input type="number" step="1" min="0" name="battery_installed_cost_15" value="{float(battery_costs.get("15", battery_costs.get(15, 12500.0))):.0f}"></label>
+          <label><span>20 kWh installed cost</span><input type="number" step="1" min="0" name="battery_installed_cost_20" value="{float(battery_costs.get("20", battery_costs.get(20, 15500.0))):.0f}"></label>
+          <label><span>Round-trip efficiency %</span><input type="number" step="0.1" min="0" max="100" name="battery_round_trip_efficiency_pct" value="{battery_efficiency_pct:.1f}"></label>
+          <label><span>Battery life years</span><input type="number" step="1" min="1" name="battery_life_years" value="{battery_life_years}"></label>
+          <label><span>Annual degradation %</span><input type="number" step="0.1" min="0" name="battery_annual_degradation_pct" value="{battery_degradation:.1f}"></label>
+          <label><span>Electricity inflation %</span><input type="number" step="0.1" name="battery_electricity_inflation_pct" value="{battery_inflation:.1f}"></label>
+          <label><span>Discount rate %</span><input type="number" step="0.1" min="0" name="battery_discount_rate_pct" value="{battery_discount:.1f}"></label>
+          <label><span>Government rebate</span><input type="number" step="1" min="0" name="battery_government_rebate" value="{battery_rebate:.0f}"></label>
+        </fieldset>
         <fieldset class="manual-tariff-fields">
           <legend>Manual tariff</legend>
           <p class="notice">If your retailer or plan is not listed, choose Manual tariff.</p>
@@ -8263,6 +8546,66 @@ def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], r
     """
 
 
+def battery_investment_html(investment: Optional[dict]) -> str:
+    if not investment or not investment.get("available"):
+        return ""
+    assumptions = investment.get("assumptions") or {}
+    payback = investment.get("simple_payback_years")
+    payback_label = f"{float(payback):.1f} years" if payback is not None else "Not recovered"
+    ten_year_net = float(investment.get("ten_year_net") or 0.0)
+    fifteen_year_net = float(investment.get("fifteen_year_net") or 0.0)
+    assumption_sentence = (
+        f"Projection assumes {int(assumptions.get('battery_life_years') or 15)}-year battery life, "
+        f"{float(assumptions.get('annual_degradation_pct') or 0.0):g}% annual degradation, "
+        f"{float(assumptions.get('electricity_inflation_pct') or 0.0):g}% electricity price growth "
+        "and current usage patterns."
+    )
+    rebate = float(investment.get("rebate") or 0.0)
+    cost_note = f"Installed cost {money(float(investment.get('installed_cost') or 0.0))}"
+    if rebate > 0:
+        cost_note += f" less {money(rebate)} rebate"
+    details_rows = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(str(option.get("label") or ""))}</td>
+          <td>{money(float(option.get("installed_cost") or 0.0))}</td>
+          <td>{money(float(option.get("rebate") or 0.0))}</td>
+          <td>{money(float(option.get("net_cost") or 0.0))}</td>
+          <td>{money(float(option.get("annual_saving") or 0.0))}</td>
+          <td>{f"{float(option['simple_payback_years']):.1f} years" if option.get("simple_payback_years") is not None else "Not recovered"}</td>
+          <td>{money(float(option.get("ten_year_estimated_savings") or 0.0))}</td>
+          <td>{signed_money(float(option.get("ten_year_net") or 0.0))}</td>
+          <td>{money(float(option.get("fifteen_year_estimated_savings") or 0.0))}</td>
+          <td>{signed_money(float(option.get("fifteen_year_net") or 0.0))}</td>
+        </tr>
+        """
+        for option in investment.get("options", [])
+    )
+    return f"""
+    <div class="scenario-insights battery-investment">
+      <div class="chart-heading"><h3>Battery investment</h3><span>Purchase economics</span></div>
+      <p class="battery-conclusion">{html.escape(str(investment.get("summary") or ""))}</p>
+      <div class="battery-metrics battery-investment-cards">
+        {battery_metric("Estimated investment", money(float(investment.get("net_cost") or 0.0)), cost_note)}
+        {battery_metric("Estimated annual saving", money(float(investment.get("annual_saving") or 0.0)), "From existing battery simulation")}
+        {battery_metric("Simple payback", payback_label, str(investment.get("confidence_reason") or ""))}
+        {battery_metric("10-year outcome", signed_money(ten_year_net), "Net benefit after purchase cost")}
+        {battery_metric("15-year outcome", signed_money(fifteen_year_net), "Net benefit after purchase cost")}
+        {battery_metric("Overall recommendation", str(investment.get("overall_recommendation") or "Not recommended"), f"{investment.get('confidence', 'Low')} confidence")}
+      </div>
+      <p class="scenario-note">{html.escape(assumption_sentence)}</p>
+      <details class="battery-calculation-details">
+        <summary>How was this calculated?</summary>
+        <p>Annual savings come from the existing simulated battery savings. The investment projection applies the configured installed cost, rebate, annual degradation, electricity price inflation and discount rate without rerunning battery dispatch.</p>
+        <table class="responsive-table battery-investment-table">
+          <thead><tr><th>Battery</th><th>Installed cost</th><th>Rebate</th><th>Net price</th><th>Annual saving</th><th>Payback</th><th>10-year savings</th><th>10-year net</th><th>15-year savings</th><th>15-year net</th></tr></thead>
+          <tbody>{details_rows}</tbody>
+        </table>
+      </details>
+    </div>
+    """
+
+
 def battery_metric(label: str, value: str, note: str) -> str:
     return f"""
     <div>
@@ -8369,6 +8712,7 @@ def scenario_analysis_html(analysis: dict) -> str:
       <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
       {battery_comparison_html(analysis.get("battery_comparison"))}
+      {battery_investment_html(analysis.get("battery_investment"))}
       {insights_html}
     </section>
     """

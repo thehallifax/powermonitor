@@ -199,6 +199,7 @@ def update_billing_cycle_settings(
     solar_setup_choice: str = "none",
     ev_setup_choice: str = "none",
     battery_setup_choice: str = "none",
+    battery_investment_assumptions: Optional[dict] = None,
 ) -> dict:
     try:
         start_day = int(billing_period_start_day)
@@ -234,6 +235,8 @@ def update_billing_cycle_settings(
             "battery_setup_choice": _setup_choice(battery_setup_choice, {"none", "home_assistant", "manual_later"}),
         }
     )
+    if battery_investment_assumptions is not None:
+        raw.update(_battery_investment_settings(battery_investment_assumptions))
     if plan == MANUAL_TARIFF_ID or retailer_id == MANUAL_TARIFF_ID:
         raw.update(_manual_tariff_settings(manual_rates or {}))
     else:
@@ -273,6 +276,41 @@ def _manual_tariff_settings(values: dict) -> dict:
         "supply_charge_per_day": supply,
         "export_credit_rate": export,
         "import_rates": rates,
+    }
+
+
+def _battery_investment_settings(values: dict) -> dict:
+    try:
+        costs = {
+            "5": float(values["installed_cost_5"]),
+            "10": float(values["installed_cost_10"]),
+            "15": float(values["installed_cost_15"]),
+            "20": float(values["installed_cost_20"]),
+        }
+        efficiency_pct = float(values["round_trip_efficiency_pct"])
+        life_years = int(values["life_years"])
+        degradation = float(values["annual_degradation_pct"])
+        inflation = float(values["electricity_inflation_pct"])
+        discount = float(values["discount_rate_pct"])
+        rebate = float(values["government_rebate"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Enter valid battery investment assumptions before saving.") from exc
+    if any(cost < 0 for cost in costs.values()):
+        raise ValueError("Battery installed costs cannot be negative.")
+    if efficiency_pct <= 0 or efficiency_pct > 100:
+        raise ValueError("Battery round-trip efficiency must be between 0 and 100%.")
+    if life_years < 1:
+        raise ValueError("Battery life must be at least 1 year.")
+    if degradation < 0 or discount < 0 or rebate < 0:
+        raise ValueError("Battery degradation, discount rate and rebate cannot be negative.")
+    return {
+        "battery_installed_costs": costs,
+        "battery_round_trip_efficiency": efficiency_pct / 100,
+        "battery_life_years": life_years,
+        "battery_annual_degradation_pct": degradation,
+        "battery_electricity_inflation_pct": inflation,
+        "battery_discount_rate_pct": discount,
+        "battery_government_rebate": rebate,
     }
 
 
@@ -565,6 +603,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             solar_setup_choice=self.param(params, "solar_setup_choice", "none"),
             ev_setup_choice=self.param(params, "ev_setup_choice", "none"),
             battery_setup_choice=self.param(params, "battery_setup_choice", "none"),
+            battery_investment_assumptions={
+                "installed_cost_5": self.param(params, "battery_installed_cost_5", "6500"),
+                "installed_cost_10": self.param(params, "battery_installed_cost_10", "9500"),
+                "installed_cost_15": self.param(params, "battery_installed_cost_15", "12500"),
+                "installed_cost_20": self.param(params, "battery_installed_cost_20", "15500"),
+                "round_trip_efficiency_pct": self.param(params, "battery_round_trip_efficiency_pct", "90"),
+                "life_years": self.param(params, "battery_life_years", "15"),
+                "annual_degradation_pct": self.param(params, "battery_annual_degradation_pct", "2"),
+                "electricity_inflation_pct": self.param(params, "battery_electricity_inflation_pct", "3"),
+                "discount_rate_pct": self.param(params, "battery_discount_rate_pct", "0"),
+                "government_rebate": self.param(params, "battery_government_rebate", "0"),
+            },
             manual_rates={
                 "supply_charge_per_day": self.param(params, "manual_supply_charge_per_day"),
                 "export_credit_rate": self.param(params, "manual_export_credit_rate"),

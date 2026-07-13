@@ -158,12 +158,28 @@ class WebConfigTests(unittest.TestCase):
                 solar_setup_choice="solaredge",
                 ev_setup_choice="ocular_import",
                 battery_setup_choice="manual_later",
+                battery_investment_assumptions={
+                    "installed_cost_5": "6000",
+                    "installed_cost_10": "9000",
+                    "installed_cost_15": "12000",
+                    "installed_cost_20": "15000",
+                    "round_trip_efficiency_pct": "91",
+                    "life_years": "14",
+                    "annual_degradation_pct": "1.5",
+                    "electricity_inflation_pct": "4",
+                    "discount_rate_pct": "2",
+                    "government_rebate": "750",
+                },
             )
             saved = json.loads(settings.read_text(encoding="utf-8"))
 
         self.assertEqual(updated["solar_setup_choice"], "solaredge")
         self.assertEqual(updated["ev_setup_choice"], "ocular_import")
         self.assertEqual(updated["battery_setup_choice"], "manual_later")
+        self.assertEqual(updated["battery_installed_costs"]["10"], 9000.0)
+        self.assertEqual(updated["battery_round_trip_efficiency"], 0.91)
+        self.assertEqual(updated["battery_life_years"], 14)
+        self.assertEqual(updated["battery_government_rebate"], 750.0)
         self.assertEqual(saved["current_plan"], "synergy_ev_add_on")
         self.assertNotIn("password", json.dumps(saved).lower())
         self.assertNotIn("token", json.dumps(saved).lower())

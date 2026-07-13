@@ -64,6 +64,13 @@ def settings():
             "peak": 0.60,
         },
         export_credit_rate=0.02,
+        battery_installed_costs={"5": 6500.0, "10": 9500.0, "15": 12500.0, "20": 15500.0},
+        battery_round_trip_efficiency=0.90,
+        battery_life_years=15,
+        battery_annual_degradation_pct=2.0,
+        battery_electricity_inflation_pct=3.0,
+        battery_discount_rate_pct=0.0,
+        battery_government_rebate=0.0,
     )
 
 
@@ -80,10 +87,60 @@ class BatteryReportPresentationTests(unittest.TestCase):
 
         self.assertNotIn("battery_shift_peak_imports", [item["id"] for item in analysis["scenarios"]])
         self.assertIn("battery_comparison", analysis)
+        self.assertIn("battery_investment", analysis)
+        self.assertTrue(analysis["battery_investment"]["available"])
+        for field in (
+            "recommended_size",
+            "installed_cost",
+            "rebate",
+            "net_cost",
+            "annual_saving",
+            "simple_payback_years",
+            "ten_year_net",
+            "fifteen_year_net",
+            "confidence",
+            "assumptions",
+        ):
+            self.assertIn(field, analysis["battery_investment"])
+        self.assertEqual(analysis["battery_investment"]["recommended_size"], analysis["battery_comparison"]["recommended"]["capacity_kwh"])
         self.assertEqual([item["capacity_kwh"] for item in analysis["battery_comparison"]["options"]], [5.0, 10.0, 15.0, 20.0])
         self.assertIn("tariff_version", analysis["battery_comparison"])
         self.assertEqual(analysis["battery_comparison"]["tariff_name"], "Synergy EV Add On")
         self.assertEqual(analysis["battery_comparison"]["tariff_effective_from"], "2026-07-01")
+
+    def test_battery_investment_calculates_payback_degradation_inflation_and_rebate(self):
+        comparison = {
+            "available": True,
+            "recommended": {"capacity_kwh": 10.0},
+            "strategies": {
+                "solar_plus_grid_arbitrage": {
+                    "options": [
+                        {"capacity_kwh": 10.0, "label": "10 kWh usable", "annualised_savings": 1000.0},
+                    ]
+                }
+            },
+            "data_quality": {"days": 30},
+        }
+        custom_settings = SimpleNamespace(
+            battery_installed_costs={"10": 9500.0},
+            battery_round_trip_efficiency=0.90,
+            battery_life_years=15,
+            battery_annual_degradation_pct=2.0,
+            battery_electricity_inflation_pct=3.0,
+            battery_discount_rate_pct=0.0,
+            battery_government_rebate=1000.0,
+        )
+
+        investment = report.battery_investment_analysis(comparison, custom_settings)
+
+        self.assertEqual(investment["installed_cost"], 9500.0)
+        self.assertEqual(investment["rebate"], 1000.0)
+        self.assertEqual(investment["net_cost"], 8500.0)
+        self.assertAlmostEqual(investment["simple_payback_years"], 8.5)
+        expected_ten_year = sum(1000.0 * (0.98 ** year) * (1.03 ** year) for year in range(10))
+        self.assertAlmostEqual(investment["ten_year_estimated_savings"], expected_ten_year)
+        self.assertAlmostEqual(investment["ten_year_net"], expected_ten_year - 8500.0)
+        self.assertEqual(investment["confidence"], "High")
 
     def test_battery_comparison_renders_on_decisions_scenario_section(self):
         analysis = report.scenario_analysis(
@@ -113,6 +170,14 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("How was this calculated?", markup)
         self.assertNotIn("<th>Peak avoided</th>", markup.split("How was this calculated?", 1)[0])
         self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 July 2026.", markup)
+        self.assertIn("Battery investment", markup)
+        self.assertIn("Estimated investment", markup)
+        self.assertIn("Estimated annual saving", markup)
+        self.assertIn("Simple payback", markup)
+        self.assertIn("10-year outcome", markup)
+        self.assertIn("15-year outcome", markup)
+        self.assertIn("Overall recommendation", markup)
+        self.assertIn("Projection assumes 15-year battery life, 2% annual degradation, 3% electricity price growth and current usage patterns.", markup)
 
     def test_battery_comparison_renders_limited_benefit_and_oversized_signals(self):
         analysis = report.scenario_analysis(
