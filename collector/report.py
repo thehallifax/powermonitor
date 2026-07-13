@@ -43,6 +43,12 @@ from engine.historical_trends_engine import (
     UNCHANGED,
     WORSENING,
 )
+from engine.historical_backfill import (
+    RANGE_PRESETS,
+    build_backfill_preview,
+    seasonal_history_summary,
+    solaredge_capability_audit,
+)
 from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
 from engine.household_state_engine import HouseholdStateEngine
 from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
@@ -122,6 +128,12 @@ BUCKET_LABELS = {
     "super_off_peak": "Super off peak",
     "peak": "Peak",
 }
+AU_SEASON_LABELS_FOR_REPORT = {
+    "summer": "Summer",
+    "autumn": "Autumn",
+    "winter": "Winter",
+    "spring": "Spring",
+}
 
 
 def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
@@ -135,11 +147,35 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
 
 
 def tariff_updates_path() -> Path:
-    return SETTINGS_PATH.parent / "tariff_updates.json"
+    return PROJECT_ROOT / "data" / "runtime" / "tariff_updates.json"
 
 
 def tariff_update_repository() -> TariffUpdateRepository:
-    return TariffUpdateRepository(tariff_updates_path())
+    path = tariff_updates_path()
+    legacy_path = SETTINGS_PATH.parent / "tariff_updates.json"
+    if legacy_path.exists() and not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+    return TariffUpdateRepository(path)
+
+
+def historical_coverage_data(today: Optional[date] = None) -> dict[str, Any]:
+    current_day = today or local_today()
+    try:
+        coverage = data_engine().get_historical_coverage()
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        coverage = {
+            "providers": {},
+            "measurement_totals": {},
+            "historical_backfill_jobs": [],
+            "quality_tiers": {},
+        }
+    return {
+        "historical_coverage": coverage,
+        "seasonal_history": seasonal_history_summary(coverage, today=current_day),
+        "historical_backfill_jobs": coverage.get("historical_backfill_jobs", []),
+        "solaredge_capability_audit": solaredge_capability_audit(current_day),
+    }
 
 
 def activate_demo_mode(today: Optional[date] = None):
@@ -626,6 +662,12 @@ def dashboard_data(
         today_summary = load_summary(conn, current_day, current_day, settings)
         period_summary = load_summary(conn, selected.start, selected.end, settings)
         battery_intervals = battery_dispatch_intervals(context_engine, selected.start, selected.end, settings)
+        seasonal_battery_intervals = battery_historical_dispatch_intervals(
+            context_engine,
+            selected.end - timedelta(days=364),
+            selected.end,
+            settings,
+        )
         billing_summary = (
             period_summary
             if selected.start == billing.start and selected.end == billing.end
@@ -653,7 +695,12 @@ def dashboard_data(
         promotion_summary = context_engine.promote_provider_observations()
         actual_bill_comparison = reconcile_latest_synergy_bill(conn, context_engine, settings, household_context)
         bill_reconciliation_summary = context_engine.get_bill_reconciliation_summary()
-    scenarios = scenario_analysis(period_summary, settings, battery_intervals=battery_intervals)
+    scenarios = scenario_analysis(
+        period_summary,
+        settings,
+        battery_intervals=battery_intervals,
+        seasonal_battery_intervals=seasonal_battery_intervals,
+    )
     completeness = data_completeness(period_summary, settings)
     plan = plan_comparison(period_summary, settings)
     energy_score = build_energy_score(
@@ -898,6 +945,7 @@ def dashboard_data(
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     tariff_updates = tariff_update_overview(settings, billing_summary)
+    historical_data = historical_coverage_data(current_day)
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,
@@ -953,6 +1001,10 @@ def dashboard_data(
         "plan_comparison": plan,
         "current_tariff": tariff_metadata(settings, selected.end),
         "tariff_updates": tariff_updates,
+        "historical_coverage": historical_data["historical_coverage"],
+        "seasonal_history": historical_data["seasonal_history"],
+        "historical_backfill_jobs": historical_data["historical_backfill_jobs"],
+        "solaredge_capability_audit": historical_data["solaredge_capability_audit"],
         "bill_change_explanation": bill_change,
         "actual_bill_comparison": actual_bill_comparison,
         "bill_reconciliation": actual_bill_comparison,
@@ -1520,6 +1572,31 @@ def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, setti
     return intervals
 
 
+def battery_historical_dispatch_intervals(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
+    resolver = tariff_resolver(settings)
+    intervals = []
+    for row in engine.get_battery_interval_history(start, end):
+        timestamp = str(row.get("measurement_time") or "")
+        if not timestamp:
+            continue
+        bucket = str(row.get("tariff_bucket") or "")
+        tariff = resolver.resolve(date.fromisoformat(timestamp[:10]))
+        intervals.append(
+            {
+                **row,
+                "measurement_time": timestamp,
+                "tariff_bucket": bucket,
+                "import_rate": tariff.usage_rate(bucket),
+                "grid_import_kwh": float(row.get("grid_import_kwh") or 0.0),
+                "solar_export_kwh": float(row.get("solar_export_kwh") or 0.0),
+                "tariff_version_id": tariff.version_id,
+                "tariff_effective_from": tariff.effective_from.isoformat(),
+                "tariff_name": tariff.tariff_name,
+            }
+        )
+    return intervals
+
+
 def tariff_scenario(summary: Summary, settings: Settings) -> dict:
     resolver = tariff_resolver(settings)
     comparison_tariff = resolver.resolve(
@@ -1618,6 +1695,7 @@ def scenario_analysis(
     summary: Summary,
     settings: Settings,
     battery_intervals: Optional[list[dict[str, Any]]] = None,
+    seasonal_battery_intervals: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
     actual_bill = summary.net_cost
     ev_kwh = summary.ev_charging_kwh
@@ -1678,6 +1756,7 @@ def scenario_analysis(
         baseline_grid_import_kwh=summary.grid_import_kwh,
         baseline_solar_exported_kwh=summary.solar_exported_kwh,
         tariff_version=current_tariff,
+        seasonal_intervals=seasonal_battery_intervals or [],
     )
     battery_investment = battery_investment_analysis(battery_comparison, settings)
 
@@ -1723,7 +1802,12 @@ def battery_investment_analysis(comparison: Optional[dict], settings: Settings) 
             "assumptions": assumptions,
         }
 
-    recommended = comparison.get("recommended") or {}
+    seasonal = comparison.get("seasonal_model") or {}
+    recommended = (
+        seasonal.get("annual_recommendation")
+        if seasonal.get("available") and seasonal.get("annual_recommendation")
+        else comparison.get("recommended") or {}
+    )
     recommended_size = float(recommended.get("capacity_kwh") or 0.0)
     source_options = battery_investment_source_options(comparison)
     options = [
@@ -1793,6 +1877,10 @@ def battery_investment_assumptions(settings: Settings) -> dict[str, Any]:
 
 
 def battery_investment_source_options(comparison: dict) -> list[dict[str, Any]]:
+    seasonal = comparison.get("seasonal_model") or {}
+    annual_options = seasonal.get("annual_options") or []
+    if seasonal.get("available") and annual_options:
+        return annual_options
     grid_options = ((comparison.get("strategies") or {}).get("solar_plus_grid_arbitrage") or {}).get("options") or []
     return grid_options or comparison.get("options", []) or []
 
@@ -1871,6 +1959,9 @@ def battery_projected_savings(
 
 
 def battery_investment_confidence(comparison: dict[str, Any]) -> tuple[str, str]:
+    seasonal_confidence = ((comparison.get("seasonal_model") or {}).get("confidence_model") or {})
+    if (comparison.get("seasonal_model") or {}).get("available") and seasonal_confidence:
+        return str(seasonal_confidence.get("level") or "Low"), str(seasonal_confidence.get("reason") or "")
     data_quality = comparison.get("data_quality") or {}
     days = int(data_quality.get("days") or 0)
     if days >= 30:
@@ -7105,6 +7196,10 @@ def _provider_has_enough_configuration(data: dict) -> bool:
 def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
     provider_id = str(data.get("provider_id") or "")
     diagnostics_link = f'<a class="button-link muted" href="/api/providers/{html.escape(provider_id)}/diagnostics">View diagnostics</a>'
+    historical_link = (
+        '<a class="button-link" href="#historical-coverage">Historical data</a>'
+        if provider_id == "solaredge" else ""
+    )
     if kind == "import":
         return f"""
           <div class="provider-action-row">
@@ -7129,7 +7224,7 @@ def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
         ) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
     if status == "Connected":
         live_actions = [("Test connection", "test", "submit"), ("Reconnect", "reconnect", "submit"), ("Disable", "disable", "submit"), ("Remove", "remove", "submit")]
-        return _provider_configuration_form_html(data, live_actions, hide_credentials=True) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
+        return _provider_configuration_form_html(data, live_actions, hide_credentials=True) + f'<div class="provider-action-row provider-diagnostics-row">{historical_link}{diagnostics_link}</div>'
     live_actions = [("Add provider", "save", "submit")]
     if _provider_has_enough_configuration(data):
         live_actions.append(("Test connection", "test", "submit"))
@@ -7137,7 +7232,7 @@ def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
         live_actions.append(("Reconnect", "reconnect", "submit"))
         live_actions.append(("Disable", "disable", "submit"))
     live_actions.append(("Remove", "remove", "submit"))
-    return _provider_configuration_form_html(data, live_actions) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
+    return _provider_configuration_form_html(data, live_actions) + f'<div class="provider-action-row provider-diagnostics-row">{historical_link}{diagnostics_link}</div>'
 
 
 def _provider_flash_html(provider_id: str, provider_flash: Optional[dict]) -> str:
@@ -7254,6 +7349,94 @@ def provider_management_html(provider_management: Optional[ProviderManager], pro
       <p class="scenario-note">Manage household integrations here without editing configuration files. Add providers, test connections, reconnect, disable, remove, or inspect diagnostics from the same provider-agnostic workflow.</p>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No household data sources are connected yet.</p>'}</div>
     </div>
+    """
+
+
+def historical_coverage_html(data: Optional[dict]) -> str:
+    data = data or historical_coverage_data()
+    coverage = data.get("historical_coverage") or {}
+    seasonal = data.get("seasonal_history") or {}
+    audit = data.get("solaredge_capability_audit") or {}
+    providers = coverage.get("providers") or {}
+    solaredge = providers.get("solaredge") or {}
+    provider_sources = solaredge.get("sources") or {}
+    source_rows = "".join(
+        f"""
+        <div class="completeness-row good">
+          <span>{html.escape(str(source.get("resolution") or "interval data").replace("_", " "))}</span>
+          <strong>{html.escape(str(source.get("days") or 0))} days available</strong>
+          <small>{html.escape(str(source.get("first_reading") or "No first reading"))} to {html.escape(str(source.get("last_reading") or "No last reading"))}</small>
+        </div>
+        """
+        for source in provider_sources.values()
+    )
+    if not source_rows:
+        source_rows = '<p class="notice">No SolarEdge historical interval readings are stored yet.</p>'
+
+    jobs = data.get("historical_backfill_jobs") or []
+    job_rows = "".join(
+        f"""
+        <div class="completeness-row {'good' if job.get('status') == 'complete' else 'bad' if job.get('status') == 'failed' else 'neutral'}">
+          <span>{html.escape(str(job.get("status") or "queued").replace("_", " ").title())}</span>
+          <strong>{html.escape(str(job.get("start_date") or ""))} to {html.escape(str(job.get("end_date") or ""))}</strong>
+          <small>{html.escape(str((job.get("progress") or {}).get("chunks_completed", 0)))} / {html.escape(str((job.get("progress") or {}).get("chunks_total", 0)))} days checked</small>
+          <div class="provider-action-row">
+            <form method="post" action="/api/historical-backfill/resume"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Resume</button></form>
+            <form method="post" action="/api/historical-backfill/cancel"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Cancel</button></form>
+          </div>
+        </div>
+        """
+        for job in jobs[:5]
+    )
+    if not job_rows:
+        job_rows = '<p class="notice">No historical data backfill jobs have run yet.</p>'
+
+    range_options = "".join(
+        f'<option value="{html.escape(key)}"{" selected" if key == "previous_summer" else ""}>{html.escape(label)}</option>'
+        for key, label in RANGE_PRESETS.items()
+    )
+    seasonal_range = seasonal.get("range") or {}
+    existing = seasonal.get("existing_coverage") or {}
+    gaps = seasonal.get("gaps") or {}
+    warning_rows = "".join(f"<li>{html.escape(str(item))}</li>" for item in seasonal.get("warnings") or [])
+    quality_rows = "".join(
+        f"<li><strong>{html.escape(key.replace('_', ' ').title())}:</strong> {html.escape(str(value))}</li>"
+        for key, value in (coverage.get("quality_tiers") or {}).items()
+    )
+    return f"""
+    <section id="historical-coverage" class="report-section">
+      {page_heading_html("Historical data", "See which past readings can support seasonal context and battery modelling.", parent="Settings")}
+      <div class="system-card">
+        <div class="chart-heading"><h3>Previous summer readiness</h3><span>{html.escape(str(seasonal_range.get("start") or ""))} to {html.escape(str(seasonal_range.get("end") or ""))}</span></div>
+        <div class="config-grid">
+          <div><span>Days with readings</span><strong>{html.escape(str(existing.get("days_with_any_reading", 0)))} / {html.escape(str(gaps.get("days_in_range", seasonal_range.get("days", 0))))}</strong></div>
+          <div><span>Battery-ready days</span><strong>{html.escape(str(existing.get("battery_suitable_days", 0)))}</strong></div>
+          <div><span>Resolution</span><strong>{html.escape(str(seasonal.get("resolution") or "interval_15m").replace("_", " "))}</strong></div>
+          <div><span>Confidence</span><strong>{html.escape(str(seasonal.get("quality_tier") or "interval_grade").replace("_", " ").title())}</strong></div>
+        </div>
+        <p class="scenario-note">Battery modelling only replays days with interval import/export readings. Daily, monthly, or lifetime totals are useful context, but they are not enough for tariff-aware battery dispatch.</p>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Start historical import</h3><span>SolarEdge</span></div>
+        <form class="setup-config-form" method="post" action="/api/historical-backfill/start">
+          <input type="hidden" name="provider_id" value="solaredge">
+          <label><span>Date range</span><select name="range_preset">{range_options}</select></label>
+          <label><span>Custom start</span><input type="date" name="start"></label>
+          <label><span>Custom end</span><input type="date" name="end"></label>
+          <button type="submit">Start import</button>
+        </form>
+        <p class="scenario-note">Previous summer is the Australian summer from 1 December to 31 March most recently completed. Custom ranges are also supported.</p>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Stored coverage</h3><span>By source</span></div>
+        <div class="completeness-grid">{source_rows}</div>
+      </div>
+      <div class="system-card">
+        <div class="chart-heading"><h3>Historical import jobs</h3><span>Progress and resume status</span></div>
+        <div class="completeness-grid">{job_rows}</div>
+      </div>
+      {disclosure_html("SolarEdge historical capability", "Resolution, limits, and battery suitability", f'<div class="config-grid"><div><span>Source</span><strong>{html.escape(str(audit.get("source") or "SolarEdge"))}</strong></div><div><span>Chunk size</span><strong>{html.escape(str(audit.get("chunking") or "One day"))}</strong></div><div><span>Recent reliable window</span><strong>{html.escape(str((audit.get("reliable_recent_window") or {}).get("start") or ""))} to {html.escape(str((audit.get("reliable_recent_window") or {}).get("end") or ""))}</strong></div><div><span>Battery suitability</span><strong>{html.escape(str(audit.get("battery_dispatch_suitability") or ""))}</strong></div></div><ul class="guidance-list">{warning_rows}</ul><ul class="guidance-list">{quality_rows}</ul>', css_class="provider-details")}
+    </section>
     """
 
 
@@ -8515,9 +8698,10 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         </thead>
         <tbody>{''.join(rows)}</tbody>
       </table>
+      {battery_seasonal_model_html(comparison.get("seasonal_model"))}
       <p class="scenario-note">{html.escape(grid_explanation)}</p>
       <p class="scenario-note">{html.escape(tariff_note)}</p>
-      <p class="scenario-note">Battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the current period pattern. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>
+      <p class="scenario-note">Current-period battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the selected period pattern. Seasonal modelling replays only interval-grade historical import/export rows. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>
       {battery_calculation_details_html(comparison)}
     </div>
     """
@@ -8543,6 +8727,55 @@ def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], r
       <td class="battery-money-cell">{money(estimated_bill)}</td>
       <td class="battery-recommendation-cell"><span class="battery-signal {signal_class}">{html.escape(signal)}</span></td>
     </tr>
+    """
+
+
+def battery_seasonal_model_html(model: Optional[dict]) -> str:
+    if not model:
+        return ""
+    if not model.get("available"):
+        return f"""
+        <div class="battery-seasonal-summary">
+          <div class="chart-heading"><h3>Seasonal battery model</h3><span>Historical intervals</span></div>
+          <p class="scenario-note">{html.escape(str(model.get("summary") or "Seasonal battery modelling needs interval-grade historical import/export data."))}</p>
+        </div>
+        """
+    confidence = model.get("confidence_model") or {}
+    rows = "".join(
+        f"""
+        <tr>
+          <td><strong>{html.escape(str(season.get("label") or season.get("season") or ""))}</strong><small>{int(season.get("interval_days") or 0)} days</small></td>
+          <td>{kwh(float(season.get("average_solar_generation_kwh") or 0.0))}/day</td>
+          <td>{kwh(float(season.get("average_import_kwh") or 0.0))}/day</td>
+          <td>{kwh(float(season.get("average_export_kwh") or 0.0))}/day</td>
+          <td>{money(float(season.get("estimated_battery_saving") or 0.0))}/yr</td>
+          <td>{float(season.get("recommended_battery_kwh") or 0.0):g} kWh</td>
+        </tr>
+        """
+        for season in model.get("seasons", [])
+    )
+    diagnostics = model.get("diagnostics") or {}
+    weights = model.get("annual_weighting") or {}
+    weight_text = ", ".join(
+        f"{AU_SEASON_LABELS_FOR_REPORT.get(season, season.title())} {float(weight) * 100:.0f}%"
+        for season, weight in weights.items()
+    )
+    return f"""
+    <div class="battery-seasonal-summary">
+      <div class="chart-heading"><h3>Seasonal battery model</h3><span>{html.escape(str(confidence.get("level") or "Low"))} confidence</span></div>
+      <div class="battery-seasonal-table-wrap">
+        <table class="responsive-table battery-homeowner-table battery-seasonal-table">
+          <thead><tr><th>Season</th><th>Solar</th><th>Import</th><th>Export</th><th>Estimated battery saving</th><th>Recommended battery</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      <p class="battery-conclusion secondary">{html.escape(str(model.get("summary") or ""))}</p>
+      <p class="scenario-note">Annual weighting: {html.escape(weight_text or "unavailable")}. Coverage: {float(diagnostics.get("coverage_percentage") or 0.0):.0f}% across stored interval history. {html.escape(str(confidence.get("reason") or ""))}</p>
+      <details class="battery-calculation-details">
+        <summary>Seasonal diagnostics</summary>
+        <pre>{html.escape(json.dumps({"coverage_by_season": diagnostics.get("coverage_by_season"), "annual_weighting": diagnostics.get("annual_weighting"), "excluded_periods": diagnostics.get("excluded_periods"), "confidence": confidence}, indent=2, sort_keys=True))}</pre>
+      </details>
+    </div>
     """
 
 
@@ -8781,15 +9014,28 @@ def write_html(
     )
     plan = plan_comparison(period_summary, settings)
     try:
+        engine = data_engine()
         battery_intervals = battery_dispatch_intervals(
-            data_engine(),
+            engine,
             selected_period.start,
+            selected_period.end,
+            settings,
+        )
+        seasonal_battery_intervals = battery_historical_dispatch_intervals(
+            engine,
+            selected_period.end - timedelta(days=364),
             selected_period.end,
             settings,
         )
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
         battery_intervals = []
-    scenarios = scenario_analysis(period_summary, settings, battery_intervals=battery_intervals)
+        seasonal_battery_intervals = []
+    scenarios = scenario_analysis(
+        period_summary,
+        settings,
+        battery_intervals=battery_intervals,
+        seasonal_battery_intervals=seasonal_battery_intervals,
+    )
     completeness = data_completeness(period_summary, settings)
     energy_score = build_energy_score(period_summary, recommendations, completeness, plan)
     timeline = timeline or build_decision_timeline(
@@ -9073,6 +9319,7 @@ def write_html(
     snapshot_engine.persist_notification_history(notification_readiness_summary["candidates"])
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     tariff_updates = tariff_update_overview(settings, billing_summary)
+    historical_data = historical_coverage_data(selected_period.end)
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
         recommendation_presentations[0] if recommendation_presentations else None,
@@ -9139,6 +9386,7 @@ def write_html(
       {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}
       {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
     </div>
+    {historical_coverage_html(historical_data)}
     {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check, battery_comparison=scenarios.get("battery_comparison"))}
   </section>
 """
