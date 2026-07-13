@@ -7352,7 +7352,7 @@ def provider_management_html(provider_management: Optional[ProviderManager], pro
     """
 
 
-def historical_coverage_html(data: Optional[dict]) -> str:
+def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Optional[dict] = None) -> str:
     data = data or historical_coverage_data()
     coverage = data.get("historical_coverage") or {}
     seasonal = data.get("seasonal_history") or {}
@@ -7383,6 +7383,7 @@ def historical_coverage_html(data: Optional[dict]) -> str:
           <div class="provider-action-row">
             <form method="post" action="/api/historical-backfill/resume"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Resume</button></form>
             <form method="post" action="/api/historical-backfill/cancel"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Cancel</button></form>
+            <a class="button-link" href="/api/historical-backfill/diagnostics?job_id={html.escape(str(job.get("job_id") or ""))}">View diagnostics</a>
           </div>
         </div>
         """
@@ -7390,6 +7391,7 @@ def historical_coverage_html(data: Optional[dict]) -> str:
     )
     if not job_rows:
         job_rows = '<p class="notice">No historical data backfill jobs have run yet.</p>'
+    flash_html = historical_backfill_flash_html(historical_backfill_flash)
 
     range_options = "".join(
         f'<option value="{html.escape(key)}"{" selected" if key == "previous_summer" else ""}>{html.escape(label)}</option>'
@@ -7406,6 +7408,7 @@ def historical_coverage_html(data: Optional[dict]) -> str:
     return f"""
     <section id="historical-coverage" class="report-section">
       {page_heading_html("Historical data", "See which past readings can support seasonal context and battery modelling.", parent="Settings")}
+      {flash_html}
       <div class="system-card">
         <div class="chart-heading"><h3>Previous summer readiness</h3><span>{html.escape(str(seasonal_range.get("start") or ""))} to {html.escape(str(seasonal_range.get("end") or ""))}</span></div>
         <div class="config-grid">
@@ -7437,6 +7440,32 @@ def historical_coverage_html(data: Optional[dict]) -> str:
       </div>
       {disclosure_html("SolarEdge historical capability", "Resolution, limits, and battery suitability", f'<div class="config-grid"><div><span>Source</span><strong>{html.escape(str(audit.get("source") or "SolarEdge"))}</strong></div><div><span>Chunk size</span><strong>{html.escape(str(audit.get("chunking") or "One day"))}</strong></div><div><span>Recent reliable window</span><strong>{html.escape(str((audit.get("reliable_recent_window") or {}).get("start") or ""))} to {html.escape(str((audit.get("reliable_recent_window") or {}).get("end") or ""))}</strong></div><div><span>Battery suitability</span><strong>{html.escape(str(audit.get("battery_dispatch_suitability") or ""))}</strong></div></div><ul class="guidance-list">{warning_rows}</ul><ul class="guidance-list">{quality_rows}</ul>', css_class="provider-details")}
     </section>
+    """
+
+
+def historical_backfill_flash_html(flash: Optional[dict]) -> str:
+    if not flash:
+        return ""
+    status = str(flash.get("status") or "success").lower()
+    action = str(flash.get("action") or "historical data")
+    message = str(flash.get("message") or "Historical data action completed.")
+    job_id = str(flash.get("job_id") or "")
+    selected_range = str(flash.get("range") or "")
+    next_step = str(flash.get("next_step") or "Review the job status below.")
+    detail_parts = []
+    if job_id:
+        detail_parts.append(f"Job {job_id}")
+    if selected_range:
+        detail_parts.append(selected_range)
+    detail = " · ".join(detail_parts)
+    detail_html = f"<small>{html.escape(detail)}</small>" if detail else ""
+    return f"""
+    <div class="provider-action-result visible {html.escape(status)} provider-flash historical-backfill-flash" role="status">
+      <strong>{html.escape(action.replace('_', ' ').title())}</strong>
+      <span>{html.escape(message)}</span>
+      {detail_html}
+      <small>{html.escape(next_step)}</small>
+    </div>
     """
 
 
@@ -9004,6 +9033,7 @@ def write_html(
     overnight_baseload_watts: Optional[float] = None,
     provider_flash: Optional[dict] = None,
     tariff_update_flash: Optional[dict] = None,
+    historical_backfill_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
@@ -9301,6 +9331,7 @@ def write_html(
         settings=settings,
         provider_registry=provider_registry,
         provider_management=provider_management,
+        solar_data_available=data_engine(conn).has_usable_solar_readings(),
         now=generated_dt,
     )
     notification_readiness = NotificationEngine().build(
@@ -9386,7 +9417,7 @@ def write_html(
       {page_heading_html("Upload household data", "Preview and import supported local household exports.", parent="Settings")}
       {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
     </div>
-    {historical_coverage_html(historical_data)}
+    {historical_coverage_html(historical_data, historical_backfill_flash)}
     {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check, battery_comparison=scenarios.get("battery_comparison"))}
   </section>
 """
@@ -10329,6 +10360,7 @@ def build_live_html(
     glance_only: bool = False,
     provider_flash: Optional[dict] = None,
     tariff_update_flash: Optional[dict] = None,
+    historical_backfill_flash: Optional[dict] = None,
 ) -> str:
     configure_demo_mode()
     settings = load_settings()
@@ -10385,6 +10417,7 @@ def build_live_html(
         overnight_baseload_watts=overnight_baseload_watts,
         provider_flash=provider_flash,
         tariff_update_flash=tariff_update_flash,
+        historical_backfill_flash=historical_backfill_flash,
         runtime_check=runtime_check,
         energy_timeline=energy_timeline,
     )

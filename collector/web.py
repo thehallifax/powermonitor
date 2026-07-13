@@ -3,6 +3,7 @@ import html
 import json
 import logging
 import os
+import subprocess
 import sqlite3
 import sys
 import uuid
@@ -18,6 +19,8 @@ import import_ocular_export
 import import_synergy_bill
 import report
 from engine.import_framework import detect_importer
+from engine.data_engine import DataEngine
+from engine.historical_backfill import build_backfill_preview, job_id_for, resolve_backfill_range
 from engine.models import to_api_safe
 from engine.runtime_diagnostics import runtime_diagnostics
 from engine.tariff_catalog import (
@@ -117,6 +120,12 @@ def normalize_provider_payload(payload: dict) -> dict:
     return normalized
 
 
+def _last_item(value) -> Optional[str]:
+    if isinstance(value, list) and value:
+        return str(value[-1])
+    return None
+
+
 def provider_flash_from_params(params: dict) -> Optional[dict]:
     provider_id = DashboardHandler.param(params, "provider_action_provider")
     if not provider_id:
@@ -141,6 +150,20 @@ def tariff_update_flash_from_params(params: dict) -> Optional[dict]:
     }
 
 
+def historical_backfill_flash_from_params(params: dict) -> Optional[dict]:
+    action = DashboardHandler.param(params, "historical_backfill_action")
+    if not action:
+        return None
+    return {
+        "action": action,
+        "status": DashboardHandler.param(params, "historical_backfill_status", "success"),
+        "message": DashboardHandler.param(params, "historical_backfill_message", ""),
+        "job_id": DashboardHandler.param(params, "historical_backfill_job_id", ""),
+        "range": DashboardHandler.param(params, "historical_backfill_range", ""),
+        "next_step": DashboardHandler.param(params, "historical_backfill_next", ""),
+    }
+
+
 def tariff_update_redirect(action: str, *, status: str = "success", message: str = "") -> str:
     query = urlencode(
         {
@@ -150,6 +173,24 @@ def tariff_update_redirect(action: str, *, status: str = "success", message: str
         }
     )
     return f"/?{query}#tariff-updates"
+
+
+def historical_backfill_redirect(payload: dict, *, action: str, status: str = "success") -> str:
+    selected_range = payload.get("range") or {}
+    range_label = ""
+    if selected_range:
+        range_label = f"{selected_range.get('start', '')} to {selected_range.get('end', '')}".strip()
+    query = urlencode(
+        {
+            "historical_backfill_action": action,
+            "historical_backfill_status": status,
+            "historical_backfill_message": str(payload.get("message") or "Historical data action completed."),
+            "historical_backfill_job_id": str(payload.get("job_id") or ""),
+            "historical_backfill_range": range_label,
+            "historical_backfill_next": str(payload.get("next_step") or "Review the job status below."),
+        }
+    )
+    return f"/?{query}#historical-coverage"
 
 
 def provider_action_redirect(provider_id: str, action: str, result) -> str:
@@ -354,6 +395,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(live_health())
             elif path == "/api/runtime-check":
                 self.send_json({"runtime": runtime_check()})
+            elif path == "/api/historical-coverage":
+                self.send_json(report.historical_coverage_data())
+            elif path == "/api/historical-backfill/preview":
+                self.send_json(self.historical_backfill_preview(params))
+            elif path == "/api/historical-backfill/diagnostics":
+                self.send_json(self.historical_backfill_diagnostics(params))
+            elif path.startswith("/api/historical-backfill/"):
+                self.historical_backfill_method_not_allowed(path)
             else:
                 self.send_json({"error": "not found"}, status=404)
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error) as exc:
@@ -379,6 +428,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.commit_import()
             elif request.path.startswith("/api/providers/"):
                 self.update_provider(request.path)
+            elif request.path == "/api/historical-backfill/start":
+                self.start_historical_backfill()
+            elif request.path == "/api/historical-backfill/cancel":
+                self.cancel_historical_backfill()
+            elif request.path == "/api/historical-backfill/resume":
+                self.resume_historical_backfill()
             else:
                 self.send_json({"error": "not found"}, status=404)
         except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
@@ -394,6 +449,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_html(result_html.encode("utf-8"))
             elif request.path.startswith("/tariff-updates/"):
                 self.redirect("/#tariff-updates")
+            elif request.path.startswith("/api/historical-backfill/") and not self.provider_request_wants_json():
+                action_name = request.path.rsplit("/", 1)[-1]
+                payload = {
+                    "message": str(exc) if isinstance(exc, ValueError) else "Historical data action failed.",
+                    "next_step": "Review the historical data action and try again.",
+                }
+                self.redirect(historical_backfill_redirect(payload, action=action_name, status="failure"))
             elif request.path.startswith("/api/providers/") and not self.provider_request_wants_json():
                 parts = [part for part in request.path.split("/") if part]
                 provider_id = parts[2] if len(parts) >= 3 else "provider"
@@ -463,6 +525,196 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def providers_payload(self) -> dict:
         return {"providers": report.provider_management_data().as_dict()["providers"]}
+
+    def historical_backfill_preview(self, params: dict) -> dict:
+        provider_id = self.param(params, "provider_id", "solaredge")
+        range_preset = self.param(params, "range_preset", "previous_summer")
+        start = self.param(params, "start")
+        end = self.param(params, "end")
+        coverage = report.historical_coverage_data()["historical_coverage"]
+        return {
+            "preview": build_backfill_preview(
+                coverage,
+                provider_id=provider_id,
+                preset=range_preset,
+                today=report.local_today(),
+                start=start,
+                end=end,
+            )
+        }
+
+    def historical_backfill_diagnostics(self, params: dict) -> dict:
+        job_id = self.param(params, "job_id")
+        engine = DataEngine(db_path=report.DB_PATH)
+        coverage_data = report.historical_coverage_data()
+        if job_id:
+            job = engine.get_historical_backfill_job(str(job_id))
+            if not job:
+                raise ValueError("Historical data job not found.")
+            return {
+                "historical_backfill": {
+                    "job": job,
+                    "coverage": coverage_data["historical_coverage"],
+                    "capability_audit": coverage_data["solaredge_capability_audit"],
+                }
+            }
+        return {
+            "historical_backfill": {
+                "jobs": coverage_data["historical_backfill_jobs"],
+                "coverage": coverage_data["historical_coverage"],
+                "seasonal_history": coverage_data["seasonal_history"],
+                "capability_audit": coverage_data["solaredge_capability_audit"],
+            }
+        }
+
+    def historical_backfill_method_not_allowed(self, path: str) -> None:
+        action = path.rsplit("/", 1)[-1]
+        if self.provider_request_wants_json():
+            self.send_json(
+                {
+                    "error": "method_not_allowed",
+                    "message": f"Use POST to {path} for historical backfill {action}.",
+                    "allowed_methods": ["POST"],
+                },
+                status=405,
+            )
+            return
+        self.redirect(
+            historical_backfill_redirect(
+                {
+                    "message": f"Historical data {action} must be submitted with the form button.",
+                    "next_step": "Return to Historical data and use the action button.",
+                },
+                action=action,
+                status="failure",
+            )
+        )
+
+    def start_historical_backfill(self) -> None:
+        payload = self.read_request_payload()
+        provider_id = str(payload.get("provider_id") or "solaredge")
+        if provider_id != "solaredge":
+            raise ValueError("Historical import is currently available for SolarEdge only.")
+        range_preset = str(payload.get("range_preset") or "previous_summer")
+        start = str(payload.get("start") or "") or None
+        end = str(payload.get("end") or "") or None
+        site_id = str(payload.get("site_id") or os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID") or "default")
+        selected = resolve_backfill_range(range_preset, today=report.local_today(), start=start, end=end)
+        job_id = job_id_for(provider_id, site_id, selected)
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "collector" / "backfill_solaredge.py"),
+            "--range",
+            range_preset,
+            "--site-id",
+            site_id,
+            "--job-id",
+            job_id,
+        ]
+        if start:
+            command.extend(["--start", start])
+        if end:
+            command.extend(["--end", end])
+        subprocess.Popen(command, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        response = {
+            "success": True,
+            "job_id": job_id,
+            "provider_id": provider_id,
+            "site_id": site_id,
+            "requested_range": selected.as_dict(),
+            "range": selected.as_dict(),
+            "status": "started",
+            "chunks_completed": 0,
+            "readings_added": 0,
+            "duplicates_skipped": 0,
+            "failed_days": [],
+            "last_successful_day": None,
+            "resume_available": True,
+            "message": "Historical data import started.",
+            "next_step": "Refresh Historical data in a moment to see chunks completed, readings added, duplicates skipped, and failed days.",
+        }
+        self.send_historical_backfill_response(response, action="start")
+
+    def resume_historical_backfill(self) -> None:
+        payload = self.read_request_payload()
+        job_id = str(payload.get("job_id") or "")
+        if not job_id:
+            raise ValueError("Job id is required.")
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "collector" / "backfill_solaredge.py"),
+            "--resume",
+            "--job-id",
+            job_id,
+        ]
+        subprocess.Popen(command, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        job = DataEngine(db_path=report.DB_PATH).get_historical_backfill_job(job_id) or {}
+        progress = job.get("progress") or {}
+        response = {
+            "success": True,
+            "job_id": job_id,
+            "provider_id": job.get("provider_id", "solaredge"),
+            "requested_range": {
+                "start": job.get("start_date"),
+                "end": job.get("end_date"),
+                "preset": job.get("range_preset"),
+            },
+            "range": {
+                "start": job.get("start_date"),
+                "end": job.get("end_date"),
+                "preset": job.get("range_preset"),
+            },
+            "status": "started",
+            "chunks_completed": int(progress.get("chunks_completed") or 0),
+            "readings_added": int(progress.get("imported_or_updated") or 0),
+            "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
+            "failed_days": list(progress.get("failed_days") or []),
+            "last_successful_day": _last_item(progress.get("completed_days")),
+            "resume_available": True,
+            "message": "Historical data import resumed.",
+            "next_step": "Refresh Historical data in a moment to see updated progress.",
+        }
+        self.send_historical_backfill_response(response, action="resume")
+
+    def cancel_historical_backfill(self) -> None:
+        payload = self.read_request_payload()
+        job_id = str(payload.get("job_id") or "")
+        if not job_id:
+            raise ValueError("Job id is required.")
+        job = DataEngine(db_path=report.DB_PATH).request_historical_backfill_cancel(job_id)
+        progress = job.get("progress") or {}
+        response = {
+            "success": True,
+            "job_id": job_id,
+            "provider_id": job.get("provider_id", "solaredge"),
+            "requested_range": {
+                "start": job.get("start_date"),
+                "end": job.get("end_date"),
+                "preset": job.get("range_preset"),
+            },
+            "range": {
+                "start": job.get("start_date"),
+                "end": job.get("end_date"),
+                "preset": job.get("range_preset"),
+            },
+            "status": job.get("status"),
+            "chunks_completed": int(progress.get("chunks_completed") or 0),
+            "readings_added": int(progress.get("imported_or_updated") or 0),
+            "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
+            "failed_days": list(progress.get("failed_days") or []),
+            "last_successful_day": _last_item(progress.get("completed_days")),
+            "resume_available": job.get("status") not in {"complete", "failed"},
+            "message": "Cancel requested.",
+            "next_step": "The running import will stop at the next safe checkpoint.",
+        }
+        self.send_historical_backfill_response(response, action="cancel")
+
+    def send_historical_backfill_response(self, payload: dict, *, action: str) -> None:
+        regenerate_dashboard_report()
+        if self.provider_request_wants_json():
+            self.send_json({"historical_backfill": payload})
+            return
+        self.redirect(historical_backfill_redirect(payload, action=action))
 
     def provider_payload(self, path: str) -> dict:
         parts = [part for part in path.split("/") if part]
@@ -740,10 +992,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_dashboard(self, params: dict) -> None:
         provider_flash = provider_flash_from_params(params)
         tariff_flash = tariff_update_flash_from_params(params)
-        if provider_flash or tariff_flash:
+        historical_backfill_flash = historical_backfill_flash_from_params(params)
+        if provider_flash or tariff_flash or historical_backfill_flash:
             content = report.build_live_html(
                 provider_flash=provider_flash,
                 tariff_update_flash=tariff_flash,
+                historical_backfill_flash=historical_backfill_flash,
             ).encode("utf-8")
             self.send_html(content)
             return

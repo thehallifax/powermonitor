@@ -16,7 +16,7 @@ from .models import (
     SetupTaskPriority,
 )
 from .provider_framework import ProviderCapability, ProviderRegistry
-from .provider_manager import ProviderConnectionStatus, ProviderManager, ProviderSyncState
+from .provider_manager import ManagedProvider, ProviderConnectionStatus, ProviderManager
 
 
 class SetupEngine:
@@ -39,6 +39,7 @@ class SetupEngine:
         settings: Optional[Any] = None,
         provider_registry: Optional[ProviderRegistry] = None,
         provider_management: Optional[ProviderManager] = None,
+        solar_data_available: Optional[bool] = None,
         now: Optional[datetime] = None,
     ) -> SetupChecklist:
         now = now or datetime.now().astimezone()
@@ -60,7 +61,7 @@ class SetupEngine:
             SetupSection(
                 "energy_providers",
                 "Energy Providers",
-                self._provider_tasks(capability_summary, provider_registry, provider_management),
+                self._provider_tasks(capability_summary, provider_registry, provider_management, solar_data_available),
             ),
             SetupSection(
                 "imports",
@@ -160,6 +161,7 @@ class SetupEngine:
         capability_summary: HouseholdCapabilitySummary,
         provider_registry: Optional[ProviderRegistry],
         provider_management: Optional[ProviderManager] = None,
+        solar_data_available: Optional[bool] = None,
     ) -> list[SetupTask]:
         tasks = []
         if self._household_declares("solar"):
@@ -168,31 +170,46 @@ class SetupEngine:
             managed_provider = _first_managed_provider(provider_management, ProviderCapability.DAILY_SUMMARY)
             rationale = solar.reason if solar else "Solar capability is unavailable."
             source = "HouseholdCapabilitySummary.solar"
-            provider_ready = bool(solar and solar.usable)
+            verified_solar = bool(solar_data_available) if solar_data_available is not None else bool(solar and solar.usable)
             action_href = "#system"
+            action_label = "Add Solar"
             if managed_provider:
-                provider_ready = (
-                    managed_provider.configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED
-                    and managed_provider.lifecycle_state in {ProviderConnectionStatus.CONNECTED, ProviderConnectionStatus.CONFIGURED, ProviderConnectionStatus.SYNCING}
-                    and managed_provider.sync_state in {ProviderSyncState.SYNCED, ProviderSyncState.UNKNOWN}
-                )
-                rationale = f"{managed_provider.name} is selected for solar data."
+                configured = _provider_configuration_ready(managed_provider)
+                if verified_solar:
+                    rationale = f"Verified normalized solar generation readings are available from {managed_provider.name}."
+                    action_label = "Review Solar Data"
+                elif not configured:
+                    rationale = f"{managed_provider.name} is selected, but connection details are missing."
+                    action_label = f"Connect {managed_provider.name}"
+                elif managed_provider.lifecycle_state in {ProviderConnectionStatus.ERROR, ProviderConnectionStatus.DEGRADED}:
+                    rationale = f"{managed_provider.name} needs attention, and no usable solar generation readings are stored yet."
+                    action_label = "Review Provider"
+                else:
+                    rationale = f"{managed_provider.name} is configured, but PowerMonitor has not collected usable solar generation readings yet."
+                    action_label = "Collect Solar Data"
                 source = "ProviderManagement.solar"
                 action_href = f"#system-provider-{managed_provider.provider_id}"
             elif solar_provider:
-                rationale = f"{solar_provider.name} can add solar production and export history."
+                if verified_solar:
+                    rationale = "Verified normalized solar generation readings are available."
+                    action_label = "Review Solar Data"
+                else:
+                    rationale = f"{solar_provider.name} can add solar production and export history."
                 source = "ProviderRegistry.solar"
                 action_href = f"#system-provider-registry-{solar_provider.provider_id}"
+            elif verified_solar:
+                rationale = "Verified normalized solar generation readings are available."
+                action_label = "Review Solar Data"
             tasks.append(
                 task(
                     "connect_solar_provider",
                     "Add solar data",
-                    provider_ready,
+                    verified_solar,
                     "high",
                     "5 minutes",
-                    "Add Solar",
+                    action_label,
                     action_href,
-                    rationale if solar_provider or managed_provider else "Add solar data now, or skip it and add it later.",
+                    rationale if solar_provider or managed_provider or verified_solar else "Add solar data now, or skip it and add it later.",
                     source,
                 )
             )
@@ -344,6 +361,20 @@ def _first_managed_provider(
         if capability in provider.capability_summary.capabilities
     ]
     return providers[0] if providers else None
+
+
+def _provider_configuration_ready(provider: ManagedProvider) -> bool:
+    credentials = list(provider.configuration.credentials or [])
+    required = [credential for credential in credentials if credential.required]
+    if required and all(credential.configured for credential in required):
+        return True
+    if provider.provider_id == "solaredge" and any(
+        credential.field == "cookie" and credential.configured for credential in credentials
+    ):
+        return True
+    if required:
+        return False
+    return provider.configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED
 
 
 def _priority_rank(priority: str) -> int:

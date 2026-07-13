@@ -1162,6 +1162,27 @@ class DataEngine:
             "solar_exported_kwh": sum(row["solar_to_grid_kwh"] for row in solar_rows),
         }
 
+    def has_usable_solar_readings(self) -> bool:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM readings
+                WHERE household_id = ?
+                  AND measurement_time IS NOT NULL
+                  AND production_kwh IS NOT NULL
+                  AND production_kwh > 0
+                LIMIT 1
+                """,
+                (household_id,),
+            ).fetchone()
+            return row is not None
+
+        return self._with_connection(query)
+
     def get_measurement_provider_registry(self, start: date, end: date) -> MeasurementProviderRegistry:
         """Return source-agnostic measurement providers for the selected period."""
 

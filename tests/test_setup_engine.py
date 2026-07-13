@@ -1,5 +1,7 @@
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from engine.import_framework import ImportSource
 from engine.models import (
@@ -13,7 +15,8 @@ from engine.models import (
     HouseholdMembership,
 )
 from engine.setup_engine import SetupEngine
-from engine.provider_framework import build_provider_registry
+from engine.provider_framework import Provider, ProviderCapability, ProviderRegistry, ProviderStatus, ProviderType, build_provider_registry
+from engine.provider_manager import ProviderManager
 
 
 class SetupEngineTests(unittest.TestCase):
@@ -173,6 +176,160 @@ class SetupEngineTests(unittest.TestCase):
         self.assertEqual(tasks["configure_household_goals"].action_href, "#home-goals")
         self.assertNotIn("enable_notifications", tasks)
 
+    def test_solar_provider_selected_without_credentials_prompts_connection(self):
+        manager = ProviderManager(solar_registry())
+        checklist = SetupEngine(context_with("solar")).build_checklist(
+            capability_summary(
+                solar=False,
+                ev=False,
+                tariff=True,
+                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "ok"},
+            settings=settings(billing_configured=True),
+            provider_management=manager,
+            solar_data_available=False,
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        solar_task = task_by_id(checklist, "connect_solar_provider")
+        self.assertEqual(solar_task.status, "action_needed")
+        self.assertEqual(solar_task.action_label, "Connect SolarEdge")
+        self.assertIn("connection details are missing", solar_task.rationale)
+
+    def test_configured_solar_provider_without_readings_prompts_collection(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(solar_registry(), **manager_paths(directory))
+            manager.action("solaredge", "save", {"cookie": "redaction-fixture-cookie"})
+            checklist = SetupEngine(context_with("solar")).build_checklist(
+                capability_summary(
+                    solar=False,
+                    ev=False,
+                    tariff=True,
+                    latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+                ),
+                collector_health={"status": "ok"},
+                settings=settings(billing_configured=True),
+                provider_management=manager,
+                solar_data_available=False,
+                now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+            )
+
+        solar_task = task_by_id(checklist, "connect_solar_provider")
+        self.assertEqual(solar_task.status, "action_needed")
+        self.assertEqual(solar_task.action_label, "Collect Solar Data")
+        self.assertIn("has not collected usable solar generation readings", solar_task.rationale)
+
+    def test_verified_solar_readings_complete_add_solar_data_task(self):
+        manager = ProviderManager(solar_registry())
+        checklist = SetupEngine(context_with("solar")).build_checklist(
+            capability_summary(
+                solar=True,
+                ev=False,
+                tariff=True,
+                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "ok"},
+            settings=settings(billing_configured=True),
+            provider_management=manager,
+            solar_data_available=True,
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        solar_task = task_by_id(checklist, "connect_solar_provider")
+        self.assertEqual(solar_task.status, "complete")
+        self.assertEqual(solar_task.action_label, "Review Solar Data")
+        self.assertIn("Verified normalized solar generation readings", solar_task.rationale)
+
+    def test_provider_warning_with_historical_readings_keeps_solar_task_complete(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(
+                solar_registry(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": False,
+                        "authentication_status": "not_authenticated",
+                        "warnings": ["Sign-in failed."],
+                    }
+                },
+                **manager_paths(directory),
+            )
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            manager.action("solaredge", "test")
+            checklist = SetupEngine(context_with("solar")).build_checklist(
+                capability_summary(
+                    solar=True,
+                    ev=False,
+                    tariff=True,
+                    latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+                ),
+                collector_health={"status": "ok"},
+                settings=settings(billing_configured=True),
+                provider_management=manager,
+                solar_data_available=True,
+                now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+            )
+
+        solar_task = task_by_id(checklist, "connect_solar_provider")
+        self.assertEqual(solar_task.status, "complete")
+        self.assertIn("Verified normalized solar generation readings", solar_task.rationale)
+
+    def test_disabled_provider_with_existing_readings_keeps_solar_task_complete(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(solar_registry(), **manager_paths(directory))
+            manager.action("solaredge", "save", {"cookie": "redaction-fixture-cookie"})
+            manager.action("solaredge", "disable")
+            checklist = SetupEngine(context_with("solar")).build_checklist(
+                capability_summary(
+                    solar=True,
+                    ev=False,
+                    tariff=True,
+                    latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+                ),
+                collector_health={"status": "ok"},
+                settings=settings(billing_configured=True),
+                provider_management=manager,
+                solar_data_available=True,
+                now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+            )
+
+        solar_task = task_by_id(checklist, "connect_solar_provider")
+        self.assertEqual(solar_task.status, "complete")
+
+    def test_setup_progress_and_next_task_follow_solar_data_availability(self):
+        incomplete = SetupEngine(context_with("solar")).build_checklist(
+            capability_summary(
+                solar=False,
+                ev=False,
+                tariff=True,
+                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "ok"},
+            goals=[object()],
+            settings=settings(billing_configured=True),
+            provider_management=ProviderManager(solar_registry()),
+            solar_data_available=False,
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+        complete = SetupEngine(context_with("solar")).build_checklist(
+            capability_summary(
+                solar=True,
+                ev=False,
+                tariff=True,
+                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+            ),
+            collector_health={"status": "ok"},
+            goals=[object()],
+            settings=settings(billing_configured=True),
+            provider_management=ProviderManager(solar_registry()),
+            solar_data_available=True,
+            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertLess(incomplete.progress.completion_pct, complete.progress.completion_pct)
+        self.assertEqual(incomplete.progress.remaining_tasks[0].task_id, "connect_solar_provider")
+        self.assertNotIn("connect_solar_provider", [task.task_id for task in complete.progress.remaining_tasks])
+
 
 def context_with(*capabilities: str) -> HouseholdContext:
     return HouseholdContext(
@@ -185,6 +342,35 @@ def context_with(*capabilities: str) -> HouseholdContext:
         ),
         membership=HouseholdMembership("acct", "household", "owner"),
     )
+
+
+def task_by_id(checklist, task_id: str):
+    return next(task for task in checklist.tasks if task.task_id == task_id)
+
+
+def solar_registry() -> ProviderRegistry:
+    return ProviderRegistry(
+        [
+            Provider(
+                provider_id="solaredge",
+                name="SolarEdge",
+                provider_type=ProviderType.SOLAR,
+                capabilities=[ProviderCapability.INTERVAL_HISTORY, ProviderCapability.DAILY_SUMMARY],
+                status=ProviderStatus.AVAILABLE,
+            )
+        ]
+    )
+
+
+def manager_paths(directory):
+    root = Path(directory)
+    return {
+        "provider_state_path": root / "provider_state.json",
+        "entity_mapping_store_path": root / "provider_mappings.json",
+        "secrets_path": root / "secrets.json",
+        "settings_path": root / "settings.json",
+        "solaredge_cookie_path": root / "solaredge_cookie.txt",
+    }
 
 
 def capability_summary(

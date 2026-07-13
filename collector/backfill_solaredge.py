@@ -167,9 +167,12 @@ def run() -> int:
             try:
                 _status, measurement_count, _auth_path = fetch_with_session_recovery(current_day, temp_outfile)
                 payload_summary = payload_diagnostics(temp_outfile, current_day)
+                payload_measurements = int(payload_summary.get("measurement_count") or measurement_count or 0)
+                if payload_measurements <= 0:
+                    raise RuntimeError("SolarEdge returned no historical interval readings for this day.")
                 imported_count, summary, importer_message = import_day(temp_outfile, job_id)
                 imported_or_updated += summary.get("imported_or_updated") or imported_count
-                data_received += summary.get("data_received") or measurement_count
+                data_received += summary.get("data_received") or payload_measurements
                 duplicates += summary.get("duplicates_skipped", 0)
                 zero_rows += summary.get("zero_payload_skipped", 0)
                 temp_outfile.replace(OUTFILE)
@@ -179,12 +182,13 @@ def run() -> int:
                     print(importer_message)
                 print(
                     "Backfilled "
-                    f"{current_day.isoformat()}: {payload_summary.get('measurement_count', measurement_count)} readings checked"
+                    f"{current_day.isoformat()}: {payload_measurements} readings checked"
                 )
                 break
-            except (AuthenticationFailure, SessionRefreshFailure):
+            except (AuthenticationFailure, SessionRefreshFailure) as exc:
+                last_error = redact_sensitive(str(exc))
                 temp_outfile.unlink(missing_ok=True)
-                raise
+                break
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                 last_error = redact_sensitive(str(exc))
                 temp_outfile.unlink(missing_ok=True)

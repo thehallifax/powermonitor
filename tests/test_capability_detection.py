@@ -50,6 +50,18 @@ class CapabilityDetectionTests(unittest.TestCase):
             self.assertTrue(summary.get("imports").available)
             self.assertFalse(summary.get("battery").usable)
 
+    def test_usable_solar_readings_require_positive_normalized_generation(self):
+        with sqlite3.connect(":memory:") as conn:
+            create_readings(conn)
+            engine = DataEngine(connection=conn)
+            engine.validate_database()
+
+            self.assertFalse(engine.has_usable_solar_readings())
+            insert_reading(conn, "default_household", production_kwh=0.0, grid_kwh=0.4, import_cost=0.12)
+            self.assertFalse(engine.has_usable_solar_readings())
+            insert_reading(conn, "default_household", production_kwh=1.2, grid_kwh=0.4, import_cost=0.12)
+            self.assertTrue(engine.has_usable_solar_readings())
+
     def test_advisor_collection_filters_missing_ev_solar_and_tariff(self):
         with sqlite3.connect(":memory:") as conn:
             create_readings(conn)
