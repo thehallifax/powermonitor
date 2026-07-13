@@ -8533,15 +8533,15 @@ def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], r
     grid_saving = float(grid_option.get("period_savings", solar_saving) or 0.0)
     additional = float(grid_option.get("additional_savings_from_grid_charging") or 0.0)
     estimated_bill = float(grid_option.get("estimated_bill", solar_option.get("estimated_bill", 0.0)) or 0.0)
-    badge = '<span class="battery-row-badge">Recommended</span>' if is_recommended else ""
+    signal_class = "recommended" if is_recommended else "neutral"
     return f"""
     <tr class="{'recommended' if is_recommended else 'baseline' if baseline else ''}">
-      <td class="battery-size-cell"><strong>{html.escape(capacity_label)}</strong>{badge}</td>
+      <td class="battery-size-cell"><strong>{html.escape(capacity_label)}</strong></td>
       <td class="battery-money-cell">{money(solar_saving)}</td>
       <td class="battery-money-cell">{money(grid_saving)}</td>
       <td class="battery-money-cell">{money(additional)}</td>
       <td class="battery-money-cell">{money(estimated_bill)}</td>
-      <td class="battery-recommendation-cell"><span class="battery-signal">{html.escape(signal)}</span></td>
+      <td class="battery-recommendation-cell"><span class="battery-signal {signal_class}">{html.escape(signal)}</span></td>
     </tr>
     """
 
@@ -9523,29 +9523,37 @@ def write_html(
     .battery-metrics span,.battery-diagnostics .config-grid span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .battery-metrics strong,.battery-diagnostics .config-grid strong {{ margin-top:5px; font-size:18px; letter-spacing:-.025em; white-space:nowrap; }}
     .battery-metrics small,.battery-diagnostics .config-grid small {{ margin-top:4px; color:var(--muted); font-size:11px; line-height:1.35; }}
-    .battery-homeowner-table {{ width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0; }}
-    .battery-homeowner-table th,.battery-homeowner-table td {{ padding:13px 14px; border-bottom:1px solid rgba(116,87,26,.14); vertical-align:top; }}
-    .battery-homeowner-table th {{ color:#5f6b67; font-size:11px; font-weight:850; letter-spacing:.04em; text-transform:uppercase; background:rgba(255,255,255,.72); }}
-    .battery-homeowner-table th + th,.battery-homeowner-table td + td {{ border-left:1px solid rgba(116,87,26,.10); }}
-    .battery-homeowner-table th:nth-child(1) {{ width:15%; }}
+    .battery-homeowner-table {{ width:100%; table-layout:fixed; border-collapse:collapse; background:#fff; }}
+    .battery-homeowner-table th,.battery-homeowner-table td {{ padding:15px 18px; border-bottom:1px solid rgba(31,42,38,.11); vertical-align:middle; }}
+    .battery-homeowner-table thead th {{ border-bottom:2px solid rgba(31,42,38,.18); }}
+    .battery-homeowner-table th {{ color:#4f5b57; font-size:11px; font-weight:850; letter-spacing:.045em; line-height:1.25; text-transform:uppercase; background:#fff; }}
+    .battery-homeowner-table th + th,.battery-homeowner-table td + td {{ border-left:1px solid rgba(31,42,38,.06); }}
+    .battery-homeowner-table tbody tr:nth-child(even) td {{ background:rgba(31,42,38,.018); }}
+    .battery-homeowner-table th:nth-child(1) {{ width:18%; text-align:left; }}
     .battery-homeowner-table th:nth-child(2),
     .battery-homeowner-table th:nth-child(3),
     .battery-homeowner-table th:nth-child(4),
     .battery-homeowner-table th:nth-child(5) {{ width:13%; text-align:right; }}
-    .battery-homeowner-table th:nth-child(6) {{ width:33%; }}
+    .battery-homeowner-table th:nth-child(6) {{ width:30%; }}
     .battery-homeowner-table td {{ white-space:normal; font-size:13px; line-height:1.4; }}
     .battery-homeowner-table .battery-money-cell {{ text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }}
-    .battery-homeowner-table .battery-size-cell {{ min-width:0; }}
-    .battery-homeowner-table .battery-size-cell strong {{ display:block; font-size:14px; }}
-    .battery-homeowner-table .battery-recommendation-cell {{ min-width:0; }}
-    .battery-homeowner-table tr.recommended td {{ background:#f3fbf7; font-weight:700; }}
-    .battery-homeowner-table tr.baseline td {{ background:#fff; color:var(--muted); }}
-    .battery-row-badge {{ display:inline-block; margin-top:7px; padding:3px 8px; color:#226b50; background:#dff4e9; border-radius:999px; font-size:9px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }}
-    .battery-signal {{ display:inline-block; padding:4px 8px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:10px; font-weight:850; white-space:normal; }}
+    .battery-homeowner-table .battery-size-cell {{ width:18%; min-width:132px; text-align:left; }}
+    .battery-homeowner-table .battery-size-cell strong {{ display:block; font-size:14px; font-weight:750; color:#1f2a26; white-space:nowrap; }}
+    .battery-homeowner-table .battery-recommendation-cell {{ min-width:220px; }}
+    .battery-homeowner-table tr.recommended td {{ font-weight:650; }}
+    .battery-homeowner-table tr.baseline td {{ color:#58625e; }}
+    .battery-signal {{ display:inline-block; max-width:100%; padding:4px 9px; border:1px solid rgba(31,42,38,.12); border-radius:999px; font-size:10px; font-weight:850; line-height:1.2; white-space:nowrap; }}
+    .battery-signal.neutral {{ color:#4f5b57; background:#f5f7f6; }}
+    .battery-signal.recommended {{ color:#226b50; background:#e7f6ee; border-color:#b9dfcc; }}
     .battery-calculation-details {{ margin-top:12px; padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
     .battery-calculation-details summary {{ cursor:pointer; font-size:12px; font-weight:850; }}
     .battery-diagnostics-table {{ overflow-x:auto; margin-top:12px; }}
-    .battery-diagnostics-table table {{ min-width:1500px; }}
+    .battery-diagnostics-table table {{ min-width:1700px; border-collapse:collapse; background:#fff; }}
+    .battery-diagnostics-table th,.battery-diagnostics-table td {{ padding:11px 14px; border-bottom:1px solid rgba(31,42,38,.10); background:transparent; white-space:nowrap; }}
+    .battery-diagnostics-table thead th {{ border-bottom:2px solid rgba(31,42,38,.18); color:#4f5b57; font-size:10px; font-weight:850; letter-spacing:.04em; text-transform:uppercase; background:#fff; }}
+    .battery-diagnostics-table tbody tr:nth-child(even) td {{ background:rgba(31,42,38,.018); }}
+    .battery-diagnostics-table td:not(:first-child) {{ text-align:right; font-variant-numeric:tabular-nums; }}
+    .battery-diagnostics-table td:last-child {{ text-align:left; }}
     .timeline-list {{ display:grid; gap:12px; }}
     .timeline-day {{ margin:8px 0 0; color:var(--muted); font-size:11px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .timeline-entry {{ display:grid; grid-template-columns:120px 1fr; gap:16px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
