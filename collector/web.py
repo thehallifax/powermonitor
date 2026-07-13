@@ -20,7 +20,13 @@ import import_synergy_bill
 import report
 from engine.import_framework import detect_importer
 from engine.data_engine import DataEngine
-from engine.historical_backfill import build_backfill_preview, job_id_for, resolve_backfill_range
+from engine.historical_backfill import (
+    RANGE_PRESETS,
+    SOLAREDGE_DATA_TYPES,
+    build_backfill_preview,
+    job_id_for,
+    resolve_backfill_range,
+)
 from engine.models import to_api_safe
 from engine.runtime_diagnostics import runtime_diagnostics
 from engine.tariff_catalog import (
@@ -40,6 +46,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = PROJECT_ROOT / "logs" / "web.log"
 UPLOAD_DIR = PROJECT_ROOT / "data" / "import_uploads"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
+MAX_NON_LIFETIME_BACKFILL_DAYS = 370
+
+
+class HistoricalBackfillRouteError(RuntimeError):
+    def __init__(self, message: str, *, status: int = 400, next_step: str = "Review the historical data action and try again.") -> None:
+        super().__init__(message)
+        self.status = status
+        self.next_step = next_step
 
 
 def setup_logging() -> None:
@@ -436,7 +450,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.resume_historical_backfill()
             else:
                 self.send_json({"error": "not found"}, status=404)
-        except (FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
+        except (HistoricalBackfillRouteError, FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
             logging.error("POST failed for %s", request.path)
             if request.path.startswith("/imports/"):
                 self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export or Synergy PDF bill and try again.", status=400)
@@ -452,10 +466,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif request.path.startswith("/api/historical-backfill/") and not self.provider_request_wants_json():
                 action_name = request.path.rsplit("/", 1)[-1]
                 payload = {
-                    "message": str(exc) if isinstance(exc, ValueError) else "Historical data action failed.",
-                    "next_step": "Review the historical data action and try again.",
+                    "message": str(exc) if isinstance(exc, (HistoricalBackfillRouteError, ValueError)) else "Historical data action failed.",
+                    "next_step": exc.next_step if isinstance(exc, HistoricalBackfillRouteError) else "Review the historical data action and try again.",
                 }
                 self.redirect(historical_backfill_redirect(payload, action=action_name, status="failure"))
+            elif request.path.startswith("/api/historical-backfill/"):
+                status = exc.status if isinstance(exc, HistoricalBackfillRouteError) else 400 if isinstance(exc, ValueError) else 500
+                self.send_json(
+                    {
+                        "error": "historical_backfill_failed",
+                        "message": str(exc) if isinstance(exc, (HistoricalBackfillRouteError, ValueError)) else "Historical data action failed.",
+                        "next_step": exc.next_step if isinstance(exc, HistoricalBackfillRouteError) else "Review the historical data action and try again.",
+                    },
+                    status=status,
+                )
             elif request.path.startswith("/api/providers/") and not self.provider_request_wants_json():
                 parts = [part for part in request.path.split("/") if part]
                 provider_id = parts[2] if len(parts) >= 3 else "provider"
@@ -590,56 +614,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         )
 
-    def start_historical_backfill(self) -> None:
-        payload = self.read_request_payload()
+    def validate_historical_backfill_start(self, payload: dict) -> tuple[str, str, Optional[str], Optional[str], str, object, dict]:
         provider_id = str(payload.get("provider_id") or "solaredge")
         if provider_id != "solaredge":
-            raise ValueError("Historical import is currently available for SolarEdge only.")
+            raise HistoricalBackfillRouteError("Historical import is currently available for SolarEdge only.", status=400)
         range_preset = str(payload.get("range_preset") or "previous_summer")
+        if range_preset not in RANGE_PRESETS:
+            raise HistoricalBackfillRouteError("Choose a supported historical data range.", status=400)
         start = str(payload.get("start") or "") or None
         end = str(payload.get("end") or "") or None
-        site_id = str(payload.get("site_id") or os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID") or "default")
+        if range_preset == "custom" and (not start or not end):
+            raise HistoricalBackfillRouteError("Custom historical range requires start and end dates.", status=400)
         selected = resolve_backfill_range(range_preset, today=report.local_today(), start=start, end=end)
-        job_id = job_id_for(provider_id, site_id, selected)
-        command = [
-            sys.executable,
-            str(PROJECT_ROOT / "collector" / "backfill_solaredge.py"),
-            "--range",
-            range_preset,
-            "--site-id",
-            site_id,
-            "--job-id",
-            job_id,
-        ]
-        if start:
-            command.extend(["--start", start])
-        if end:
-            command.extend(["--end", end])
-        subprocess.Popen(command, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        response = {
-            "success": True,
-            "job_id": job_id,
-            "provider_id": provider_id,
-            "site_id": site_id,
-            "requested_range": selected.as_dict(),
-            "range": selected.as_dict(),
-            "status": "started",
-            "chunks_completed": 0,
-            "readings_added": 0,
-            "duplicates_skipped": 0,
-            "failed_days": [],
-            "last_successful_day": None,
-            "resume_available": True,
-            "message": "Historical data import started.",
-            "next_step": "Refresh Historical data in a moment to see chunks completed, readings added, duplicates skipped, and failed days.",
-        }
-        self.send_historical_backfill_response(response, action="start")
+        if range_preset != "lifetime" and selected.as_dict()["days"] > MAX_NON_LIFETIME_BACKFILL_DAYS:
+            raise HistoricalBackfillRouteError("Choose a shorter historical range, or explicitly select lifetime history.", status=400)
+        site_id = str(payload.get("site_id") or os.environ.get("POWERMONITOR_SOLAREDGE_SITE_ID") or "default")
+        coverage = report.historical_coverage_data()["historical_coverage"]
+        preview = build_backfill_preview(
+            coverage,
+            provider_id=provider_id,
+            preset=range_preset,
+            today=report.local_today(),
+            start=start,
+            end=end,
+        )
+        return provider_id, range_preset, start, end, site_id, selected, preview
 
-    def resume_historical_backfill(self) -> None:
-        payload = self.read_request_payload()
-        job_id = str(payload.get("job_id") or "")
-        if not job_id:
-            raise ValueError("Job id is required.")
+    def launch_historical_backfill_runner(self, job_id: str) -> None:
         command = [
             sys.executable,
             str(PROJECT_ROOT / "collector" / "backfill_solaredge.py"),
@@ -647,13 +648,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "--job-id",
             job_id,
         ]
-        subprocess.Popen(command, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        job = DataEngine(db_path=report.DB_PATH).get_historical_backfill_job(job_id) or {}
+        try:
+            subprocess.Popen(command, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise HistoricalBackfillRouteError(
+                "Historical data import could not start because the provider runner is unavailable.",
+                status=503,
+                next_step="Check the local PowerMonitor installation and try again.",
+            ) from exc
+
+    @staticmethod
+    def historical_backfill_job_response(job: dict, *, message: str, next_step: str, status: str) -> dict:
         progress = job.get("progress") or {}
-        response = {
-            "success": True,
-            "job_id": job_id,
+        return {
+            "success": status != "failure",
+            "job_id": job.get("job_id"),
             "provider_id": job.get("provider_id", "solaredge"),
+            "site_id": job.get("site_id", "default"),
             "requested_range": {
                 "start": job.get("start_date"),
                 "end": job.get("end_date"),
@@ -664,49 +675,81 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "end": job.get("end_date"),
                 "preset": job.get("range_preset"),
             },
-            "status": "started",
+            "status": status,
             "chunks_completed": int(progress.get("chunks_completed") or 0),
             "readings_added": int(progress.get("imported_or_updated") or 0),
             "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
             "failed_days": list(progress.get("failed_days") or []),
             "last_successful_day": _last_item(progress.get("completed_days")),
-            "resume_available": True,
-            "message": "Historical data import resumed.",
-            "next_step": "Refresh Historical data in a moment to see updated progress.",
+            "resume_available": job.get("status") not in {"complete", "running", "cancelling"},
+            "message": message,
+            "next_step": next_step,
         }
+
+    def start_historical_backfill(self) -> None:
+        payload = self.read_request_payload()
+        provider_id, range_preset, _start, _end, site_id, selected, preview = self.validate_historical_backfill_start(payload)
+        job_id = job_id_for(provider_id, site_id, selected)
+        job = DataEngine(db_path=report.DB_PATH).create_historical_backfill_job(
+            job_id=job_id,
+            provider_id=provider_id,
+            site_id=site_id,
+            range_preset=range_preset,
+            start_date=selected.start,
+            end_date=selected.end,
+            resolution="interval_15m",
+            quality_tier="interval_grade",
+            data_types=list(SOLAREDGE_DATA_TYPES),
+            progress={"chunks_total": selected.as_dict()["days"], "chunks_completed": 0},
+            diagnostics={"preview": preview},
+            warnings=list(preview.get("warnings") or []),
+            status="queued",
+        )
+        self.launch_historical_backfill_runner(job_id)
+        response = self.historical_backfill_job_response(
+            job,
+            status="started",
+            message="Historical data import started.",
+            next_step="Refresh Historical data in a moment to see chunks completed, readings added, duplicates skipped, and failed days.",
+        )
+        self.send_historical_backfill_response(response, action="start")
+
+    def resume_historical_backfill(self) -> None:
+        payload = self.read_request_payload()
+        job_id = str(payload.get("job_id") or "")
+        if not job_id:
+            raise HistoricalBackfillRouteError("Job id is required.", status=400)
+        job = DataEngine(db_path=report.DB_PATH).get_historical_backfill_job(job_id)
+        if not job:
+            raise HistoricalBackfillRouteError("Historical data job not found.", status=404)
+        if job.get("provider_id") != "solaredge":
+            raise HistoricalBackfillRouteError("Historical import is currently available for SolarEdge only.", status=400)
+        if job.get("status") in {"complete", "running", "cancelling"}:
+            raise HistoricalBackfillRouteError("This historical data job cannot be resumed from its current state.", status=409)
+        self.launch_historical_backfill_runner(job_id)
+        response = self.historical_backfill_job_response(
+            job,
+            status="started",
+            message="Historical data import resumed.",
+            next_step="Refresh Historical data in a moment to see updated progress.",
+        )
         self.send_historical_backfill_response(response, action="resume")
 
     def cancel_historical_backfill(self) -> None:
         payload = self.read_request_payload()
         job_id = str(payload.get("job_id") or "")
         if not job_id:
-            raise ValueError("Job id is required.")
-        job = DataEngine(db_path=report.DB_PATH).request_historical_backfill_cancel(job_id)
-        progress = job.get("progress") or {}
-        response = {
-            "success": True,
-            "job_id": job_id,
-            "provider_id": job.get("provider_id", "solaredge"),
-            "requested_range": {
-                "start": job.get("start_date"),
-                "end": job.get("end_date"),
-                "preset": job.get("range_preset"),
-            },
-            "range": {
-                "start": job.get("start_date"),
-                "end": job.get("end_date"),
-                "preset": job.get("range_preset"),
-            },
-            "status": job.get("status"),
-            "chunks_completed": int(progress.get("chunks_completed") or 0),
-            "readings_added": int(progress.get("imported_or_updated") or 0),
-            "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
-            "failed_days": list(progress.get("failed_days") or []),
-            "last_successful_day": _last_item(progress.get("completed_days")),
-            "resume_available": job.get("status") not in {"complete", "failed"},
-            "message": "Cancel requested.",
-            "next_step": "The running import will stop at the next safe checkpoint.",
-        }
+            raise HistoricalBackfillRouteError("Job id is required.", status=400)
+        engine = DataEngine(db_path=report.DB_PATH)
+        if not engine.get_historical_backfill_job(job_id):
+            raise HistoricalBackfillRouteError("Historical data job not found.", status=404)
+        job = engine.request_historical_backfill_cancel(job_id)
+        response = self.historical_backfill_job_response(
+            job,
+            status=str(job.get("status") or "cancelling"),
+            message="Cancel requested.",
+            next_step="The running import will stop at the next safe checkpoint.",
+        )
         self.send_historical_backfill_response(response, action="cancel")
 
     def send_historical_backfill_response(self, payload: dict, *, action: str) -> None:

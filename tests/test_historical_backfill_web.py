@@ -1,8 +1,10 @@
 import http.client
+import json
 import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import date
 from http.server import ThreadingHTTPServer
@@ -59,6 +61,7 @@ class HistoricalBackfillWebTests(unittest.TestCase):
                         "Host": f"192.168.1.20:{context.port}",
                     },
                 )
+                jobs = DataEngine(db_path=context.db_path).get_historical_backfill_jobs()
 
         self.assertEqual(response.status, 303)
         self.assertTrue(response.headers["Location"].endswith("#historical-coverage"))
@@ -68,10 +71,14 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         self.assertEqual(query["historical_backfill_range"], ["2026-07-01 to 2026-07-02"])
         self.assertIn("Historical data import started.", query["historical_backfill_message"][0])
         popen.assert_called_once()
+        self.assertIn("--resume", popen.call_args.args[0])
+        self.assertEqual(len(query["historical_backfill_job_id"][0]), 32)
         regenerate.assert_called_once()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["status"], "queued")
 
     def test_post_resume_redirects_with_message_and_regenerates_report(self):
-        with running_server(seed_job=True) as context:
+        with running_server(seed_job=True, job_status="failed") as context:
             with patch.object(web.subprocess, "Popen") as popen, patch.object(web, "regenerate_dashboard_report") as regenerate:
                 response = context.request(
                     "POST",
@@ -104,6 +111,100 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         self.assertEqual(query["historical_backfill_job_id"], ["job-1"])
         self.assertIn("Cancel requested.", query["historical_backfill_message"][0])
         regenerate.assert_called_once()
+
+    def test_previous_summer_preset_creates_queued_job(self):
+        with running_server() as context:
+            with patch.object(web.subprocess, "Popen"), patch.object(web, "regenerate_dashboard_report"):
+                response = context.request(
+                    "POST",
+                    "/api/historical-backfill/start",
+                    body="provider_id=solaredge&range_preset=previous_summer",
+                    headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+                )
+
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)
+        self.assertEqual(payload["historical_backfill"]["requested_range"]["start"], "2025-12-01")
+        self.assertEqual(payload["historical_backfill"]["requested_range"]["end"], "2026-03-31")
+
+    def test_invalid_custom_dates_return_400(self):
+        with running_server() as context:
+            response = context.request(
+                "POST",
+                "/api/historical-backfill/start",
+                body="provider_id=solaredge&range_preset=custom&start=2026-07-03&end=2026-07-01",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("on or after start", response.body)
+
+    def test_unknown_provider_returns_400(self):
+        with running_server() as context:
+            response = context.request(
+                "POST",
+                "/api/historical-backfill/start",
+                body="provider_id=fronius&range_preset=previous_summer",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("SolarEdge only", response.body)
+
+    def test_unknown_resume_job_returns_404(self):
+        with running_server() as context:
+            response = context.request(
+                "POST",
+                "/api/historical-backfill/resume",
+                body="job_id=missing",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status, 404)
+        self.assertIn("job not found", response.body)
+
+    def test_non_resumable_job_returns_409(self):
+        with running_server(seed_job=True, job_status="complete") as context:
+            response = context.request(
+                "POST",
+                "/api/historical-backfill/resume",
+                body="job_id=job-1",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status, 409)
+        self.assertIn("cannot be resumed", response.body)
+
+    def test_unknown_cancel_job_returns_404(self):
+        with running_server() as context:
+            response = context.request(
+                "POST",
+                "/api/historical-backfill/cancel",
+                body="job_id=missing",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            )
+
+        self.assertEqual(response.status, 404)
+        self.assertIn("job not found", response.body)
+
+    def test_start_route_does_not_block_for_long_import(self):
+        def slow_popen(*args, **kwargs):
+            time.sleep(0.05)
+            return object()
+
+        with running_server() as context:
+            with patch.object(web.subprocess, "Popen", side_effect=slow_popen), patch.object(web, "regenerate_dashboard_report"):
+                started = time.monotonic()
+                response = context.request(
+                    "POST",
+                    "/api/historical-backfill/start",
+                    body="provider_id=solaredge&range_preset=last_12_months",
+                    headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+                )
+                elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status, 200)
+        self.assertLess(elapsed, 1.0)
 
     def test_invalid_get_to_start_returns_method_error_for_api_clients(self):
         with running_server() as context:
@@ -154,8 +255,10 @@ class HistoricalBackfillWebTests(unittest.TestCase):
 
 
 class running_server:
-    def __init__(self, *, seed_job: bool = False):
+    def __init__(self, *, seed_job: bool = False, job_status: str = "running", provider_id: str = "solaredge"):
         self.seed_job = seed_job
+        self.job_status = job_status
+        self.provider_id = provider_id
 
     def __enter__(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -168,7 +271,7 @@ class running_server:
         if self.seed_job:
             DataEngine(db_path=self.db_path).create_historical_backfill_job(
                 job_id="job-1",
-                provider_id="solaredge",
+                provider_id=self.provider_id,
                 site_id="default",
                 range_preset="custom",
                 start_date=date(2026, 7, 1),
@@ -177,7 +280,7 @@ class running_server:
                 quality_tier="interval_grade",
                 data_types=["solar_generation"],
                 progress={"chunks_total": 2, "chunks_completed": 1, "completed_days": ["2026-07-01"], "duplicates_skipped": 3},
-                status="running",
+                status=self.job_status,
             )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web.DashboardHandler)
         self.port = self.server.server_address[1]

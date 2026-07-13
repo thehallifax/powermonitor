@@ -91,6 +91,12 @@ def run() -> int:
         job_id = str(job["job_id"])
         range_preset = str(job["range_preset"])
         warnings = list(job.get("warnings") or [])
+        existing_progress = job.get("progress") or {}
+        completed_days = list(existing_progress.get("completed_days") or [])
+        imported_or_updated = int(existing_progress.get("imported_or_updated") or 0)
+        data_received = int(existing_progress.get("data_received") or 0)
+        duplicates = int(existing_progress.get("duplicates_skipped") or 0)
+        zero_rows = int(existing_progress.get("zero_payload_rows_skipped") or 0)
     else:
         coverage = engine.get_historical_coverage()
         selected = resolve_backfill_range(args.range_preset, start=args.start, end=args.end)
@@ -106,6 +112,11 @@ def run() -> int:
         selected_end = selected.end
         range_preset = selected.preset
         warnings = list(preview.get("warnings") or [])
+        completed_days = []
+        imported_or_updated = 0
+        data_received = 0
+        duplicates = 0
+        zero_rows = 0
         engine.create_historical_backfill_job(
             job_id=job_id,
             provider_id="solaredge",
@@ -123,23 +134,31 @@ def run() -> int:
         )
 
     total_days = (selected_end - selected_start).days + 1
-    completed_days: list[str] = []
     failed_days: list[str] = []
-    imported_or_updated = 0
-    data_received = 0
-    duplicates = 0
-    zero_rows = 0
 
     engine.update_historical_backfill_job(
         job_id,
         status="running",
-        progress={"chunks_total": total_days, "chunks_completed": 0, "current_day": None},
+        progress={
+            "chunks_total": total_days,
+            "chunks_completed": len(completed_days),
+            "current_day": None,
+            "completed_days": completed_days,
+            "failed_days": failed_days,
+            "imported_or_updated": imported_or_updated,
+            "data_received": data_received,
+            "duplicates_skipped": duplicates,
+            "zero_payload_rows_skipped": zero_rows,
+        },
         warnings=warnings,
     )
 
     OUTFILE.parent.mkdir(parents=True, exist_ok=True)
+    completed_day_set = set(completed_days)
     for offset in range(total_days):
         current_day = selected_start + timedelta(days=offset)
+        if current_day.isoformat() in completed_day_set:
+            continue
         current_job = engine.get_historical_backfill_job(job_id) or {}
         if current_job.get("cancel_requested"):
             engine.update_historical_backfill_job(
