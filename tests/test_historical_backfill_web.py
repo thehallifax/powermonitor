@@ -6,9 +6,10 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -34,10 +35,17 @@ class HistoricalBackfillWebTests(unittest.TestCase):
                 "historical_backfill_jobs": [
                     {
                         "job_id": "job-1",
-                        "status": "running",
+                        "status": "failed",
                         "start_date": "2026-07-01",
                         "end_date": "2026-07-02",
                         "progress": {"chunks_completed": 1, "chunks_total": 2},
+                    },
+                    {
+                        "job_id": "job-2",
+                        "status": "running",
+                        "start_date": "2026-07-03",
+                        "end_date": "2026-07-05",
+                        "progress": {"chunks_completed": 2, "chunks_total": 3},
                     }
                 ],
             }
@@ -47,6 +55,7 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         self.assertIn('method="post" action="/api/historical-backfill/resume"', html)
         self.assertIn('method="post" action="/api/historical-backfill/cancel"', html)
         self.assertIn('/api/historical-backfill/diagnostics?job_id=job-1', html)
+        self.assertIn('/api/historical-backfill/diagnostics?job_id=job-2', html)
 
     def test_post_start_redirects_with_message_and_regenerates_report_for_remote_host(self):
         with running_server() as context:
@@ -253,12 +262,110 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         self.assertIn('"job_id": "job-1"', response.body)
         self.assertIn('"coverage"', response.body)
 
+    def test_jobs_endpoint_returns_safe_running_progress_fields(self):
+        with running_server(seed_job=True, job_progress={"chunks_total": 10, "chunks_completed": 4, "completed_days": ["2026-07-01", "2026-07-02"], "failed_days": ["2026-07-03"], "duplicates_skipped": 5, "imported_or_updated": 96, "current_day": "2026-07-04"}) as context:
+            response = context.request("GET", "/api/historical-backfill/jobs", headers={"Accept": "application/json"})
+
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.body)["historical_backfill"]
+        job = payload["jobs"][0]
+        self.assertTrue(payload["polling"]["active"])
+        self.assertEqual(job["job_id"], "job-1")
+        self.assertEqual(job["provider"], "SolarEdge")
+        self.assertEqual(job["days_completed"], 4)
+        self.assertEqual(job["total_days"], 10)
+        self.assertEqual(job["days_remaining"], 6)
+        self.assertEqual(job["failed_days_count"], 1)
+        self.assertEqual(job["readings_added"], 96)
+        self.assertEqual(job["duplicates_skipped"], 5)
+        self.assertEqual(job["current_day"], "2026-07-04")
+        self.assertIn("estimated_finish_time", job)
+        self.assertNotIn("diagnostics", job)
+        self.assertNotIn("warnings", job)
+        self.assertNotIn("site_id", job)
+        self.assertNotIn("household_id", job)
+
+    def test_jobs_endpoint_marks_terminal_jobs_and_stops_polling(self):
+        with running_server(seed_job=True, job_status="complete", job_progress={"chunks_total": 2, "chunks_completed": 2, "completed_days": ["2026-07-01", "2026-07-02"]}) as context:
+            response = context.request("GET", "/api/historical-backfill/jobs?job_id=job-1", headers={"Accept": "application/json"})
+
+        payload = json.loads(response.body)["historical_backfill"]
+        job = payload["jobs"][0]
+        self.assertFalse(payload["polling"]["active"])
+        self.assertEqual(job["status"], "complete")
+        self.assertEqual(job["percentage_complete"], 100.0)
+
+    def test_jobs_endpoint_surfaces_failed_progress(self):
+        with running_server(seed_job=True, job_status="failed", job_progress={"chunks_total": 3, "chunks_completed": 3, "completed_days": ["2026-07-01"], "failed_days": ["2026-07-02", "2026-07-03"]}) as context:
+            response = context.request("GET", "/api/historical-backfill/jobs", headers={"Accept": "application/json"})
+
+        job = json.loads(response.body)["historical_backfill"]["jobs"][0]
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["failed_days_count"], 2)
+        self.assertEqual(job["last_successful_day"], "2026-07-01")
+
+    def test_historical_section_includes_polling_markup_and_same_origin_script(self):
+        html = report.historical_coverage_html(
+            {
+                "historical_coverage": {"providers": {}, "quality_tiers": {}},
+                "seasonal_history": {"range": {}, "existing_coverage": {}, "gaps": {}},
+                "solaredge_capability_audit": {},
+                "historical_backfill_jobs": [
+                    {
+                        "job_id": "job-1",
+                        "status": "running",
+                        "start_date": "2026-07-01",
+                        "end_date": "2026-07-10",
+                        "progress": {"chunks_completed": 4, "chunks_total": 10, "current_day": "2026-07-05"},
+                    }
+                ],
+            }
+        )
+
+        self.assertIn('id="historical-backfill-jobs"', html)
+        self.assertIn('data-endpoint="/api/historical-backfill/jobs"', html)
+        self.assertIn('data-poll-active="true"', html)
+        self.assertIn("Current day: 2026-07-05", html)
+        self.assertIn("40% complete", html)
+
+    def test_historical_section_marks_terminal_jobs_as_not_polling(self):
+        html = report.historical_coverage_html(
+            {
+                "historical_coverage": {"providers": {}, "quality_tiers": {}},
+                "seasonal_history": {"range": {}, "existing_coverage": {}, "gaps": {}},
+                "solaredge_capability_audit": {},
+                "historical_backfill_jobs": [
+                    {
+                        "job_id": "job-1",
+                        "status": "failed",
+                        "start_date": "2026-07-01",
+                        "end_date": "2026-07-03",
+                        "progress": {"chunks_completed": 3, "chunks_total": 3, "failed_days": ["2026-07-02"]},
+                    }
+                ],
+            }
+        )
+
+        self.assertIn('data-poll-active="false"', html)
+
+    def test_dashboard_asset_and_csp_allow_same_origin_polling_without_meta_refresh(self):
+        with running_server(seed_job=True) as context:
+            root = context.request("GET", "/", headers={"Accept": "text/html"})
+            script = context.request("GET", "/assets/dashboard.js", headers={"Accept": "application/javascript"})
+
+        self.assertEqual(script.status, 200)
+        self.assertIn("historical-backfill-jobs", script.body)
+        self.assertIn("script-src 'self'", root.headers["Content-Security-Policy"])
+        self.assertNotIn("script-src 'unsafe-inline'", root.headers["Content-Security-Policy"])
+        self.assertNotIn("Refresh", root.headers)
+
 
 class running_server:
-    def __init__(self, *, seed_job: bool = False, job_status: str = "running", provider_id: str = "solaredge"):
+    def __init__(self, *, seed_job: bool = False, job_status: str = "running", provider_id: str = "solaredge", job_progress: Optional[dict] = None):
         self.seed_job = seed_job
         self.job_status = job_status
         self.provider_id = provider_id
+        self.job_progress = job_progress or {"chunks_total": 2, "chunks_completed": 1, "completed_days": ["2026-07-01"], "duplicates_skipped": 3}
 
     def __enter__(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -269,7 +376,7 @@ class running_server:
             create_readings(conn)
             DataEngine(connection=conn).validate_database()
         if self.seed_job:
-            DataEngine(db_path=self.db_path).create_historical_backfill_job(
+            job = DataEngine(db_path=self.db_path).create_historical_backfill_job(
                 job_id="job-1",
                 provider_id=self.provider_id,
                 site_id="default",
@@ -279,9 +386,26 @@ class running_server:
                 resolution="interval_15m",
                 quality_tier="interval_grade",
                 data_types=["solar_generation"],
-                progress={"chunks_total": 2, "chunks_completed": 1, "completed_days": ["2026-07-01"], "duplicates_skipped": 3},
+                progress=self.job_progress,
                 status=self.job_status,
             )
+            created_at = datetime.now().astimezone() - timedelta(minutes=15)
+            updated_at = created_at + timedelta(minutes=10)
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE historical_backfill_jobs
+                    SET created_at = ?, updated_at = ?, completed_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (
+                        created_at.isoformat(timespec="seconds"),
+                        updated_at.isoformat(timespec="seconds"),
+                        updated_at.isoformat(timespec="seconds") if self.job_status in {"complete", "failed", "cancelled"} else None,
+                        job["job_id"],
+                    ),
+                )
+                conn.commit()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web.DashboardHandler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

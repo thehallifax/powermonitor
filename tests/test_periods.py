@@ -35,6 +35,13 @@ class PeriodSelectionTests(unittest.TestCase):
         self.assertEqual(period.start, date(2025, 1, 1))
         self.assertEqual(period.end, date(2025, 12, 31))
 
+    def test_last_30_days_includes_today_and_prior_29_days(self):
+        period = resolve_period("last_30_days", Settings(), date(2026, 7, 13))
+
+        self.assertEqual(period.label, "Last 30 days")
+        self.assertEqual(period.start, date(2026, 6, 14))
+        self.assertEqual(period.end, date(2026, 7, 13))
+
 
 if __name__ == "__main__":
     unittest.main()

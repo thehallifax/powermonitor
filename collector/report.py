@@ -3140,11 +3140,12 @@ def authentication_alert_html(health: dict) -> str:
     """
 
 
-def period_controls_html(selected: Period) -> str:
+def period_controls_html(selected: Period, period_flash: Optional[dict] = None) -> str:
     choices = (
         ("today", "Today"),
         ("yesterday", "Yesterday"),
         ("last_7_days", "Last 7 days"),
+        ("last_30_days", "Last 30 days"),
         ("this_month", "This month"),
         ("last_month", "Last month"),
         ("year_to_date", "Year to date"),
@@ -3157,8 +3158,10 @@ def period_controls_html(selected: Period) -> str:
         f'<option value="{kind}"{" selected" if selected.kind == kind else ""}>{label}</option>'
         for kind, label in choices
     )
+    flash_html = period_flash_html(period_flash)
     return f"""
     <section class="period-controls">
+      {flash_html}
       <form method="get" action="/">
         <label><span>Dashboard period</span><select name="period">{options}</select></label>
         <label><span>Custom start</span><input type="date" name="start" value="{selected.start.isoformat()}"></label>
@@ -3167,6 +3170,22 @@ def period_controls_html(selected: Period) -> str:
       </form>
       <p>Showing <strong>{html.escape(selected.label)}</strong>: {selected.start.strftime("%d %b %Y")} to {selected.end.strftime("%d %b %Y")}</p>
     </section>
+    """
+
+
+def period_flash_html(flash: Optional[dict]) -> str:
+    if not flash:
+        return ""
+    status = str(flash.get("status") or "warning").lower()
+    message = str(flash.get("message") or "Dashboard period updated.")
+    detail = str(flash.get("detail") or "")
+    detail_html = f"<small>{html.escape(detail)}</small>" if detail else ""
+    return f"""
+    <div class="provider-action-result visible {html.escape(status)} period-flash" role="status">
+      <span>Dashboard period</span>
+      <strong>{html.escape(message)}</strong>
+      {detail_html}
+    </div>
     """
 
 
@@ -7352,6 +7371,131 @@ def provider_management_html(provider_management: Optional[ProviderManager], pro
     """
 
 
+def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def historical_backfill_job_snapshot(job: dict, *, now: Optional[datetime] = None) -> dict:
+    progress = job.get("progress") or {}
+    completed_days = list(progress.get("completed_days") or [])
+    failed_days = list(progress.get("failed_days") or [])
+    total_days = max(int(progress.get("chunks_total") or 0), 0)
+    completed_count = max(int(progress.get("chunks_completed") or 0), 0)
+    remaining_days = max(total_days - completed_count, 0)
+    percentage_complete = min(100.0, (completed_count / total_days) * 100.0) if total_days else 0.0
+    created_at = _parse_iso_datetime(job.get("created_at"))
+    updated_at = _parse_iso_datetime(job.get("updated_at"))
+    now_dt = now or datetime.now().astimezone()
+    estimated_finish_time = None
+    if (
+        updated_at
+        and created_at
+        and updated_at >= created_at
+        and completed_count > 0
+        and remaining_days > 0
+        and str(job.get("status") or "").lower() in {"queued", "running", "retrying", "cancelling"}
+    ):
+        elapsed = (updated_at - created_at).total_seconds()
+        if elapsed > 0:
+            seconds_per_day = elapsed / completed_count
+            if seconds_per_day > 0:
+                eta = updated_at + timedelta(seconds=seconds_per_day * remaining_days)
+                if eta >= now_dt:
+                    estimated_finish_time = eta.strftime("%d %b %Y, %H:%M")
+    status = str(job.get("status") or "queued")
+    provider_id = str(job.get("provider_id") or "solaredge")
+    provider_label = {"solaredge": "SolarEdge"}.get(provider_id, provider_id.replace("_", " ").title())
+    return {
+        "job_id": str(job.get("job_id") or ""),
+        "provider": provider_label,
+        "status": status,
+        "status_text": status.replace("_", " ").title(),
+        "requested_range": {
+            "start": str(job.get("start_date") or ""),
+            "end": str(job.get("end_date") or ""),
+        },
+        "current_day": progress.get("current_day"),
+        "days_completed": completed_count,
+        "total_days": total_days,
+        "days_remaining": remaining_days,
+        "percentage_complete": round(percentage_complete, 1),
+        "percentage_label": f"{percentage_complete:.0f}% complete" if total_days else "0% complete",
+        "days_progress_label": f"{completed_count} / {total_days} days checked" if total_days else "No days queued yet",
+        "readings_added": int(progress.get("imported_or_updated") or 0),
+        "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
+        "failed_days": failed_days,
+        "failed_days_count": len(failed_days),
+        "last_successful_day": completed_days[-1] if completed_days else None,
+        "started_time": created_at.strftime("%d %b %Y, %H:%M") if created_at else None,
+        "updated_time": updated_at.strftime("%d %b %Y, %H:%M") if updated_at else None,
+        "estimated_finish_time": estimated_finish_time,
+        "resumable": status not in {"complete", "running", "cancelling"},
+        "cancellable": status in {"queued", "running", "retrying", "cancelling"},
+    }
+
+
+def historical_backfill_job_card_html(job: dict) -> str:
+    snapshot = historical_backfill_job_snapshot(job)
+    tone = "good" if snapshot["status"] == "complete" else "bad" if snapshot["status"] == "failed" else "neutral"
+    current_day = (
+        f"Current day: {snapshot['current_day']}"
+        if snapshot["current_day"]
+        else f"Last successful day: {snapshot['last_successful_day']}"
+        if snapshot["last_successful_day"]
+        else "Waiting for the next chunk."
+    )
+    retry_html = (
+        f"<small>Failed or retried days: {snapshot['failed_days_count']}</small>"
+        if snapshot["failed_days_count"]
+        else ""
+    )
+    updated_html = f"<small>Updated {html.escape(str(snapshot['updated_time']))}</small>" if snapshot["updated_time"] else ""
+    eta_html = (
+        f"<small>Estimated finish: {html.escape(str(snapshot['estimated_finish_time']))}</small>"
+        if snapshot["estimated_finish_time"]
+        else ""
+    )
+    resume_action = (
+        f'<form method="post" action="/api/historical-backfill/resume"><input type="hidden" name="job_id" value="{html.escape(snapshot["job_id"])}"><button type="submit">Resume</button></form>'
+        if snapshot["resumable"]
+        else ""
+    )
+    cancel_action = (
+        f'<form method="post" action="/api/historical-backfill/cancel"><input type="hidden" name="job_id" value="{html.escape(snapshot["job_id"])}"><button type="submit">Cancel</button></form>'
+        if snapshot["cancellable"]
+        else ""
+    )
+    return f"""
+        <div class="historical-job-card completeness-row {tone}" data-job-id="{html.escape(snapshot['job_id'])}" data-job-status="{html.escape(snapshot['status'])}" data-poll-active="{str(snapshot['status'] in {'queued', 'running', 'retrying', 'cancelling'}).lower()}">
+          <div class="historical-job-header">
+            <span>{html.escape(snapshot["provider"])} - {html.escape(snapshot["status_text"])}</span>
+            <strong>{html.escape(snapshot["requested_range"]["start"])} to {html.escape(snapshot["requested_range"]["end"])}</strong>
+          </div>
+          <div class="historical-job-progress">
+            <div class="historical-job-bar" aria-hidden="true"><span style="width:{snapshot['percentage_complete']:.1f}%"></span></div>
+            <strong>{html.escape(snapshot["percentage_label"])}</strong>
+          </div>
+          <div class="historical-job-meta">
+            <small>{html.escape(snapshot["days_progress_label"])}</small>
+            <small>{html.escape(current_day)}</small>
+            {retry_html}
+            {updated_html}
+            {eta_html}
+          </div>
+          <div class="provider-action-row">
+            {resume_action}
+            {cancel_action}
+            <a class="button-link" href="/api/historical-backfill/diagnostics?job_id={html.escape(snapshot['job_id'])}">View diagnostics</a>
+          </div>
+        </div>
+    """
+
+
 def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Optional[dict] = None) -> str:
     data = data or historical_coverage_data()
     coverage = data.get("historical_coverage") or {}
@@ -7374,23 +7518,10 @@ def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Op
         source_rows = '<p class="notice">No SolarEdge historical interval readings are stored yet.</p>'
 
     jobs = data.get("historical_backfill_jobs") or []
-    job_rows = "".join(
-        f"""
-        <div class="completeness-row {'good' if job.get('status') == 'complete' else 'bad' if job.get('status') == 'failed' else 'neutral'}">
-          <span>{html.escape(str(job.get("status") or "queued").replace("_", " ").title())}</span>
-          <strong>{html.escape(str(job.get("start_date") or ""))} to {html.escape(str(job.get("end_date") or ""))}</strong>
-          <small>{html.escape(str((job.get("progress") or {}).get("chunks_completed", 0)))} / {html.escape(str((job.get("progress") or {}).get("chunks_total", 0)))} days checked</small>
-          <div class="provider-action-row">
-            <form method="post" action="/api/historical-backfill/resume"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Resume</button></form>
-            <form method="post" action="/api/historical-backfill/cancel"><input type="hidden" name="job_id" value="{html.escape(str(job.get("job_id") or ""))}"><button type="submit">Cancel</button></form>
-            <a class="button-link" href="/api/historical-backfill/diagnostics?job_id={html.escape(str(job.get("job_id") or ""))}">View diagnostics</a>
-          </div>
-        </div>
-        """
-        for job in jobs[:5]
-    )
+    job_rows = "".join(historical_backfill_job_card_html(job) for job in jobs[:5])
     if not job_rows:
         job_rows = '<p class="notice">No historical data backfill jobs have run yet.</p>'
+    poll_active = any(str(job.get("status") or "").lower() in {"queued", "running", "retrying", "cancelling"} for job in jobs[:5])
     flash_html = historical_backfill_flash_html(historical_backfill_flash)
 
     range_options = "".join(
@@ -7436,7 +7567,7 @@ def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Op
       </div>
       <div class="system-card">
         <div class="chart-heading"><h3>Historical import jobs</h3><span>Progress and resume status</span></div>
-        <div class="completeness-grid">{job_rows}</div>
+        <div id="historical-backfill-jobs" class="completeness-grid historical-job-list" data-endpoint="/api/historical-backfill/jobs" data-poll-active="{str(poll_active).lower()}" data-poll-interval-ms="7000">{job_rows}</div>
       </div>
       {disclosure_html("SolarEdge historical capability", "Resolution, limits, and battery suitability", f'<div class="config-grid"><div><span>Source</span><strong>{html.escape(str(audit.get("source") or "SolarEdge"))}</strong></div><div><span>Chunk size</span><strong>{html.escape(str(audit.get("chunking") or "One day"))}</strong></div><div><span>Recent reliable window</span><strong>{html.escape(str((audit.get("reliable_recent_window") or {}).get("start") or ""))} to {html.escape(str((audit.get("reliable_recent_window") or {}).get("end") or ""))}</strong></div><div><span>Battery suitability</span><strong>{html.escape(str(audit.get("battery_dispatch_suitability") or ""))}</strong></div></div><ul class="guidance-list">{warning_rows}</ul><ul class="guidance-list">{quality_rows}</ul>', css_class="provider-details")}
     </section>
@@ -9034,11 +9165,10 @@ def write_html(
     provider_flash: Optional[dict] = None,
     tariff_update_flash: Optional[dict] = None,
     historical_backfill_flash: Optional[dict] = None,
+    period_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
 ) -> str:
-    output_path = output_path or REPORT_PATH
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     selected_period = selected_period or Period(
         "current_billing_period", "Current billing period", period_summary.start, period_summary.end
     )
@@ -9370,7 +9500,7 @@ def write_html(
     chrome_html = "" if glance_only else f"""
   {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
   {authentication_alert_html(health)}
-  {period_controls_html(selected_period)}
+  {period_controls_html(selected_period, period_flash)}
   {nav_html()}
 """
     pages_html = (
@@ -9518,6 +9648,7 @@ def write_html(
     .period-controls select,.period-controls input,.period-controls button {{ width:100%; min-height:39px; padding:8px 10px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font:inherit; }}
     .period-controls button {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); font-weight:750; cursor:pointer; }}
     .period-controls p,.scenario-note {{ margin:10px 0 0; color:var(--muted); font-size:11px; }}
+    .period-flash {{ margin-bottom:12px; }}
     .disclosure-panel {{ margin-top:14px; background:#fff; border:1px solid var(--line); border-radius:16px; overflow:hidden; }}
     .disclosure-panel summary {{ position:relative; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:15px 17px; cursor:pointer; list-style:none; }}
     .disclosure-panel summary::-webkit-details-marker {{ display:none; }}
@@ -10014,6 +10145,16 @@ def write_html(
     .completeness-row strong {{ font-size:12px; }} .completeness-row small {{ grid-column:1 / -1; color:var(--muted); font-size:11px; }}
     .completeness-row.good {{ border-color:#cce9dc; background:#f3fbf7; }} .completeness-row.good strong {{ color:#226b50; }}
     .completeness-row.bad {{ border-color:#f0cec8; background:#fff5f3; }} .completeness-row.bad strong {{ color:#a74334; }}
+    .historical-job-list {{ gap:12px; }}
+    .historical-job-card {{ grid-template-columns:1fr; gap:10px; }}
+    .historical-job-header,.historical-job-progress {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
+    .historical-job-header strong,.historical-job-progress strong {{ font-size:12px; }}
+    .historical-job-progress strong {{ white-space:nowrap; }}
+    .historical-job-bar {{ flex:1 1 auto; height:10px; overflow:hidden; background:#dbe7e2; border-radius:999px; }}
+    .historical-job-bar span {{ display:block; height:100%; min-width:6px; background:linear-gradient(90deg,#4a86a8,#1c9b6c); border-radius:inherit; }}
+    .historical-job-card.bad .historical-job-bar span {{ background:linear-gradient(90deg,#e58a7b,#dc604e); }}
+    .historical-job-meta {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:6px 10px; }}
+    .historical-job-meta small {{ grid-column:auto; }}
     .decision-lines {{ display:grid; gap:12px; margin-top:14px; }}
     .decision-lines p,.action-card p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .decision-lines strong,.action-card p strong {{ display:block; margin-bottom:2px; color:var(--ink); font-size:9px; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }}
@@ -10233,118 +10374,7 @@ def write_html(
   {pages_html}
   {footer_html}
 </main>
-<script>
-(() => {{
-  function revealHashTarget() {{
-    document.querySelectorAll(".deep-link-target").forEach((item) => item.classList.remove("deep-link-target"));
-    const id = decodeURIComponent((window.location.hash || "").slice(1));
-    if (!id) return;
-    const target = document.getElementById(id);
-    if (!target) return;
-    target.closest(".page")?.style.removeProperty("display");
-    target.querySelectorAll("details.provider-config-details").forEach((details) => details.open = true);
-    let current = target.parentElement;
-    while (current) {{
-      if (current.tagName === "DETAILS") current.open = true;
-      current = current.parentElement;
-    }}
-    target.classList.add("deep-link-target");
-    window.requestAnimationFrame(() => target.scrollIntoView({{block: "start", inline: "nearest"}}));
-  }}
-
-  window.addEventListener("hashchange", revealHashTarget);
-  window.addEventListener("load", revealHashTarget);
-  revealHashTarget();
-
-  function payloadFromForm(form) {{
-    const payload = {{}};
-    const mappings = {{}};
-    new FormData(form).forEach((value, key) => {{
-      const text = String(value || "").trim();
-      if (!text) return;
-      if (key.startsWith("entity_mappings.")) {{
-        mappings[key.slice("entity_mappings.".length)] = text;
-      }} else {{
-        payload[key] = text;
-      }}
-    }});
-    if (Object.keys(mappings).length) payload.entity_mappings = mappings;
-    return payload;
-  }}
-
-  function renderResult(container, action) {{
-    if (!container || !action) return;
-    const status = action.status || (action.success ? "success" : "failure");
-    container.className = "provider-action-result visible " + status;
-    const details = action.technical_details || (action.test && action.test.technical_details) || {{}};
-    const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (char) => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[char]));
-    container.innerHTML = `
-      <span>${{escapeHtml(status)}}</span>
-      <strong>${{escapeHtml(action.user_message || "Provider action completed.")}}</strong>
-      <small>${{escapeHtml(action.next_step || "Review provider status.")}}</small>
-      <details>
-        <summary>Technical details</summary>
-        <pre>${{escapeHtml(JSON.stringify(details, null, 2))}}</pre>
-      </details>
-    `;
-  }}
-
-  async function runProviderAction(form, actionName) {{
-    const providerId = form.dataset.providerId;
-    const result = form.querySelector(".provider-action-result");
-    const payload = ["save", "configure", "edit"].includes(actionName) ? payloadFromForm(form) : {{}};
-    if (actionName === "reset") payload.reset_entity_mappings = true;
-    result.className = "provider-action-result visible warning";
-    result.innerHTML = "<span>Running</span><strong>Working on provider action...</strong>";
-    try {{
-      const response = await fetch(`/api/providers/${{encodeURIComponent(providerId)}}/${{encodeURIComponent(actionName)}}`, {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify(payload)
-      }});
-      const data = await response.json();
-      const action = data.action || {{
-        success: false,
-        status: "failure",
-        user_message: data.error || "Provider action failed.",
-        next_step: "Review the provider form and try again.",
-        technical_details: data
-      }};
-      renderResult(result, action);
-      if (actionName === "reconnect" && action.success) {{
-        window.setTimeout(() => window.location.reload(), 700);
-      }}
-    }} catch (error) {{
-      renderResult(result, {{
-        success: false,
-        status: "failure",
-        user_message: "Provider action failed before PowerMonitor could process it.",
-        next_step: "Check that the local web server is running, then try again.",
-        technical_details: {{message: String(error)}}
-      }});
-    }}
-  }}
-
-  document.querySelectorAll(".provider-config-form").forEach((form) => {{
-    form.addEventListener("submit", (event) => {{
-      event.preventDefault();
-      const submitter = event.submitter;
-      const actionName = submitter && submitter.dataset.providerAction ? submitter.dataset.providerAction : "save";
-      const confirmation = submitter && submitter.dataset.confirm ? submitter.dataset.confirm : "";
-      if (confirmation && !window.confirm(confirmation)) return;
-      runProviderAction(form, actionName);
-    }});
-  }});
-
-  document.querySelectorAll(".tariff-decision-actions form").forEach((form) => {{
-    form.addEventListener("submit", (event) => {{
-      const submitter = event.submitter;
-      const confirmation = submitter && submitter.dataset.confirm ? submitter.dataset.confirm : "";
-      if (confirmation && !window.confirm(confirmation)) event.preventDefault();
-    }});
-  }});
-}})();
-</script>
+{"<script src='/assets/dashboard.js' defer></script>" if not glance_only else ""}
 </body></html>
 """
     if output_path is not None:
@@ -10361,6 +10391,7 @@ def build_live_html(
     provider_flash: Optional[dict] = None,
     tariff_update_flash: Optional[dict] = None,
     historical_backfill_flash: Optional[dict] = None,
+    period_flash: Optional[dict] = None,
 ) -> str:
     configure_demo_mode()
     settings = load_settings()
@@ -10418,6 +10449,7 @@ def build_live_html(
         provider_flash=provider_flash,
         tariff_update_flash=tariff_update_flash,
         historical_backfill_flash=historical_backfill_flash,
+        period_flash=period_flash,
         runtime_check=runtime_check,
         energy_timeline=energy_timeline,
     )

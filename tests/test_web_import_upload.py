@@ -6,6 +6,7 @@ import threading
 import unittest
 import uuid
 import zipfile
+import json
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -75,6 +76,17 @@ class WebImportUploadTests(unittest.TestCase):
         report.DB_PATH, report.REPORT_PATH, report.COLLECT_LOG_PATH, report.SETTINGS_PATH = self.original_report_paths
         web.UPLOAD_DIR = self.original_upload_dir
         self.temp_dir.cleanup()
+
+    def write_settings(self, **overrides):
+        settings = {
+            "billing_period_start_day": 6,
+            "current_billing_period_start": "2026-06-06",
+            "current_billing_period_end": "2026-08-06",
+            "previous_billing_period_start": "2026-04-03",
+            "previous_billing_period_end": "2026-06-05",
+        }
+        settings.update(overrides)
+        self.settings_path.write_text(json.dumps(settings), encoding="utf-8")
 
     def test_web_upload_previews_and_commits_ocular_export(self):
         export_path = Path(self.temp_dir.name) / "ocular.xlsx"
@@ -198,6 +210,98 @@ class WebImportUploadTests(unittest.TestCase):
             self.assertNotIn("first version", second)
         finally:
             stop_server(server, thread)
+
+    def test_default_root_matches_canonical_generated_report(self):
+        self.write_settings()
+        expected = report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertEqual(html, expected)
+
+    def test_last_7_days_query_renders_requested_period_without_overwriting_canonical_report(self):
+        self.write_settings()
+        canonical = report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=last_7_days", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("Showing <strong>Last 7 days</strong>", html)
+        self.assertIn('option value="last_7_days" selected', html)
+        self.assertIn('name="start" value="2026-07-07"', html)
+        self.assertIn('name="end" value="2026-07-13"', html)
+        self.assertNotEqual(html, canonical)
+        self.assertEqual(self.report_path.read_text(encoding="utf-8"), canonical)
+
+    def test_last_30_days_query_renders_requested_period(self):
+        self.write_settings()
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=last_30_days", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("Showing <strong>Last 30 days</strong>", html)
+        self.assertIn('option value="last_30_days" selected', html)
+        self.assertIn('name="start" value="2026-06-14"', html)
+        self.assertIn('name="end" value="2026-07-13"', html)
+
+    def test_previous_billing_period_query_renders_requested_period(self):
+        self.write_settings()
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=previous_billing_period", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("Showing <strong>Previous billing period</strong>", html)
+        self.assertIn('name="start" value="2026-04-03"', html)
+        self.assertIn('name="end" value="2026-06-05"', html)
+
+    def test_custom_period_query_renders_requested_dates(self):
+        self.write_settings()
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=custom&start=2026-06-01&end=2026-06-15", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("Showing <strong>Custom period</strong>", html)
+        self.assertIn('name="start" value="2026-06-01"', html)
+        self.assertIn('name="end" value="2026-06-15"', html)
+
+    def test_invalid_period_query_falls_back_with_visible_message(self):
+        self.write_settings()
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=made_up_period", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("That dashboard period was not recognised.", html)
+        self.assertIn("Showing Current billing period instead.", html)
+        self.assertIn("Showing <strong>Current billing period</strong>", html)
+
+    def test_invalid_custom_dates_fall_back_with_visible_message(self):
+        self.write_settings()
+        report.generate_report(self.report_path)
+        server, thread, base_url = start_server()
+        try:
+            html = urlopen(f"{base_url}/?period=custom&start=2026-06-16&end=2026-06-01", timeout=10).read().decode("utf-8")
+        finally:
+            stop_server(server, thread)
+
+        self.assertIn("Custom dashboard period start must be on or before the end date.", html)
+        self.assertIn("Showing Current billing period instead.", html)
 
     def test_tariff_update_post_routes_still_work(self):
         report.generate_report(self.report_path)

@@ -1121,7 +1121,9 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn('id="system-live-data"', html)
         self.assertIn('id="system-data-quality"', html)
         self.assertIn('id="energy-score-explanation"', inspect.getsource(report.energy_score_html))
-        self.assertIn("revealHashTarget", html)
+        self.assertIn("dashboard.js", html)
+        asset = (Path(report.__file__).resolve().parent / "assets" / "dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("revealHashTarget", asset)
 
     def test_report_shell_assigns_full_sections_to_owner_pages(self):
         source = inspect.getsource(report.write_html)

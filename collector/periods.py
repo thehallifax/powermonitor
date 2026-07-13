@@ -9,6 +9,7 @@ SUPPORTED_PERIODS = (
     "today",
     "yesterday",
     "last_7_days",
+    "last_30_days",
     "this_week",
     "last_week",
     "this_month",
@@ -59,6 +60,8 @@ def resolve_period(
         return Period(kind, "Yesterday", day, day)
     if kind == "last_7_days":
         return Period(kind, "Last 7 days", current - timedelta(days=6), current)
+    if kind == "last_30_days":
+        return Period(kind, "Last 30 days", current - timedelta(days=29), current)
     if kind == "this_week":
         return Period(kind, "This week", current - timedelta(days=current.weekday()), current)
     if kind == "last_week":

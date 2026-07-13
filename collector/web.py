@@ -7,7 +7,7 @@ import subprocess
 import sqlite3
 import sys
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +43,7 @@ from engine.tariff_catalog import (
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ASSET_DIR = PROJECT_ROOT / "collector" / "assets"
 LOG_PATH = PROJECT_ROOT / "logs" / "web.log"
 UPLOAD_DIR = PROJECT_ROOT / "data" / "import_uploads"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
@@ -92,6 +93,22 @@ def current_report_path() -> Path:
 
 def regenerate_dashboard_report() -> None:
     report.generate_report(current_report_path())
+
+
+def sanitize_period_error(exc: ValueError) -> dict:
+    message = str(exc)
+    friendly = {
+        "Custom periods require start and end dates": "Choose both a start and end date for a custom dashboard period.",
+        "Custom period dates must use YYYY-MM-DD": "Use YYYY-MM-DD dates for a custom dashboard period.",
+        "Custom period start cannot be after end": "Custom dashboard period start must be on or before the end date.",
+    }.get(message)
+    if message.startswith("Unsupported period:"):
+        friendly = "That dashboard period was not recognised."
+    return {
+        "status": "warning",
+        "message": friendly or "That dashboard period could not be applied.",
+        "detail": f"{message}. Showing Current billing period instead.",
+    }
 
 
 def resolve_web_bind(settings_path: Path = SETTINGS_PATH) -> tuple[str, int]:
@@ -383,6 +400,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_glance(params)
             elif path == "/reports/index.html":
                 self.serve_static_report()
+            elif path == "/assets/dashboard.js":
+                self.serve_asset("dashboard.js", "application/javascript; charset=utf-8")
             elif path == "/api/summary":
                 self.send_json(
                     report.dashboard_data(
@@ -411,6 +430,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"runtime": runtime_check()})
             elif path == "/api/historical-coverage":
                 self.send_json(report.historical_coverage_data())
+            elif path == "/api/historical-backfill/jobs":
+                self.send_json(self.historical_backfill_jobs(params))
             elif path == "/api/historical-backfill/preview":
                 self.send_json(self.historical_backfill_preview(params))
             elif path == "/api/historical-backfill/diagnostics":
@@ -591,6 +612,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
         }
 
+    def historical_backfill_jobs(self, params: dict) -> dict:
+        engine = DataEngine(db_path=report.DB_PATH)
+        job_id = self.param(params, "job_id")
+        jobs = []
+        if job_id:
+            job = engine.get_historical_backfill_job(str(job_id))
+            if not job:
+                raise ValueError("Historical data job not found.")
+            jobs = [job]
+        else:
+            jobs = engine.get_historical_backfill_jobs(limit=5)
+        snapshots = [report.historical_backfill_job_snapshot(job, now=datetime.now().astimezone()) for job in jobs]
+        active = any(job["status"] in {"queued", "running", "retrying", "cancelling"} for job in snapshots)
+        return {
+            "historical_backfill": {
+                "jobs": snapshots,
+                "polling": {
+                    "active": active,
+                    "interval_seconds": 7,
+                },
+            }
+        }
+
     def historical_backfill_method_not_allowed(self, path: str) -> None:
         action = path.rsplit("/", 1)[-1]
         if self.provider_request_wants_json():
@@ -758,6 +802,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"historical_backfill": payload})
             return
         self.redirect(historical_backfill_redirect(payload, action=action))
+
+    def requested_dashboard_period(self, params: dict) -> tuple[bool, str, Optional[str], Optional[str], Optional[dict]]:
+        raw_period = self.param(params, "period")
+        start = self.param(params, "start")
+        end = self.param(params, "end")
+        requested = any(value not in {None, ""} for value in (raw_period, start, end))
+        if not requested:
+            return False, "current_billing_period", None, None, None
+        period_kind = raw_period or "current_billing_period"
+        settings = report.load_settings()
+        try:
+            report.resolve_period(period_kind, settings, report.local_today(), start, end)
+            return True, period_kind, start, end, None
+        except ValueError as exc:
+            return True, "current_billing_period", None, None, sanitize_period_error(exc)
 
     def provider_payload(self, path: str) -> dict:
         parts = [part for part in path.split("/") if part]
@@ -1036,11 +1095,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         provider_flash = provider_flash_from_params(params)
         tariff_flash = tariff_update_flash_from_params(params)
         historical_backfill_flash = historical_backfill_flash_from_params(params)
-        if provider_flash or tariff_flash or historical_backfill_flash:
+        requested_period, period_kind, start, end, period_flash = self.requested_dashboard_period(params)
+        if provider_flash or tariff_flash or historical_backfill_flash or requested_period:
             content = report.build_live_html(
+                period_kind,
+                start,
+                end,
                 provider_flash=provider_flash,
                 tariff_update_flash=tariff_flash,
                 historical_backfill_flash=historical_backfill_flash,
+                period_flash=period_flash,
             ).encode("utf-8")
             self.send_html(content)
             return
@@ -1060,6 +1124,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not report_path.exists():
             regenerate_dashboard_report()
         self.send_html(report_path.read_bytes())
+
+    def serve_asset(self, filename: str, content_type: str) -> None:
+        asset_path = (ASSET_DIR / filename).resolve()
+        if asset_path.parent != ASSET_DIR.resolve() or not asset_path.exists():
+            self.send_json({"error": "not found"}, status=404)
+            return
+        self.send_bytes(asset_path.read_bytes(), content_type=content_type)
 
     def read_uploaded_file(self) -> tuple[str, bytes]:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -1198,15 +1269,18 @@ table{width:100%;min-width:520px;border-collapse:collapse} th,td{padding:9px 8px
         self.end_headers()
         self.wfile.write(content)
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
-        content = api_json_dumps(payload).encode("utf-8")
+    def send_bytes(self, content: bytes, *, content_type: str, status: int = 200) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
         self.send_security_headers()
         self.end_headers()
         self.wfile.write(content)
+
+    def send_json(self, payload: dict, status: int = 200) -> None:
+        content = api_json_dumps(payload).encode("utf-8")
+        self.send_bytes(content, content_type="application/json; charset=utf-8", status=status)
 
     def redirect(self, location: str) -> None:
         self.send_response(303)
@@ -1221,7 +1295,7 @@ table{width:100%;min-width:520px;border-collapse:collapse} th,td{padding:9px 8px
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-            "script-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            "script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         )
 
     def log_request(self, code="-", size="-") -> None:
