@@ -124,16 +124,22 @@ class MobilePresentationTests(unittest.TestCase):
 
         html = report.provider_management_html(manager)
 
-        self.assertIn("Your Data Sources", html)
+        self.assertIn("Provider Management", html)
         self.assertIn("EV charging history", html)
         self.assertIn("Status", html)
-        self.assertIn("Latest upload available", html)
+        self.assertIn("Connected", html)
+        self.assertIn("Connection type", html)
+        self.assertIn("File Import", html)
+        self.assertIn("Next scheduled refresh", html)
+        self.assertIn("Last error", html)
+        self.assertIn("Provider version", html)
         self.assertIn("Provides", html)
         self.assertIn("Charging energy", html)
         self.assertIn("Charging costs", html)
         self.assertIn("Upload latest file", html)
         self.assertIn("Replace upload", html)
         self.assertIn("Remove imported history", html)
+        self.assertIn("View diagnostics", html)
         self.assertIn("Setup help", html)
         self.assertIn("Advanced Diagnostics", html)
         self.assertNotIn("Connected?", html)
@@ -194,16 +200,23 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Connected account", html)
         self.assertIn("Credentials", html)
         self.assertIn("Hidden for privacy", html)
-        self.assertIn("Disconnect", html)
+        self.assertIn("Disable", html)
+        self.assertIn("Remove", html)
+        self.assertIn("View diagnostics", html)
         self.assertIn('class="provider-config-form" data-provider-id="solaredge" method="post" action="/api/providers/solaredge/save"', html)
         self.assertIn('name="provider_id" value="solaredge"', html)
         self.assertIn('name="username"', html)
         self.assertIn('name="password"', html)
         self.assertIn('name="provider_action" value="test" formaction="/api/providers/solaredge/test"', html)
+        self.assertIn('data-confirm="Disable SolarEdge?', html)
         self.assertNotIn('action="/setup/billing-cycle"', html)
         self.assertIn("provider-config-form", html)
         self.assertIn("Last successful refresh", html)
-        self.assertIn("Next refresh", html)
+        self.assertIn("Next scheduled refresh", html)
+        self.assertIn("Connection type", html)
+        self.assertIn("Live API", html)
+        self.assertIn("Last error", html)
+        self.assertIn("Provider version", html)
         self.assertIn("Data available", html)
         self.assertIn("Action needed", html)
         self.assertNotIn("Upload latest file", html)
@@ -269,7 +282,7 @@ class MobilePresentationTests(unittest.TestCase):
 
         self.assertLess(billing_close, provider_form)
 
-    def test_smart_meter_source_is_not_fabricated(self):
+    def test_smart_meter_source_is_shown_when_configured(self):
         provider = SimpleNamespace(
             provider_id="smart_meter_readings",
             name="Smart meter readings",
@@ -288,8 +301,57 @@ class MobilePresentationTests(unittest.TestCase):
 
         html = report.provider_management_html(SimpleNamespace(providers=lambda: [provider]))
 
-        self.assertNotIn("Smart meter", html)
-        self.assertIn("No household data sources are connected yet", html)
+        self.assertIn("Smart Meter Readings", html)
+        self.assertIn("Connected", html)
+        self.assertIn("Connection type", html)
+        self.assertIn("View diagnostics", html)
+
+    def test_provider_management_can_add_future_provider_without_json_editing(self):
+        provider = SimpleNamespace(
+            provider_id="tesla",
+            name="Tesla",
+            as_dict=lambda: {
+                "provider_id": "tesla",
+                "provider_type": "ev_charger",
+                "lifecycle_state": "NOT_CONFIGURED",
+                "capability_summary": {"capabilities": ["ev_sessions", "battery_state"]},
+                "diagnostics": {},
+                "health": {"collector_status": "unknown"},
+                "sync_state": "NEVER_SYNCED",
+                "actions": ["Configure", "Test Connection"],
+                "configuration": {
+                    "credentials": [
+                        {"field": "api_key", "label": "Api Key", "required": False, "sensitive": True, "configured": False},
+                        {"field": "endpoint", "label": "Endpoint", "required": True, "sensitive": False, "configured": False},
+                    ],
+                    "entity_mapping": None,
+                },
+                "onboarding": {
+                    "state": "NOT_CONFIGURED",
+                    "state_label": "Not Configured",
+                    "connected": False,
+                    "healthy": False,
+                    "data_available": False,
+                    "last_successful_sync": None,
+                    "next_scheduled_sync": "Next data refresh",
+                    "required_information": ["Endpoint"],
+                    "why_required": "EV session data separates real charging cost from estimates.",
+                    "recovery_steps": ["Check the required information"],
+                    "health_status": "Waiting for setup.",
+                    "next_step": "Select Tesla, review the required details, then configure it.",
+                    "technical_details": {},
+                },
+            },
+        )
+
+        html = report.provider_management_html(SimpleNamespace(providers=lambda: [provider]))
+
+        self.assertIn("Tesla", html)
+        self.assertIn("Disconnected", html)
+        self.assertIn("Add provider", html)
+        self.assertIn("Connection type", html)
+        self.assertIn("Live API", html)
+        self.assertIn("View diagnostics", html)
 
     def test_setup_integrations_group_connected_and_optional_sources(self):
         connected = SimpleNamespace(

@@ -6282,9 +6282,21 @@ def _provider_entity_mapping_html(mapping: Optional[dict]) -> str:
     """
 
 
+def _provider_action_confirm(action: str, provider_name: str) -> str:
+    messages = {
+        "reconnect": f"Reconnect {provider_name} now? PowerMonitor will test the saved connection details.",
+        "disable": f"Disable {provider_name}? Existing data stays available, but PowerMonitor will stop relying on new refreshes from this provider.",
+        "enable": f"Enable {provider_name}? Run Test Connection afterwards before relying on new data.",
+        "remove": f"Remove {provider_name} from Provider Management? Saved local connection details for this provider will be cleared where possible.",
+        "reset": f"Reset {provider_name} to recommended local defaults?",
+    }
+    return messages.get(action, "")
+
+
 def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[str, str, str]]] = None, *, hide_credentials: bool = False) -> str:
     provider_id = str(data.get("provider_id") or "")
     provider_action_base = f"/api/providers/{html.escape(provider_id)}"
+    provider_name = _source_display_name(provider_id, data)
     configuration = data.get("configuration") or {}
     credentials = configuration.get("credentials") or []
     fields = []
@@ -6346,10 +6358,14 @@ def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[s
         ("Enable", "enable", "button"),
         ("Remove", "remove", "button"),
     ]
-    action_buttons = "".join(
-        f'<button type="submit" name="provider_action" value="{html.escape(action)}" formaction="{provider_action_base}/{html.escape(action)}" formmethod="post" data-provider-action="{html.escape(action)}">{html.escape(label)}</button>'
-        for label, action, button_type in action_specs
-    )
+    action_buttons = []
+    for label, action, button_type in action_specs:
+        confirm = _provider_action_confirm(action, provider_name)
+        confirm_attr = f' data-confirm="{html.escape(confirm)}"' if confirm else ""
+        action_buttons.append(
+            f'<button type="submit" name="provider_action" value="{html.escape(action)}" formaction="{provider_action_base}/{html.escape(action)}" formmethod="post" data-provider-action="{html.escape(action)}"{confirm_attr}>{html.escape(label)}</button>'
+        )
+    action_buttons_html = "".join(action_buttons)
     fields_html = ''.join(fields) or '<p class="notice">No editable connection fields for this provider.</p>'
     if hide_credentials:
         connection_details = f"""
@@ -6378,7 +6394,7 @@ def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[s
         {connection_details}
         {mapping_html}
         <div class="provider-action-row">
-          {action_buttons}
+          {action_buttons_html}
         </div>
         <div class="provider-action-result" aria-live="polite"></div>
       </form>
@@ -6405,6 +6421,18 @@ def _should_show_data_source(provider_id: str, data: dict, onboarding: dict) -> 
     if _is_future_optional_source(provider_id, data, onboarding):
         return False
     return _provider_is_configured_or_available(data, onboarding)
+
+
+def _should_show_provider_management_card(provider_id: str, data: dict, onboarding: dict) -> bool:
+    if provider_id == "smart_meter_readings":
+        return _provider_is_configured_or_available(data, onboarding)
+    if _provider_is_configured_or_available(data, onboarding):
+        return True
+    if provider_id in {"solaredge", "ocular_export", "synergy_tariff_config", "home_assistant"}:
+        return True
+    if _is_future_optional_source(provider_id, data, onboarding):
+        return True
+    return False
 
 
 def _source_kind(provider_id: str, data: dict) -> str:
@@ -6491,6 +6519,48 @@ def _data_source_status(kind: str, data: dict, onboarding: dict) -> str:
     return "Not connected"
 
 
+def _provider_management_status(status: str, data: dict) -> str:
+    state = str(data.get("lifecycle_state") or "")
+    if status in {"Connected", "Latest upload available", "Historical data only"}:
+        return "Connected"
+    if status in {"Needs attention", "Signed in, but no data received"}:
+        return "Warning"
+    if state in {"DEGRADED", "ERROR"}:
+        return "Warning"
+    return "Disconnected"
+
+
+def _provider_connection_type(kind: str, data: dict) -> str:
+    provider_id = str(data.get("provider_id") or "")
+    if kind == "import":
+        return "File Import"
+    if kind == "configuration" or provider_id == "synergy_tariff_config":
+        return "Manual"
+    return "Live API"
+
+
+def _provider_version_label(data: dict) -> str:
+    diagnostics = data.get("diagnostics") or {}
+    version = diagnostics.get("collector_version")
+    if version:
+        return str(version)
+    if str(data.get("lifecycle_state") or "") == "NOT_CONFIGURED":
+        return "Not installed"
+    return "Provider framework v1"
+
+
+def _provider_last_error_label(data: dict, onboarding: dict) -> str:
+    diagnostics = data.get("diagnostics") or {}
+    health = data.get("health") or {}
+    error = diagnostics.get("last_error") or health.get("last_error")
+    if error:
+        return trust_wording(error)
+    health_status = str(onboarding.get("health_status") or "")
+    if "error" in health_status.lower() or "attention" in health_status.lower() or "failed" in health_status.lower():
+        return trust_wording(health_status)
+    return "No recent error"
+
+
 def _data_source_tone(status: str) -> str:
     if status in {"Connected", "Latest upload available"}:
         return "good"
@@ -6537,30 +6607,40 @@ def _provider_has_enough_configuration(data: dict) -> bool:
 
 def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
     provider_id = str(data.get("provider_id") or "")
+    diagnostics_link = f'<a class="button-link muted" href="/api/providers/{html.escape(provider_id)}/diagnostics">View diagnostics</a>'
     if kind == "import":
-        return """
+        return f"""
           <div class="provider-action-row">
             <a class="button-link" href="#imports">Upload latest file</a>
             <a class="button-link" href="#imports">Replace upload</a>
             <a class="button-link muted" href="#imports">Remove imported history</a>
+            {diagnostics_link}
           </div>
         """
     if kind == "configuration":
-        return """
+        return f"""
           <div class="provider-action-row">
             <a class="button-link" href="#setup-billing">Edit configuration</a>
+            {diagnostics_link}
           </div>
         """
+    if str(data.get("lifecycle_state") or "") == "DISABLED":
+        return _provider_configuration_form_html(
+            data,
+            [("Enable", "enable", "submit"), ("Remove", "remove", "submit")],
+            hide_credentials=True,
+        ) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
     if status == "Connected":
-        live_actions = [("Test connection", "test", "submit"), ("Reconnect", "reconnect", "submit"), ("Disconnect", "disable", "submit")]
-        return _provider_configuration_form_html(data, live_actions, hide_credentials=True)
-    live_actions = [("Connect", "save", "submit")]
+        live_actions = [("Test connection", "test", "submit"), ("Reconnect", "reconnect", "submit"), ("Disable", "disable", "submit"), ("Remove", "remove", "submit")]
+        return _provider_configuration_form_html(data, live_actions, hide_credentials=True) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
+    live_actions = [("Add provider", "save", "submit")]
     if _provider_has_enough_configuration(data):
         live_actions.append(("Test connection", "test", "submit"))
     if status in {"Needs attention", "Signed in, but no data received", "Historical data only", "Waiting for setup"}:
         live_actions.append(("Reconnect", "reconnect", "submit"))
-        live_actions.append(("Disconnect", "disable", "submit"))
-    return _provider_configuration_form_html(data, live_actions)
+        live_actions.append(("Disable", "disable", "submit"))
+    live_actions.append(("Remove", "remove", "submit"))
+    return _provider_configuration_form_html(data, live_actions) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
 
 
 def _provider_flash_html(provider_id: str, provider_flash: Optional[dict]) -> str:
@@ -6594,6 +6674,10 @@ def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flas
     next_refresh = _provider_next_refresh_label(kind, onboarding)
     data_available = _provider_data_available_label(provider_id, data, onboarding)
     action_needed = str(onboarding.get("next_step") or "No action needed right now.")
+    management_status = _provider_management_status(status, data)
+    connection_type = _provider_connection_type(kind, data)
+    provider_version = _provider_version_label(data)
+    last_error = _provider_last_error_label(data, onboarding)
     setup_body = f"""
       <div class="provider-guidance-grid">
         <div><span>What this needs</span><strong>{html.escape(', '.join(onboarding.get("required_information") or ["Connection details"]))}</strong></div>
@@ -6616,13 +6700,17 @@ def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flas
     <div id="system-provider-{html.escape(provider_id)}" class="provider-status-card {_data_source_tone(status)} data-source-card">
       <div class="provider-status-head">
         <span>{html.escape(_data_source_title(provider_id, data))}</span>
-        <strong>{html.escape(status)}</strong>
+        <strong>{html.escape(management_status)}</strong>
       </div>
+      <p>{html.escape(trust_wording(onboarding.get("why_required") or data.get("note") or ""))}</p>
       <div class="provider-status-grid data-source-grid">
         <div><span>Source</span><strong>{html.escape(_source_display_name(provider_id, data))}</strong></div>
-        <div><span>Status</span><strong>{html.escape(status)}</strong></div>
+        <div><span>Status</span><strong>{html.escape(management_status)}</strong></div>
+        <div><span>Connection type</span><strong>{html.escape(connection_type)}</strong></div>
         <div><span>Last successful refresh</span><strong>{html.escape(last_updated)}</strong></div>
-        <div><span>Next refresh</span><strong>{html.escape(next_refresh)}</strong></div>
+        <div><span>Next scheduled refresh</span><strong>{html.escape(next_refresh)}</strong></div>
+        <div><span>Last error</span><strong>{html.escape(last_error)}</strong></div>
+        <div><span>Provider version</span><strong>{html.escape(provider_version)}</strong></div>
         <div><span>Data available</span><strong>{html.escape(data_available)}</strong></div>
         <div><span>Action needed</span><strong>{html.escape(trust_wording(action_needed))}</strong></div>
       </div>
@@ -6640,21 +6728,33 @@ def provider_management_html(provider_management: Optional[ProviderManager], pro
     if not provider_management:
         return """
     <div class="system-card">
-      <div class="chart-heading"><h3>Your Data Sources</h3><span>Unavailable</span></div>
-      <p class="notice">PowerMonitor cannot load data source guidance right now. Existing readings can still be shown.</p>
+      <div class="chart-heading"><h3>Provider Management</h3><span>Unavailable</span></div>
+      <p class="notice">PowerMonitor cannot load provider guidance right now. Existing readings can still be shown.</p>
     </div>
     """
     rows = []
     for provider in provider_management.providers():
         data = provider.as_dict()
         onboarding = data.get("onboarding") or _provider_onboarding_fallback(data)
-        if not _should_show_data_source(str(data.get("provider_id") or provider.provider_id), data, onboarding):
+        if not _should_show_provider_management_card(str(data.get("provider_id") or provider.provider_id), data, onboarding):
             continue
         rows.append(_data_source_card_html(provider, data, onboarding, provider_flash))
+    connected = 0
+    warnings = 0
+    for provider in provider_management.providers():
+        data = provider.as_dict()
+        onboarding = data.get("onboarding") or _provider_onboarding_fallback(data)
+        if not _should_show_provider_management_card(str(data.get("provider_id") or provider.provider_id), data, onboarding):
+            continue
+        status = _provider_management_status(_data_source_status(_source_kind(str(data.get("provider_id") or provider.provider_id), data), data, onboarding), data)
+        if status == "Connected":
+            connected += 1
+        elif status == "Warning":
+            warnings += 1
     return f"""
     <div class="system-card">
-      <div class="chart-heading"><h3>Your Data Sources</h3><span>{len(rows)} active</span></div>
-      <p class="scenario-note">These are the household sources PowerMonitor can use today. Optional integrations live in Settings until you connect them.</p>
+      <div class="chart-heading"><h3>Provider Management</h3><span>{connected} connected / {warnings} warnings</span></div>
+      <p class="scenario-note">Manage household integrations here without editing configuration files. Add providers, test connections, reconnect, disable, remove, or inspect diagnostics from the same provider-agnostic workflow.</p>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No household data sources are connected yet.</p>'}</div>
     </div>
     """
@@ -7450,7 +7550,7 @@ def system_page_html(
       {system_trust_summary_html(provider_management, summary)}
       {system_action_needed_html(setup, provider_management)}
       {confidence_section_html(summary, settings, provider_observations)}
-      {disclosure_html("Your Data Sources", "What PowerMonitor knows about your household", f'''
+      {disclosure_html("Provider Management", "Connect, test, reconnect, disable, remove, and inspect household integrations", f'''
         {provider_management_html(provider_management, provider_flash=provider_flash)}
       ''', open_by_default=True, css_class="system-group")}
       {disclosure_html("Live data help", "What is unavailable, why, and what to do next", live_data_help_html(health, summary), css_class="system-group")}
@@ -9357,6 +9457,8 @@ def write_html(
       event.preventDefault();
       const submitter = event.submitter;
       const actionName = submitter && submitter.dataset.providerAction ? submitter.dataset.providerAction : "save";
+      const confirmation = submitter && submitter.dataset.confirm ? submitter.dataset.confirm : "";
+      if (confirmation && !window.confirm(confirmation)) return;
       runProviderAction(form, actionName);
     }});
   }});
