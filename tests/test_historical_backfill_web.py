@@ -262,47 +262,137 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         self.assertIn('"job_id": "job-1"', response.body)
         self.assertIn('"coverage"', response.body)
 
-    def test_jobs_endpoint_returns_safe_running_progress_fields(self):
+    def test_status_endpoint_returns_safe_running_progress_fields(self):
         with running_server(seed_job=True, job_progress={"chunks_total": 10, "chunks_completed": 4, "completed_days": ["2026-07-01", "2026-07-02"], "failed_days": ["2026-07-03"], "duplicates_skipped": 5, "imported_or_updated": 96, "current_day": "2026-07-04"}) as context:
-            response = context.request("GET", "/api/historical-backfill/jobs", headers={"Accept": "application/json"})
+            response = context.request("GET", "/api/historical-backfill/status", headers={"Accept": "application/json"})
 
         self.assertEqual(response.status, 200)
         payload = json.loads(response.body)["historical_backfill"]
         job = payload["jobs"][0]
         self.assertTrue(payload["polling"]["active"])
         self.assertEqual(job["job_id"], "job-1")
+        self.assertEqual(job["provider_id"], "solaredge")
         self.assertEqual(job["provider"], "SolarEdge")
+        self.assertEqual(job["chunks_completed"], 4)
+        self.assertEqual(job["chunks_total"], 10)
+        self.assertEqual(job["percentage"], 40.0)
         self.assertEqual(job["days_completed"], 4)
         self.assertEqual(job["total_days"], 10)
         self.assertEqual(job["days_remaining"], 6)
-        self.assertEqual(job["failed_days_count"], 1)
+        self.assertEqual(job["failed_day_count"], 1)
         self.assertEqual(job["readings_added"], 96)
+        self.assertEqual(job["imported_or_updated"], 96)
         self.assertEqual(job["duplicates_skipped"], 5)
         self.assertEqual(job["current_day"], "2026-07-04")
+        self.assertFalse(job["terminal"])
         self.assertIn("estimated_finish_time", job)
         self.assertNotIn("diagnostics", job)
         self.assertNotIn("warnings", job)
         self.assertNotIn("site_id", job)
         self.assertNotIn("household_id", job)
+        self.assertNotIn("completed_days", job)
+        self.assertNotIn("failed_days", job)
+
+    def test_status_endpoint_reflects_persisted_changes_without_report_regeneration(self):
+        with running_server(seed_job=True, job_progress={"chunks_total": 366, "chunks_completed": 2, "completed_days": ["2025-07-13"], "current_day": "2025-07-14"}) as context:
+            first = context.request("GET", "/api/historical-backfill/status?job_id=job-1", headers={"Accept": "application/json"})
+            with sqlite3.connect(context.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE historical_backfill_jobs
+                    SET status = 'complete',
+                        progress_json = ?,
+                        completed_at = ?,
+                        updated_at = ?
+                    WHERE job_id = 'job-1'
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "chunks_total": 366,
+                                "chunks_completed": 366,
+                                "completed_days": ["2025-07-13", "2026-07-13"],
+                                "data_received": 35136,
+                                "imported_or_updated": 31393,
+                                "duplicates_skipped": 3743,
+                                "failed_days": [],
+                                "current_day": "2026-07-13",
+                            },
+                            sort_keys=True,
+                        ),
+                        "2026-07-13T21:56:53+08:00",
+                        "2026-07-13T21:56:53+08:00",
+                    ),
+                )
+                conn.commit()
+            second = context.request("GET", "/api/historical-backfill/status?job_id=job-1", headers={"Accept": "application/json"})
+
+        first_job = json.loads(first.body)["historical_backfill"]["job"]
+        second_job = json.loads(second.body)["historical_backfill"]["job"]
+        self.assertEqual(first_job["chunks_completed"], 2)
+        self.assertEqual(second_job["chunks_completed"], 366)
+        self.assertEqual(second_job["percentage"], 100.0)
+        self.assertEqual(second_job["imported_or_updated"], 31393)
+        self.assertEqual(second_job["duplicates_skipped"], 3743)
+        self.assertTrue(second_job["terminal"])
 
     def test_jobs_endpoint_marks_terminal_jobs_and_stops_polling(self):
         with running_server(seed_job=True, job_status="complete", job_progress={"chunks_total": 2, "chunks_completed": 2, "completed_days": ["2026-07-01", "2026-07-02"]}) as context:
-            response = context.request("GET", "/api/historical-backfill/jobs?job_id=job-1", headers={"Accept": "application/json"})
+            response = context.request("GET", "/api/historical-backfill/status?job_id=job-1", headers={"Accept": "application/json"})
 
         payload = json.loads(response.body)["historical_backfill"]
         job = payload["jobs"][0]
         self.assertFalse(payload["polling"]["active"])
         self.assertEqual(job["status"], "complete")
         self.assertEqual(job["percentage_complete"], 100.0)
+        self.assertEqual(job["summary_message"], "Historical import complete")
 
     def test_jobs_endpoint_surfaces_failed_progress(self):
         with running_server(seed_job=True, job_status="failed", job_progress={"chunks_total": 3, "chunks_completed": 3, "completed_days": ["2026-07-01"], "failed_days": ["2026-07-02", "2026-07-03"]}) as context:
-            response = context.request("GET", "/api/historical-backfill/jobs", headers={"Accept": "application/json"})
+            response = context.request("GET", "/api/historical-backfill/status", headers={"Accept": "application/json"})
 
         job = json.loads(response.body)["historical_backfill"]["jobs"][0]
         self.assertEqual(job["status"], "failed")
-        self.assertEqual(job["failed_days_count"], 2)
+        self.assertEqual(job["failed_day_count"], 2)
         self.assertEqual(job["last_successful_day"], "2026-07-01")
+
+    def test_status_endpoint_surfaces_cancelled_terminal_state(self):
+        with running_server(seed_job=True, job_status="cancelled", job_progress={"chunks_total": 3, "chunks_completed": 1, "completed_days": ["2026-07-01"]}) as context:
+            response = context.request("GET", "/api/historical-backfill/status", headers={"Accept": "application/json"})
+
+        payload = json.loads(response.body)["historical_backfill"]
+        job = payload["jobs"][0]
+        self.assertFalse(payload["polling"]["active"])
+        self.assertEqual(job["status"], "cancelled")
+        self.assertTrue(job["terminal"])
+
+    def test_status_endpoint_includes_live_coverage_summary_without_day_maps(self):
+        with running_server(seed_job=True, job_status="complete") as context:
+            with sqlite3.connect(context.db_path) as conn:
+                insert_reading(conn, "2025-12-01T00:15:00+08:00", production=1.0, grid_import=0.1, grid_export=0.2)
+                insert_reading(conn, "2026-07-13T00:15:00+08:00", production=1.0, grid_import=0.1, grid_export=0.2)
+            response = context.request("GET", "/api/historical-backfill/status", headers={"Accept": "application/json"})
+
+        coverage = json.loads(response.body)["historical_backfill"]["coverage"]
+        self.assertEqual(coverage["interval_grade_days"], 2)
+        self.assertEqual(coverage["battery_ready_days"], 2)
+        self.assertEqual(coverage["previous_summer"]["days_available"], 1)
+        self.assertIn("coverage_by_season", coverage)
+        self.assertNotIn("days", coverage)
+        self.assertNotIn("providers", coverage)
+
+    def test_public_diagnostics_uses_bounded_payload(self):
+        with running_server(seed_job=True, job_status="failed", job_progress={"chunks_total": 10, "chunks_completed": 10, "completed_days": ["2026-07-01", "2026-07-02"], "failed_days": [f"2026-07-{day:02d}" for day in range(3, 10)]}) as context:
+            response = context.request("GET", "/api/historical-backfill/diagnostics?job_id=job-1", headers={"Accept": "application/json"})
+
+        payload = json.loads(response.body)["historical_backfill"]
+        job = payload["job"]
+        self.assertEqual(job["failed_day_count"], 7)
+        self.assertLessEqual(len(job["failed_day_sample"]), 3)
+        serialized = json.dumps(payload)
+        self.assertNotIn('"failed_days"', serialized)
+        self.assertNotIn('"completed_days"', serialized)
+        self.assertNotIn('"days": {', json.dumps(payload))
 
     def test_historical_section_includes_polling_markup_and_same_origin_script(self):
         html = report.historical_coverage_html(
@@ -323,8 +413,9 @@ class HistoricalBackfillWebTests(unittest.TestCase):
         )
 
         self.assertIn('id="historical-backfill-jobs"', html)
-        self.assertIn('data-endpoint="/api/historical-backfill/jobs"', html)
+        self.assertIn('data-endpoint="/api/historical-backfill/status"', html)
         self.assertIn('data-poll-active="true"', html)
+        self.assertIn('data-poll-interval-ms="5000"', html)
         self.assertIn("Current day: 2026-07-05", html)
         self.assertIn("40% complete", html)
 
@@ -355,6 +446,7 @@ class HistoricalBackfillWebTests(unittest.TestCase):
 
         self.assertEqual(script.status, 200)
         self.assertIn("historical-backfill-jobs", script.body)
+        self.assertIn("updateCoverage", script.body)
         self.assertIn("script-src 'self'", root.headers["Content-Security-Policy"])
         self.assertNotIn("script-src 'unsafe-inline'", root.headers["Content-Security-Policy"])
         self.assertNotIn("Refresh", root.headers)
@@ -450,6 +542,41 @@ def create_readings(conn):
             import_cost REAL
         )
         """
+    )
+
+
+def insert_reading(conn, measurement_time: str, *, production: float, grid_import: float, grid_export: float):
+    conn.execute(
+        """
+        INSERT INTO readings (
+            household_id,
+            measurement_time,
+            tariff_bucket,
+            production_kwh,
+            solar_to_home_kwh,
+            solar_to_grid_kwh,
+            grid_to_home_w,
+            grid_to_home_kwh,
+            import_cost,
+            provider_id,
+            source_id,
+            source_resolution
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "default_household",
+            measurement_time,
+            "super_off_peak",
+            production,
+            max(production - grid_export, 0),
+            grid_export,
+            grid_import * 4000,
+            grid_import,
+            0.0,
+            "solaredge",
+            "solaredge_dashboard_power",
+            "interval_15m",
+        ),
     )
 
 

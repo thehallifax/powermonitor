@@ -122,18 +122,26 @@
 
   function renderJob(job) {
     const percentage = Number(job.percentage_complete || 0);
+    const failedCount = Number(job.failed_day_count || job.failed_days_count || 0);
+    const summary = job.summary_message
+      ? '<small class="historical-job-summary">' + escapeHtml(job.summary_message) + "</small>"
+      : "";
     const currentDay = job.current_day
       ? "Current day: " + escapeHtml(job.current_day)
       : job.last_successful_day
         ? "Last successful day: " + escapeHtml(job.last_successful_day)
         : "Waiting for the next chunk.";
-    const retries = Number(job.failed_days_count || 0) > 0
-      ? '<small>Failed or retried days: ' + escapeHtml(job.failed_days_count) + "</small>"
+    const retries = failedCount > 0
+      ? '<small>Failed or retried days: ' + escapeHtml(failedCount) + "</small>"
       : "";
     const eta = job.estimated_finish_time
       ? '<small>Estimated finish: ' + escapeHtml(job.estimated_finish_time) + "</small>"
       : "";
     const updated = job.updated_time ? '<small>Updated ' + escapeHtml(job.updated_time) + "</small>" : "";
+    const counters = [
+      '<small>' + escapeHtml(job.imported_or_updated || job.readings_added || 0) + " readings imported or updated</small>",
+      '<small>' + escapeHtml(job.duplicates_skipped || 0) + " duplicates skipped</small>",
+    ].join("");
     return [
       '<div class="historical-job-card completeness-row ' + statusTone(job.status) + '" data-job-id="' + escapeHtml(job.job_id) + '" data-job-status="' + escapeHtml(job.status) + '" data-poll-active="' + String(!TERMINAL.has(String(job.status || "").toLowerCase())) + '">',
       '<div class="historical-job-header">',
@@ -147,6 +155,8 @@
       '<div class="historical-job-meta">',
       '<small>' + escapeHtml(job.days_progress_label) + "</small>",
       '<small>' + escapeHtml(currentDay) + "</small>",
+      summary,
+      counters,
       retries,
       updated,
       eta,
@@ -156,9 +166,45 @@
     ].join("");
   }
 
+  function renderCoverageSource(source) {
+    return [
+      '<div class="completeness-row good">',
+      '<span>' + escapeHtml(String(source.resolution || "interval data").replace(/_/g, " ")) + "</span>",
+      '<strong>' + escapeHtml(source.interval_grade_days || 0) + " days available</strong>",
+      '<small>' + escapeHtml(source.earliest_interval_grade_reading || "No first reading") + " to " + escapeHtml(source.latest_interval_grade_reading || "No last reading") + "</small>",
+      "</div>",
+    ].join("");
+  }
+
+  function updateCoverage(coverage) {
+    if (!coverage) return;
+    const stored = document.getElementById("historical-stored-coverage");
+    if (stored) {
+      const grid = stored.querySelector(".historical-coverage-sources") || stored.querySelector(".completeness-grid");
+      if (grid) {
+        const sources = Array.isArray(coverage.sources) ? coverage.sources : [];
+        grid.innerHTML = sources.length
+          ? sources.map(renderCoverageSource).join("")
+          : '<p class="notice">No SolarEdge historical interval readings are stored yet.</p>';
+      }
+    }
+    const seasonal = document.getElementById("historical-seasonal-readiness");
+    if (seasonal && coverage.previous_summer) {
+      const heading = seasonal.querySelector(".chart-heading span");
+      if (heading) {
+        heading.textContent = [coverage.previous_summer.start || "", coverage.previous_summer.end || ""].filter(Boolean).join(" to ");
+      }
+      const values = seasonal.querySelectorAll(".config-grid strong");
+      if (values.length >= 2) {
+        values[0].textContent = String(coverage.previous_summer.days_available || 0) + " / " + String(coverage.previous_summer.days_in_range || 0);
+        values[1].textContent = String(coverage.previous_summer.battery_ready_days || 0);
+      }
+    }
+  }
+
   async function pollJobs(container) {
     const endpoint = container.dataset.endpoint;
-    const intervalMs = Math.max(parseInt(container.dataset.pollIntervalMs || "7000", 10), 5000);
+    const intervalMs = Math.max(parseInt(container.dataset.pollIntervalMs || "5000", 10), 5000);
     if (!endpoint) return;
 
     async function refresh() {
@@ -174,6 +220,7 @@
         const jobs = Array.isArray(historical.jobs) ? historical.jobs : [];
         const active = Boolean(historical.polling && historical.polling.active);
         container.dataset.pollActive = String(active);
+        updateCoverage(historical.coverage);
         if (!jobs.length) {
           container.innerHTML = '<p class="notice">No historical data backfill jobs have run yet.</p>';
           return active;

@@ -1998,8 +1998,14 @@ class DataEngine:
         def query(conn):
             self.validate_connection(conn)
             DataEngine._ensure_historical_backfill_tables(conn)
+            reading_columns = DataEngine._table_columns(conn, "readings")
+            consumption_expression = (
+                "SUM(CASE WHEN COALESCE(consumption_kwh, 0) != 0 THEN 1 ELSE 0 END)"
+                if "consumption_kwh" in reading_columns
+                else "0"
+            )
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     COALESCE(NULLIF(provider_id, ''), 'solaredge') AS provider_id,
                     COALESCE(NULLIF(source_id, ''), 'solaredge_dashboard_power') AS source_id,
@@ -2009,7 +2015,7 @@ class DataEngine:
                     MAX(measurement_time) AS last_reading,
                     COUNT(*) AS interval_count,
                     SUM(CASE WHEN COALESCE(production_kwh, 0) != 0 THEN 1 ELSE 0 END) AS solar_generation_count,
-                    SUM(CASE WHEN COALESCE(consumption_kwh, 0) != 0 THEN 1 ELSE 0 END) AS household_consumption_count,
+                    {consumption_expression} AS household_consumption_count,
                     SUM(CASE WHEN COALESCE(grid_to_home_kwh, 0) != 0 THEN 1 ELSE 0 END) AS grid_import_count,
                     SUM(CASE WHEN COALESCE(solar_to_grid_kwh, 0) != 0 THEN 1 ELSE 0 END) AS grid_export_count
                 FROM readings

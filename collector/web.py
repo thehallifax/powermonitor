@@ -157,6 +157,32 @@ def _last_item(value) -> Optional[str]:
     return None
 
 
+def _first_items(value, limit: int = 3) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value[:limit]]
+
+
+def _last_items(value, limit: int = 3) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value[-limit:]]
+
+
+def _season_for_day(day: str) -> str:
+    try:
+        month = int(str(day)[5:7])
+    except (TypeError, ValueError):
+        return "unknown"
+    if month in {12, 1, 2}:
+        return "summer"
+    if month in {3, 4, 5}:
+        return "autumn"
+    if month in {6, 7, 8}:
+        return "winter"
+    return "spring"
+
+
 def provider_flash_from_params(params: dict) -> Optional[dict]:
     provider_id = DashboardHandler.param(params, "provider_action_provider")
     if not provider_id:
@@ -430,8 +456,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"runtime": runtime_check()})
             elif path == "/api/historical-coverage":
                 self.send_json(report.historical_coverage_data())
+            elif path == "/api/historical-backfill/status":
+                self.send_json(self.historical_backfill_status(params))
             elif path == "/api/historical-backfill/jobs":
-                self.send_json(self.historical_backfill_jobs(params))
+                self.send_json(self.historical_backfill_status(params))
             elif path == "/api/historical-backfill/preview":
                 self.send_json(self.historical_backfill_preview(params))
             elif path == "/api/historical-backfill/diagnostics":
@@ -591,6 +619,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def historical_backfill_diagnostics(self, params: dict) -> dict:
         job_id = self.param(params, "job_id")
         engine = DataEngine(db_path=report.DB_PATH)
+        coverage = engine.get_historical_coverage()
         coverage_data = report.historical_coverage_data()
         if job_id:
             job = engine.get_historical_backfill_job(str(job_id))
@@ -598,21 +627,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError("Historical data job not found.")
             return {
                 "historical_backfill": {
-                    "job": job,
-                    "coverage": coverage_data["historical_coverage"],
+                    "job": self.public_historical_job(job),
+                    "coverage": self.historical_coverage_summary(coverage, coverage_data),
                     "capability_audit": coverage_data["solaredge_capability_audit"],
                 }
             }
+        jobs = engine.get_historical_backfill_jobs(limit=10)
         return {
             "historical_backfill": {
-                "jobs": coverage_data["historical_backfill_jobs"],
-                "coverage": coverage_data["historical_coverage"],
+                "jobs": [self.public_historical_job(job) for job in jobs],
+                "coverage": self.historical_coverage_summary(coverage, coverage_data),
                 "seasonal_history": coverage_data["seasonal_history"],
                 "capability_audit": coverage_data["solaredge_capability_audit"],
             }
         }
 
-    def historical_backfill_jobs(self, params: dict) -> dict:
+    def historical_backfill_status(self, params: dict) -> dict:
         engine = DataEngine(db_path=report.DB_PATH)
         job_id = self.param(params, "job_id")
         jobs = []
@@ -623,16 +653,91 @@ class DashboardHandler(BaseHTTPRequestHandler):
             jobs = [job]
         else:
             jobs = engine.get_historical_backfill_jobs(limit=5)
-        snapshots = [report.historical_backfill_job_snapshot(job, now=datetime.now().astimezone()) for job in jobs]
+        snapshots = [self.public_historical_job(job) for job in jobs]
         active = any(job["status"] in {"queued", "running", "retrying", "cancelling"} for job in snapshots)
+        coverage_data = report.historical_coverage_data()
         return {
             "historical_backfill": {
                 "jobs": snapshots,
+                "job": snapshots[0] if job_id and snapshots else None,
+                "coverage": self.historical_coverage_summary(engine.get_historical_coverage(), coverage_data),
                 "polling": {
                     "active": active,
-                    "interval_seconds": 7,
+                    "interval_seconds": 5,
                 },
             }
+        }
+
+    @staticmethod
+    def public_historical_job(job: dict) -> dict:
+        snapshot = report.historical_backfill_job_snapshot(job, now=datetime.now().astimezone())
+        progress = job.get("progress") or {}
+        failed_days = list(progress.get("failed_days") or [])
+        completed_days = list(progress.get("completed_days") or [])
+        snapshot.update(
+            {
+                "completed_day_count": len(completed_days),
+                "failed_day_count": len(failed_days),
+                "failed_day_sample": _first_items(failed_days, 3),
+                "recent_failed_days": _last_items(failed_days, 3),
+            }
+        )
+        return snapshot
+
+    @staticmethod
+    def historical_coverage_summary(coverage: dict, coverage_data: Optional[dict] = None) -> dict:
+        coverage_data = coverage_data or {}
+        providers = coverage.get("providers") or {}
+        solaredge = providers.get("solaredge") or {}
+        days = solaredge.get("days") or {}
+        sources = solaredge.get("sources") or {}
+        interval_days = {
+            day: value
+            for day, value in days.items()
+            if str(value.get("quality_tier") or "") == "interval_grade"
+        }
+        battery_ready_days = {
+            day: value for day, value in interval_days.items() if value.get("battery_suitable")
+        }
+        by_season: dict[str, dict[str, int]] = {}
+        for day, value in interval_days.items():
+            season = by_season.setdefault(_season_for_day(day), {"interval_grade_days": 0, "battery_ready_days": 0})
+            season["interval_grade_days"] += 1
+            if value.get("battery_suitable"):
+                season["battery_ready_days"] += 1
+        seasonal = coverage_data.get("seasonal_history") or {}
+        seasonal_existing = seasonal.get("existing_coverage") or {}
+        seasonal_range = seasonal.get("range") or {}
+        source_summaries = [
+            {
+                "source_id": str(source.get("source_id") or source_id),
+                "source": str(source.get("source_id") or source_id),
+                "resolution": str(source.get("resolution") or "interval_15m"),
+                "quality_tier": str(source.get("quality_tier") or "interval_grade"),
+                "interval_grade_days": int(source.get("days") or 0),
+                "intervals": int(source.get("intervals") or 0),
+                "earliest_interval_grade_reading": source.get("first_reading"),
+                "latest_interval_grade_reading": source.get("last_reading"),
+            }
+            for source_id, source in sources.items()
+        ]
+        return {
+            "provider_id": "solaredge",
+            "source": "SolarEdge",
+            "resolution": "interval_15m",
+            "earliest_interval_grade_reading": min((value.get("first") for value in interval_days.values() if value.get("first")), default=None),
+            "latest_interval_grade_reading": max((value.get("last") for value in interval_days.values() if value.get("last")), default=None),
+            "interval_grade_days": len(interval_days),
+            "battery_ready_days": len(battery_ready_days),
+            "coverage_by_season": by_season,
+            "previous_summer": {
+                "start": seasonal_range.get("start"),
+                "end": seasonal_range.get("end"),
+                "days_in_range": int((seasonal.get("gaps") or {}).get("days_in_range") or seasonal_range.get("days") or 0),
+                "days_available": int(seasonal_existing.get("days_with_any_reading") or 0),
+                "battery_ready_days": int(seasonal_existing.get("battery_suitable_days") or 0),
+            },
+            "sources": source_summaries,
         }
 
     def historical_backfill_method_not_allowed(self, path: str) -> None:

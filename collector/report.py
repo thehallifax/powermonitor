@@ -7408,34 +7408,62 @@ def historical_backfill_job_snapshot(job: dict, *, now: Optional[datetime] = Non
                 if eta >= now_dt:
                     estimated_finish_time = eta.strftime("%d %b %Y, %H:%M")
     status = str(job.get("status") or "queued")
+    terminal = status in {"complete", "cancelled", "failed"}
     provider_id = str(job.get("provider_id") or "solaredge")
     provider_label = {"solaredge": "SolarEdge"}.get(provider_id, provider_id.replace("_", " ").title())
+    data_received = int(progress.get("data_received") or 0)
+    imported_or_updated = int(progress.get("imported_or_updated") or 0)
+    duplicates_skipped = int(progress.get("duplicates_skipped") or 0)
+    completed_at = _parse_iso_datetime(job.get("completed_at"))
+    summary_message = ""
+    if status == "complete":
+        summary_message = "Historical import complete"
+    elif status == "failed":
+        summary_message = "Historical import failed"
+    elif status == "cancelled":
+        summary_message = "Historical import cancelled"
     return {
         "job_id": str(job.get("job_id") or ""),
+        "provider_id": provider_id,
         "provider": provider_label,
         "status": status,
         "status_text": status.replace("_", " ").title(),
+        "start_date": str(job.get("start_date") or ""),
+        "end_date": str(job.get("end_date") or ""),
         "requested_range": {
             "start": str(job.get("start_date") or ""),
             "end": str(job.get("end_date") or ""),
         },
         "current_day": progress.get("current_day"),
+        "chunks_completed": completed_count,
+        "chunks_total": total_days,
         "days_completed": completed_count,
         "total_days": total_days,
         "days_remaining": remaining_days,
+        "percentage": round(percentage_complete, 1),
         "percentage_complete": round(percentage_complete, 1),
         "percentage_label": f"{percentage_complete:.0f}% complete" if total_days else "0% complete",
         "days_progress_label": f"{completed_count} / {total_days} days checked" if total_days else "No days queued yet",
-        "readings_added": int(progress.get("imported_or_updated") or 0),
-        "duplicates_skipped": int(progress.get("duplicates_skipped") or 0),
-        "failed_days": failed_days,
+        "data_received": data_received,
+        "imported_or_updated": imported_or_updated,
+        "readings_added": imported_or_updated,
+        "duplicates_skipped": duplicates_skipped,
+        "failed_day_count": len(failed_days),
         "failed_days_count": len(failed_days),
         "last_successful_day": completed_days[-1] if completed_days else None,
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "completed_at": job.get("completed_at"),
         "started_time": created_at.strftime("%d %b %Y, %H:%M") if created_at else None,
         "updated_time": updated_at.strftime("%d %b %Y, %H:%M") if updated_at else None,
+        "completed_time": completed_at.strftime("%d %b %Y, %H:%M") if completed_at else None,
+        "estimated_finish": estimated_finish_time,
         "estimated_finish_time": estimated_finish_time,
-        "resumable": status not in {"complete", "running", "cancelling"},
+        "cancel_requested": bool(job.get("cancel_requested")),
+        "resumable": status in {"failed", "cancelled"},
         "cancellable": status in {"queued", "running", "retrying", "cancelling"},
+        "terminal": terminal,
+        "summary_message": summary_message,
     }
 
 
@@ -7540,7 +7568,7 @@ def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Op
     <section id="historical-coverage" class="report-section">
       {page_heading_html("Historical data", "See which past readings can support seasonal context and battery modelling.", parent="Settings")}
       {flash_html}
-      <div class="system-card">
+      <div id="historical-seasonal-readiness" class="system-card">
         <div class="chart-heading"><h3>Previous summer readiness</h3><span>{html.escape(str(seasonal_range.get("start") or ""))} to {html.escape(str(seasonal_range.get("end") or ""))}</span></div>
         <div class="config-grid">
           <div><span>Days with readings</span><strong>{html.escape(str(existing.get("days_with_any_reading", 0)))} / {html.escape(str(gaps.get("days_in_range", seasonal_range.get("days", 0))))}</strong></div>
@@ -7561,13 +7589,13 @@ def historical_coverage_html(data: Optional[dict], historical_backfill_flash: Op
         </form>
         <p class="scenario-note">Previous summer is the Australian summer from 1 December to 31 March most recently completed. Custom ranges are also supported.</p>
       </div>
-      <div class="system-card">
+      <div id="historical-stored-coverage" class="system-card">
         <div class="chart-heading"><h3>Stored coverage</h3><span>By source</span></div>
-        <div class="completeness-grid">{source_rows}</div>
+        <div class="completeness-grid historical-coverage-sources">{source_rows}</div>
       </div>
       <div class="system-card">
         <div class="chart-heading"><h3>Historical import jobs</h3><span>Progress and resume status</span></div>
-        <div id="historical-backfill-jobs" class="completeness-grid historical-job-list" data-endpoint="/api/historical-backfill/jobs" data-poll-active="{str(poll_active).lower()}" data-poll-interval-ms="7000">{job_rows}</div>
+        <div id="historical-backfill-jobs" class="completeness-grid historical-job-list" data-endpoint="/api/historical-backfill/status" data-poll-active="{str(poll_active).lower()}" data-poll-interval-ms="5000">{job_rows}</div>
       </div>
       {disclosure_html("SolarEdge historical capability", "Resolution, limits, and battery suitability", f'<div class="config-grid"><div><span>Source</span><strong>{html.escape(str(audit.get("source") or "SolarEdge"))}</strong></div><div><span>Chunk size</span><strong>{html.escape(str(audit.get("chunking") or "One day"))}</strong></div><div><span>Recent reliable window</span><strong>{html.escape(str((audit.get("reliable_recent_window") or {}).get("start") or ""))} to {html.escape(str((audit.get("reliable_recent_window") or {}).get("end") or ""))}</strong></div><div><span>Battery suitability</span><strong>{html.escape(str(audit.get("battery_dispatch_suitability") or ""))}</strong></div></div><ul class="guidance-list">{warning_rows}</ul><ul class="guidance-list">{quality_rows}</ul>', css_class="provider-details")}
     </section>

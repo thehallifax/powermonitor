@@ -89,6 +89,58 @@ class HistoricalBackfillTests(unittest.TestCase):
             self.assertEqual(progress["failed_days"], ["2026-07-11", "2026-07-12"])
             self.assertIn("Credentials missing", " ".join(job["warnings"]))
 
+    def test_backfill_regenerates_report_once_after_successful_completion(self):
+        with TemporaryDirectory() as directory:
+            db_path = Path(directory) / "power.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                create_readings(conn)
+            outfile = Path(directory) / "backfill.json"
+
+            def fake_fetch(day, output_path):
+                output_path.write_text("{}", encoding="utf-8")
+                return "ok", 96, None
+
+            with patch.object(backfill_solaredge, "DB_PATH", db_path), patch.object(
+                backfill_solaredge,
+                "OUTFILE",
+                outfile,
+            ), patch.object(
+                backfill_solaredge,
+                "fetch_with_session_recovery",
+                side_effect=fake_fetch,
+            ), patch.object(
+                backfill_solaredge,
+                "payload_diagnostics",
+                return_value={"measurement_count": 96},
+            ), patch.object(
+                backfill_solaredge,
+                "import_day",
+                return_value=(96, {"imported_or_updated": 96, "data_received": 96, "duplicates_skipped": 0, "zero_payload_skipped": 0}, "Imported 96 readings"),
+            ), patch.object(backfill_solaredge, "generate_report") as generate_report, patch.object(
+                sys,
+                "argv",
+                [
+                    "backfill_solaredge.py",
+                    "--range",
+                    "custom",
+                    "--start",
+                    "2026-07-11",
+                    "--end",
+                    "2026-07-12",
+                    "--job-id",
+                    "job-1",
+                ],
+            ):
+                result = backfill_solaredge.run()
+
+            job = DataEngine(db_path=db_path).get_historical_backfill_job("job-1")
+            progress = job["progress"]
+            self.assertEqual(result, 0)
+            self.assertEqual(job["status"], "complete")
+            self.assertEqual(progress["chunks_completed"], 2)
+            self.assertEqual(progress["imported_or_updated"], 192)
+            generate_report.assert_called_once()
+
 
 def create_readings(conn):
     conn.execute(
