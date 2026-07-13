@@ -131,6 +131,19 @@ class DataEngineTests(unittest.TestCase):
         self.assertAlmostEqual(summary["grid_import_kwh"], 0.18)
         self.assertNotIn("net_cost", summary)
 
+    def test_battery_interval_history_excludes_aggregate_rows(self):
+        self.conn.execute(
+            "UPDATE readings SET source_resolution = ? WHERE measurement_time = ?",
+            ("daily_aggregate", "2026-06-27T12:00:00"),
+        )
+
+        rows = self.engine.get_battery_interval_history(date(2026, 6, 27), date(2026, 6, 27))
+
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["source_resolution"] == "interval_15m" for row in rows))
+        self.assertIn("provider_id", rows[0])
+        self.assertIn("solar_export_kwh", rows[0])
+
     def test_get_ev_sessions_normalises_tariff_breakdown(self):
         sessions = self.engine.get_ev_sessions(
             date(2026, 6, 27),

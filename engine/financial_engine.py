@@ -18,6 +18,25 @@ BATTERY_MIN_UTILISATION_PCT = 20.0
 BATTERY_SAVINGS_CAPTURE_PCT = 0.90
 BATTERY_ROUND_TRIP_EFFICIENCY = 0.90
 BATTERY_GRID_ARBITRAGE_MATERIAL_SAVINGS = 5.0
+BATTERY_SEASON_MIN_INTERVAL_DAYS = 3
+EXPECTED_INTERVALS_PER_DAY = 96
+AU_SEASONS = ("summer", "autumn", "winter", "spring")
+AU_SEASON_LABELS = {
+    "summer": "Summer",
+    "autumn": "Autumn",
+    "winter": "Winter",
+    "spring": "Spring",
+}
+
+
+def au_season_for_date(value: date) -> str:
+    if value.month in {12, 1, 2}:
+        return "summer"
+    if value.month in {3, 4, 5}:
+        return "autumn"
+    if value.month in {6, 7, 8}:
+        return "winter"
+    return "spring"
 
 
 class FinancialEngine:
@@ -230,6 +249,8 @@ class FinancialEngine:
         baseline_solar_exported_kwh: float = 0.0,
         capacities_kwh: tuple[float, ...] = BATTERY_USABLE_CAPACITIES_KWH,
         tariff_version: Optional[Any] = None,
+        seasonal_intervals: Optional[list[dict[str, Any]]] = None,
+        include_seasonal: bool = True,
     ) -> dict[str, Any]:
         """Model self-consumption battery sizing from observed interval data.
 
@@ -397,7 +418,7 @@ class FinancialEngine:
             ),
         }
 
-        return {
+        result = {
             "available": bool(normalised),
             "methodology": (
                 "Tariff-aware self-consumption simulation using actual interval readings. "
@@ -456,6 +477,140 @@ class FinancialEngine:
             "opportunity_metrics": opportunity,
             "diagnostics": diagnostics,
             "data_quality": data_quality,
+        }
+        result["current_period"] = {
+            "available": result["available"],
+            "recommended": recommendation,
+            "data_quality": data_quality,
+            "options": options,
+            "strategies": result["strategies"],
+        }
+        seasonal_model = (
+            self.seasonal_battery_model(seasonal_intervals or [], settings, capacities_kwh=capacities_kwh)
+            if include_seasonal
+            else self._empty_seasonal_battery_model("Seasonal modelling was not requested.")
+        )
+        result["seasonal_model"] = seasonal_model
+        result["confidence_model"] = seasonal_model.get("confidence_model") or self._battery_history_confidence_model([], {}, {})
+        return result
+
+    def seasonal_battery_model(
+        self,
+        intervals: list[dict[str, Any]],
+        settings: Any,
+        *,
+        capacities_kwh: tuple[float, ...] = BATTERY_USABLE_CAPACITIES_KWH,
+    ) -> dict[str, Any]:
+        interval_rows = [self._battery_interval(row, settings) | self._battery_history_metadata(row) for row in intervals]
+        interval_rows = [row for row in interval_rows if row["timestamp"] and row.get("source_resolution") in {"interval_15m", "interval_grade"}]
+        if not interval_rows:
+            model = self._empty_seasonal_battery_model(
+                "Historical production may be available, but interval household energy flows are not, so seasonal battery modelling cannot yet be completed."
+            )
+            model["confidence_model"] = self._battery_history_confidence_model([], {}, {})
+            return model
+
+        by_season: dict[str, list[dict[str, Any]]] = {season: [] for season in AU_SEASONS}
+        for row in interval_rows:
+            by_season[au_season_for_date(date.fromisoformat(row["day"]))].append(row)
+
+        seasons: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        total_included_days = 0
+        for season, rows in by_season.items():
+            days = sorted({row["day"] for row in rows})
+            if len(days) < BATTERY_SEASON_MIN_INTERVAL_DAYS:
+                if rows:
+                    excluded.append(
+                        {
+                            "season": season,
+                            "reason": f"Only {len(days)} interval day{'s' if len(days) != 1 else ''}; minimum is {BATTERY_SEASON_MIN_INTERVAL_DAYS}.",
+                            "interval_days": len(days),
+                            "intervals": len(rows),
+                        }
+                    )
+                continue
+            comparison = self.compare_home_battery_sizes(
+                rows,
+                settings,
+                baseline_bill=0.0,
+                baseline_grid_import_kwh=sum(float(row.get("grid_import_kwh") or 0.0) for row in rows),
+                baseline_solar_exported_kwh=sum(float(row.get("solar_export_kwh") or 0.0) for row in rows),
+                capacities_kwh=capacities_kwh,
+                include_seasonal=False,
+            )
+            strategy = ((comparison.get("strategies") or {}).get("solar_plus_grid_arbitrage") or {})
+            recommended = strategy.get("recommended") or comparison.get("recommended") or {}
+            options = strategy.get("options") or comparison.get("options") or []
+            day_count = len(days)
+            total_included_days += day_count
+            seasons.append(
+                {
+                    "season": season,
+                    "label": AU_SEASON_LABELS[season],
+                    "interval_days": day_count,
+                    "intervals": len(rows),
+                    "coverage_pct": min(len(rows) / (day_count * EXPECTED_INTERVALS_PER_DAY) * 100, 100.0) if day_count else 0.0,
+                    "average_solar_generation_kwh": sum(float(row.get("solar_generation_kwh") or 0.0) for row in rows) / day_count,
+                    "average_household_consumption_kwh": sum(float(row.get("household_consumption_kwh") or 0.0) for row in rows) / day_count,
+                    "average_export_kwh": sum(float(row.get("solar_export_kwh") or 0.0) for row in rows) / day_count,
+                    "average_import_kwh": sum(float(row.get("grid_import_kwh") or 0.0) for row in rows) / day_count,
+                    "estimated_battery_saving": float(recommended.get("annualised_savings") or 0.0),
+                    "recommended_battery_kwh": float(recommended.get("capacity_kwh") or 0.0),
+                    "recommendation_status": str(recommended.get("status") or ""),
+                    "options": options,
+                    "comparison": comparison,
+                }
+            )
+
+        if not seasons:
+            model = self._empty_seasonal_battery_model("No season has enough interval-grade import/export coverage for battery replay.")
+            model["excluded_periods"] = excluded
+            model["confidence_model"] = self._battery_history_confidence_model(interval_rows, {}, {"excluded_periods": excluded})
+            return model
+
+        weights = {
+            item["season"]: float(item["interval_days"]) / total_included_days
+            for item in seasons
+            if total_included_days
+        }
+        annual_options = self._weighted_battery_options(seasons, weights, capacities_kwh)
+        annual_recommendation = self._weighted_battery_recommendation(annual_options)
+        for option in annual_options:
+            capacity = float(option.get("capacity_kwh") or 0.0)
+            option["recommendation_signal"] = self._weighted_battery_signal(option, annual_recommendation, annual_options)
+            option["recommended"] = abs(capacity - float(annual_recommendation.get("capacity_kwh") or 0.0)) < 1e-9
+        seasonal_summary = self._seasonal_battery_summary(seasons, annual_recommendation)
+        diagnostics = {
+            "seasonal_interval_days": total_included_days,
+            "coverage_by_season": {
+                item["season"]: {
+                    "interval_days": item["interval_days"],
+                    "intervals": item["intervals"],
+                    "coverage_pct": item["coverage_pct"],
+                }
+                for item in seasons
+            },
+            "coverage_percentage": self._seasonal_coverage_pct(interval_rows),
+            "excluded_periods": excluded,
+            "annual_weighting": weights,
+        }
+        confidence = self._battery_history_confidence_model(interval_rows, weights, diagnostics)
+        return {
+            "available": True,
+            "methodology": (
+                "Australian meteorological seasons are detected from interval timestamps. "
+                "Each season is replayed through the existing battery simulator only when interval-grade import/export rows exist. "
+                "Annual savings are weighted by the number of interval days available per included season."
+            ),
+            "seasons": seasons,
+            "annual_weighting": weights,
+            "annual_options": annual_options,
+            "annual_recommendation": annual_recommendation,
+            "summary": seasonal_summary,
+            "diagnostics": diagnostics,
+            "excluded_periods": excluded,
+            "confidence_model": confidence,
         }
 
     def explain_bill_change(
@@ -1450,6 +1605,230 @@ class FinancialEngine:
                 if diminishing_option
                 else "No tested capacity crossed the diminishing-return threshold."
             ),
+        }
+
+    def _battery_history_metadata(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "solar_generation_kwh": float(row.get("solar_generation_kwh") or row.get("production_kwh") or 0.0),
+            "solar_to_home_kwh": float(row.get("solar_to_home_kwh") or 0.0),
+            "household_consumption_kwh": float(row.get("household_consumption_kwh") or row.get("consumption_kwh") or 0.0),
+            "provider_id": str(row.get("provider_id") or "unknown"),
+            "source_id": str(row.get("source_id") or "unknown"),
+            "source_resolution": str(row.get("source_resolution") or "interval_15m"),
+        }
+
+    def _empty_seasonal_battery_model(self, note: str) -> dict[str, Any]:
+        return {
+            "available": False,
+            "methodology": "Seasonal modelling requires interval-grade historical import and export rows.",
+            "seasons": [],
+            "annual_weighting": {},
+            "annual_options": [],
+            "annual_recommendation": {
+                "capacity_kwh": 0.0,
+                "status": "insufficient_history",
+                "summary": note,
+            },
+            "summary": note,
+            "diagnostics": {
+                "seasonal_interval_days": 0,
+                "coverage_by_season": {},
+                "coverage_percentage": 0.0,
+                "excluded_periods": [],
+                "annual_weighting": {},
+            },
+            "excluded_periods": [],
+            "confidence_model": {
+                "level": "Insufficient history",
+                "reason": note,
+                "interval_days": 0,
+                "seasonal_completeness": 0,
+                "coverage_percentage": 0.0,
+                "provider_consistency": "unknown",
+                "data_resolution": "missing",
+            },
+        }
+
+    def _weighted_battery_options(
+        self,
+        seasons: list[dict[str, Any]],
+        weights: dict[str, float],
+        capacities_kwh: tuple[float, ...],
+    ) -> list[dict[str, Any]]:
+        options: list[dict[str, Any]] = []
+        for capacity in capacities_kwh:
+            weighted_saving = 0.0
+            weighted_period_saving = 0.0
+            seasonal_values = {}
+            for season in seasons:
+                match = next(
+                    (
+                        option for option in season.get("options", [])
+                        if abs(float(option.get("capacity_kwh") or 0.0) - float(capacity)) < 1e-9
+                    ),
+                    {},
+                )
+                weight = float(weights.get(str(season["season"]), 0.0))
+                saving = float(match.get("annualised_savings") or 0.0)
+                weighted_saving += saving * weight
+                weighted_period_saving += float(match.get("period_savings") or 0.0) * weight
+                seasonal_values[season["season"]] = {
+                    "weight": weight,
+                    "annualised_savings": saving,
+                    "recommended_battery_kwh": season.get("recommended_battery_kwh"),
+                }
+            options.append(
+                {
+                    "capacity_kwh": float(capacity),
+                    "label": f"{capacity:g} kWh usable",
+                    "annualised_savings": weighted_saving,
+                    "period_savings": weighted_period_saving,
+                    "seasonal_values": seasonal_values,
+                }
+            )
+        previous = None
+        for option in options:
+            option["marginal_savings"] = (
+                float(option["annualised_savings"]) - float(previous["annualised_savings"])
+                if previous is not None
+                else float(option["annualised_savings"])
+            )
+            previous = option
+        for index, option in enumerate(options):
+            next_option = options[index + 1] if index + 1 < len(options) else None
+            option["marginal_savings_to_next_capacity"] = (
+                float(next_option["annualised_savings"]) - float(option["annualised_savings"])
+                if next_option is not None
+                else None
+            )
+        return options
+
+    def _weighted_battery_recommendation(self, options: list[dict[str, Any]]) -> dict[str, Any]:
+        if not options:
+            return {
+                "capacity_kwh": 0.0,
+                "status": "insufficient_history",
+                "summary": "No seasonal battery options were available.",
+            }
+        best = max(options, key=lambda option: float(option.get("annualised_savings") or 0.0))
+        if float(best.get("annualised_savings") or 0.0) <= 0.005:
+            return {
+                "capacity_kwh": 0.0,
+                "status": "no_financial_case",
+                "summary": "Historical interval data does not show useful battery savings.",
+                "annualised_savings": 0.0,
+            }
+        target = float(best["annualised_savings"]) * BATTERY_SAVINGS_CAPTURE_PCT
+        selected = next(
+            (
+                option for option in options
+                if float(option.get("annualised_savings") or 0.0) >= target
+            ),
+            best,
+        )
+        return {
+            "capacity_kwh": selected["capacity_kwh"],
+            "status": "recommended",
+            "summary": (
+                f"Annual weighted recommendation is {selected['capacity_kwh']:g} kWh, "
+                f"with about ${float(selected.get('annualised_savings') or 0.0):.0f} annualised savings from the included seasonal history."
+            ),
+            "annualised_savings": selected.get("annualised_savings"),
+            "period_savings": selected.get("period_savings"),
+        }
+
+    def _weighted_battery_signal(
+        self,
+        option: dict[str, Any],
+        recommendation: dict[str, Any],
+        options: list[dict[str, Any]],
+    ) -> str:
+        capacity = float(option.get("capacity_kwh") or 0.0)
+        recommended_capacity = float(recommendation.get("capacity_kwh") or 0.0)
+        if abs(capacity - recommended_capacity) < 1e-9 and recommendation.get("status") == "recommended":
+            return "Recommended"
+        if float(option.get("annualised_savings") or 0.0) <= 0.005:
+            return "Limited additional benefit"
+        if capacity < recommended_capacity:
+            return "Good value"
+        previous = None
+        for candidate in options:
+            if candidate is option:
+                break
+            previous = candidate
+        if previous and float(option.get("marginal_savings") or 0.0) <= float(previous.get("annualised_savings") or 0.0) * BATTERY_DIMINISHING_RETURN_PCT:
+            return "Likely oversized for this usage pattern"
+        return "Limited additional benefit"
+
+    def _seasonal_battery_summary(self, seasons: list[dict[str, Any]], annual_recommendation: dict[str, Any]) -> str:
+        strongest = max(seasons, key=lambda item: float(item.get("estimated_battery_saving") or 0.0))
+        current = max(seasons, key=lambda item: int(item.get("interval_days") or 0))
+        annual_size = float(annual_recommendation.get("capacity_kwh") or 0.0)
+        strongest_size = float(strongest.get("recommended_battery_kwh") or 0.0)
+        current_size = float(current.get("recommended_battery_kwh") or 0.0)
+        if strongest_size > annual_size:
+            return (
+                f"{current['label']} usage favours {current_size:g} kWh. "
+                f"Historical {strongest['label'].lower()} usage suggests {strongest_size:g} kWh would capture additional value. "
+                f"Annual weighted recommendation remains {annual_size:g} kWh because observed seasonal return is weighted by available interval days."
+            )
+        return (
+            f"{current['label']} usage favours {current_size:g} kWh. "
+            f"Annual weighted recommendation is {annual_size:g} kWh based on the included seasonal interval history."
+        )
+
+    def _seasonal_coverage_pct(self, rows: list[dict[str, Any]]) -> float:
+        days = sorted({row["day"] for row in rows if row.get("day")})
+        if not days:
+            return 0.0
+        start = date.fromisoformat(days[0])
+        end = date.fromisoformat(days[-1])
+        possible = (end - start).days + 1
+        return len(days) / possible * 100 if possible else 0.0
+
+    def _battery_history_confidence_model(
+        self,
+        rows: list[dict[str, Any]],
+        weights: dict[str, float],
+        diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        days = sorted({row["day"] for row in rows if row.get("day")})
+        interval_days = len(days)
+        seasons_present = len(weights)
+        providers = sorted({str(row.get("provider_id") or "unknown") for row in rows})
+        resolutions = sorted({str(row.get("source_resolution") or "unknown") for row in rows})
+        coverage_pct = float(diagnostics.get("coverage_percentage") or self._seasonal_coverage_pct(rows))
+        provider_consistency = "single_provider" if len(providers) <= 1 and providers else "mixed_providers"
+        data_resolution = "interval_grade" if set(resolutions).issubset({"interval_15m", "interval_grade"}) and resolutions else "mixed_or_aggregate"
+        missing_seasons = [season for season in AU_SEASONS if season not in weights]
+        if interval_days == 0:
+            level = "Insufficient history"
+            reason = "No interval-grade historical import/export days are available."
+        elif interval_days >= 270 and seasons_present == 4 and provider_consistency == "single_provider" and data_resolution == "interval_grade":
+            level = "Very High"
+            reason = "Coverage spans most of a year with all seasons represented by one interval-grade provider."
+        elif interval_days >= 120 and seasons_present >= 3 and data_resolution == "interval_grade":
+            level = "High"
+            reason = "Historical interval coverage spans at least three seasons."
+        elif interval_days >= 45 and seasons_present >= 2 and data_resolution == "interval_grade":
+            level = "Medium"
+            reason = "Historical interval coverage spans at least two seasons."
+        else:
+            level = "Low"
+            reason = "Seasonal history is sparse, so the annual battery recommendation is cautious."
+        return {
+            "level": level,
+            "reason": reason,
+            "interval_days": interval_days,
+            "seasonal_completeness": seasons_present,
+            "missing_periods": missing_seasons,
+            "coverage_percentage": coverage_pct,
+            "provider_consistency": provider_consistency,
+            "providers": providers,
+            "data_resolution": data_resolution,
+            "resolutions": resolutions,
+            "excluded_periods": diagnostics.get("excluded_periods") or [],
+            "annual_weighting": weights,
         }
 
     def _join_phrases(self, phrases: list[str]) -> str:

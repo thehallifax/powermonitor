@@ -1,6 +1,7 @@
 import unittest
+from datetime import date
 
-from engine.financial_engine import FinancialEngine
+from engine.financial_engine import FinancialEngine, au_season_for_date
 
 
 class Settings:
@@ -273,6 +274,52 @@ class BatteryFinancialEngineTests(unittest.TestCase):
 
         self.assertAlmostEqual(top_level["period_savings"], 5.0 * (0.60 - 0.02))
         self.assertEqual(top_level, strategy)
+
+    def test_au_season_detection_uses_australian_seasons(self):
+        self.assertEqual(au_season_for_date(date(2026, 1, 15)), "summer")
+        self.assertEqual(au_season_for_date(date(2026, 4, 15)), "autumn")
+        self.assertEqual(au_season_for_date(date(2026, 7, 15)), "winter")
+        self.assertEqual(au_season_for_date(date(2026, 10, 15)), "spring")
+
+    def test_seasonal_battery_model_weights_included_interval_days(self):
+        seasonal = []
+        for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+            seasonal.append(interval(day, 12, "super_off_peak", solar_export=15.0))
+            seasonal.append(interval(day, 18, "peak", grid_import=15.0))
+        for day in ("2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06"):
+            seasonal.append(interval(day, 12, "super_off_peak", solar_export=6.0))
+            seasonal.append(interval(day, 18, "peak", grid_import=6.0))
+        comparison = self.engine.compare_home_battery_sizes(
+            [interval("2026-07-01", 12, "super_off_peak", solar_export=6.0), interval("2026-07-01", 18, "peak", grid_import=6.0)],
+            self.settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=6.0,
+            baseline_solar_exported_kwh=6.0,
+            seasonal_intervals=seasonal,
+        )
+
+        seasonal_model = comparison["seasonal_model"]
+
+        self.assertTrue(seasonal_model["available"])
+        self.assertEqual(set(seasonal_model["annual_weighting"]), {"summer", "winter"})
+        self.assertAlmostEqual(seasonal_model["annual_weighting"]["summer"], 3 / 9)
+        self.assertAlmostEqual(seasonal_model["annual_weighting"]["winter"], 6 / 9)
+        self.assertEqual(seasonal_model["annual_recommendation"]["capacity_kwh"], 15.0)
+        self.assertEqual(comparison["confidence_model"]["level"], "Low")
+        self.assertIn("seasonal_model", comparison)
+        self.assertIn("current_period", comparison)
+
+    def test_seasonal_model_ignores_insufficient_seasons_and_aggregate_rows(self):
+        rows = [
+            {**interval("2026-01-01", 12, "super_off_peak", solar_export=15.0), "source_resolution": "daily_aggregate"},
+            {**interval("2026-01-02", 12, "super_off_peak", solar_export=15.0), "source_resolution": "daily_aggregate"},
+        ]
+
+        model = self.engine.seasonal_battery_model(rows, self.settings)
+
+        self.assertFalse(model["available"])
+        self.assertEqual(model["confidence_model"]["level"], "Insufficient history")
+        self.assertIn("interval household energy flows", model["summary"])
 
 
 if __name__ == "__main__":

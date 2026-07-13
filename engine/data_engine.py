@@ -286,6 +286,33 @@ class DataEngine:
         missing = sorted(required - present)
         if missing:
             raise RuntimeError(f"Readings table is missing columns: {', '.join(missing)}")
+        reading_metadata_columns = {
+            "provider_id": "ALTER TABLE readings ADD COLUMN provider_id TEXT",
+            "source_id": "ALTER TABLE readings ADD COLUMN source_id TEXT",
+            "source_resolution": "ALTER TABLE readings ADD COLUMN source_resolution TEXT",
+            "source_record_id": "ALTER TABLE readings ADD COLUMN source_record_id TEXT",
+            "import_job_id": "ALTER TABLE readings ADD COLUMN import_job_id TEXT",
+            "imported_at": "ALTER TABLE readings ADD COLUMN imported_at TEXT",
+        }
+        for column, statement in reading_metadata_columns.items():
+            if column not in present:
+                conn.execute(statement)
+        energy_columns = [
+            column
+            for column in ("production_kwh", "consumption_kwh", "solar_to_grid_kwh", "grid_to_home_kwh")
+            if column in present
+        ]
+        if energy_columns:
+            energy_where = " OR ".join(f"{column} IS NOT NULL" for column in energy_columns)
+            conn.execute(
+                f"""
+                UPDATE readings
+                SET provider_id = COALESCE(NULLIF(provider_id, ''), 'solaredge'),
+                    source_id = COALESCE(NULLIF(source_id, ''), 'solaredge_dashboard_power'),
+                    source_resolution = COALESCE(NULLIF(source_resolution, ''), 'interval_15m')
+                WHERE {energy_where}
+                """
+            )
 
         conn.execute(
             """
@@ -404,6 +431,7 @@ class DataEngine:
             """
         )
         DataEngine._ensure_provider_observation_table(conn)
+        DataEngine._ensure_historical_backfill_tables(conn)
         DataEngine._ensure_promotion_table(conn)
         DataEngine._ensure_household_state_snapshot_table(conn)
         DataEngine._ensure_state_change_table(conn)
@@ -461,6 +489,45 @@ class DataEngine:
             """
             CREATE INDEX IF NOT EXISTS idx_provider_observations_provider_capability
             ON provider_observations(household_id, provider_id, capability)
+            """
+        )
+
+    @staticmethod
+    def _ensure_historical_backfill_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS historical_backfill_jobs (
+                job_id TEXT PRIMARY KEY,
+                household_id TEXT NOT NULL DEFAULT 'default_household',
+                provider_id TEXT NOT NULL,
+                site_id TEXT NOT NULL,
+                range_preset TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                resolution TEXT NOT NULL,
+                quality_tier TEXT NOT NULL,
+                data_types_json TEXT NOT NULL,
+                progress_json TEXT NOT NULL,
+                diagnostics_json TEXT NOT NULL,
+                warnings_json TEXT NOT NULL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_historical_backfill_jobs_provider
+            ON historical_backfill_jobs(household_id, provider_id, updated_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_historical_backfill_jobs_household_updated
+            ON historical_backfill_jobs(household_id, updated_at DESC)
             """
         )
 
@@ -649,6 +716,7 @@ class DataEngine:
             "timeline_entries",
             "import_jobs",
             "provider_observations",
+            "historical_backfill_jobs",
             "promotion_decisions",
             "household_state_snapshots",
             "state_changes",
@@ -696,6 +764,12 @@ class DataEngine:
             """
             CREATE INDEX IF NOT EXISTS idx_import_jobs_household_created
             ON import_jobs(household_id, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_historical_backfill_jobs_household_updated
+            ON historical_backfill_jobs(household_id, updated_at DESC)
             """
         )
         conn.execute(
@@ -1205,6 +1279,60 @@ class DataEngine:
                 row["solar_to_grid_kwh"] = float(measurement.value or 0)
         return [by_time[key] for key in sorted(by_time)]
 
+    def get_battery_interval_history(self, start: date, end: date) -> list[dict[str, Any]]:
+        """Return interval-grade rows suitable for tariff-aware battery replay."""
+
+        start_text = start.isoformat()
+        end_exclusive = (end + timedelta(days=1)).isoformat()
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            present = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+            provider_expr = "COALESCE(NULLIF(provider_id, ''), 'solaredge')" if "provider_id" in present else "'solaredge'"
+            source_expr = "COALESCE(NULLIF(source_id, ''), 'solaredge_dashboard_power')" if "source_id" in present else "'solaredge_dashboard_power'"
+            resolution_expr = "COALESCE(NULLIF(source_resolution, ''), 'interval_15m')" if "source_resolution" in present else "'interval_15m'"
+            consumption_expr = "consumption_kwh" if "consumption_kwh" in present else "0"
+            rows = conn.execute(
+                f"""
+                SELECT
+                    measurement_time,
+                    tariff_bucket,
+                    grid_to_home_kwh,
+                    solar_to_grid_kwh,
+                    production_kwh,
+                    solar_to_home_kwh,
+                    {consumption_expr} AS consumption_kwh,
+                    {provider_expr} AS provider_id,
+                    {source_expr} AS source_id,
+                    {resolution_expr} AS source_resolution
+                FROM readings
+                WHERE household_id = ?
+                  AND measurement_time >= ? AND measurement_time < ?
+                  AND measurement_time IS NOT NULL
+                  AND {resolution_expr} IN ('interval_15m', 'interval_grade')
+                ORDER BY measurement_time
+                """,
+                (household_id, start_text, end_exclusive),
+            ).fetchall()
+            return [
+                {
+                    "measurement_time": row[0],
+                    "tariff_bucket": row[1],
+                    "grid_import_kwh": float(row[2] or 0.0),
+                    "solar_export_kwh": float(row[3] or 0.0),
+                    "solar_generation_kwh": float(row[4] or 0.0),
+                    "solar_to_home_kwh": float(row[5] or 0.0),
+                    "household_consumption_kwh": float(row[6] or 0.0),
+                    "provider_id": row[7],
+                    "source_id": row[8],
+                    "source_resolution": row[9],
+                }
+                for row in rows
+            ]
+
+        return self._with_connection(query)
+
     def get_ev_sessions(
         self,
         start: date,
@@ -1670,6 +1798,317 @@ class DataEngine:
             return self.get_import_job(job_id)
 
         return self._with_connection(update)
+
+    def create_historical_backfill_job(
+        self,
+        *,
+        job_id: str,
+        provider_id: str,
+        site_id: str,
+        range_preset: str,
+        start_date: date,
+        end_date: date,
+        resolution: str,
+        quality_tier: str,
+        data_types: list[str],
+        progress: Optional[dict[str, Any]] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
+        warnings: Optional[list[str]] = None,
+        status: str = "queued",
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def insert(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                INSERT INTO historical_backfill_jobs (
+                    job_id,
+                    household_id,
+                    provider_id,
+                    site_id,
+                    range_preset,
+                    start_date,
+                    end_date,
+                    status,
+                    resolution,
+                    quality_tier,
+                    data_types_json,
+                    progress_json,
+                    diagnostics_json,
+                    warnings_json,
+                    cancel_requested,
+                    created_at,
+                    updated_at,
+                    completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+                """,
+                (
+                    job_id,
+                    household_id,
+                    provider_id,
+                    site_id,
+                    range_preset,
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                    status,
+                    resolution,
+                    quality_tier,
+                    json.dumps(data_types, sort_keys=True),
+                    json.dumps(progress or {}, sort_keys=True),
+                    json.dumps(diagnostics or {}, sort_keys=True),
+                    json.dumps(warnings or [], sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return self.get_historical_backfill_job(job_id)
+
+        return self._with_connection(insert)
+
+    def update_historical_backfill_job(
+        self,
+        job_id: str,
+        *,
+        status: Optional[str] = None,
+        progress: Optional[dict[str, Any]] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
+        warnings: Optional[list[str]] = None,
+        completed: bool = False,
+    ) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def update(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            existing = self._historical_backfill_row(conn, household_id, job_id)
+            if existing is None:
+                raise RuntimeError("Historical data job not found")
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE historical_backfill_jobs
+                SET status = ?,
+                    progress_json = ?,
+                    diagnostics_json = ?,
+                    warnings_json = ?,
+                    updated_at = ?,
+                    completed_at = CASE WHEN ? THEN ? ELSE completed_at END
+                WHERE household_id = ? AND job_id = ?
+                """,
+                (
+                    status or existing["status"],
+                    json.dumps(progress if progress is not None else existing["progress"], sort_keys=True),
+                    json.dumps(diagnostics if diagnostics is not None else existing["diagnostics"], sort_keys=True),
+                    json.dumps(warnings if warnings is not None else existing["warnings"], sort_keys=True),
+                    now,
+                    1 if completed else 0,
+                    now,
+                    household_id,
+                    job_id,
+                ),
+            )
+            conn.commit()
+            return self.get_historical_backfill_job(job_id)
+
+        return self._with_connection(update)
+
+    def request_historical_backfill_cancel(self, job_id: str) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def update(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            cursor = conn.execute(
+                """
+                UPDATE historical_backfill_jobs
+                SET cancel_requested = 1,
+                    status = CASE WHEN status IN ('complete', 'failed', 'cancelled') THEN status ELSE 'cancelling' END,
+                    updated_at = ?
+                WHERE household_id = ? AND job_id = ?
+                """,
+                (now, household_id, job_id),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError("Historical data job not found")
+            conn.commit()
+            return self.get_historical_backfill_job(job_id)
+
+        return self._with_connection(update)
+
+    def get_historical_backfill_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            return self._historical_backfill_row(conn, household_id, job_id)
+
+        return self._with_connection(query)
+
+    def get_historical_backfill_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM historical_backfill_jobs
+                WHERE household_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (household_id, int(limit)),
+            ).fetchall()
+            columns = [column[0] for column in conn.execute("SELECT * FROM historical_backfill_jobs LIMIT 0").description]
+            return [self._historical_backfill_dict(dict(zip(columns, row))) for row in rows]
+
+        return self._with_connection(query)
+
+    def get_historical_coverage(self) -> dict[str, Any]:
+        household_id = self._active_household_id()
+
+        def query(conn):
+            self.validate_connection(conn)
+            DataEngine._ensure_historical_backfill_tables(conn)
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(NULLIF(provider_id, ''), 'solaredge') AS provider_id,
+                    COALESCE(NULLIF(source_id, ''), 'solaredge_dashboard_power') AS source_id,
+                    COALESCE(NULLIF(source_resolution, ''), 'interval_15m') AS source_resolution,
+                    substr(measurement_time, 1, 10) AS reading_date,
+                    MIN(measurement_time) AS first_reading,
+                    MAX(measurement_time) AS last_reading,
+                    COUNT(*) AS interval_count,
+                    SUM(CASE WHEN COALESCE(production_kwh, 0) != 0 THEN 1 ELSE 0 END) AS solar_generation_count,
+                    SUM(CASE WHEN COALESCE(consumption_kwh, 0) != 0 THEN 1 ELSE 0 END) AS household_consumption_count,
+                    SUM(CASE WHEN COALESCE(grid_to_home_kwh, 0) != 0 THEN 1 ELSE 0 END) AS grid_import_count,
+                    SUM(CASE WHEN COALESCE(solar_to_grid_kwh, 0) != 0 THEN 1 ELSE 0 END) AS grid_export_count
+                FROM readings
+                WHERE household_id = ?
+                  AND measurement_time IS NOT NULL
+                GROUP BY provider_id, source_id, source_resolution, reading_date
+                ORDER BY reading_date
+                """,
+                (household_id,),
+            ).fetchall()
+            providers: dict[str, Any] = {}
+            measurement_totals = {
+                "solar_generation": 0,
+                "household_consumption": 0,
+                "grid_import": 0,
+                "grid_export": 0,
+            }
+            for row in rows:
+                provider_id, source_id, resolution, reading_date, first, last, intervals, solar, consumption, grid_import, grid_export = row
+                provider = providers.setdefault(
+                    provider_id,
+                    {
+                        "provider_id": provider_id,
+                        "sources": {},
+                        "days": {},
+                        "first_reading": None,
+                        "last_reading": None,
+                        "quality_tiers": [],
+                    },
+                )
+                source = provider["sources"].setdefault(
+                    source_id,
+                    {
+                        "source_id": source_id,
+                        "resolution": resolution,
+                        "quality_tier": _quality_tier_for_resolution(resolution),
+                        "days": 0,
+                        "intervals": 0,
+                        "first_reading": None,
+                        "last_reading": None,
+                    },
+                )
+                counts = {
+                    "solar_generation": int(solar or 0),
+                    "household_consumption": int(consumption or 0),
+                    "grid_import": int(grid_import or 0),
+                    "grid_export": int(grid_export or 0),
+                }
+                battery_suitable = counts["grid_import"] > 0 and counts["grid_export"] > 0
+                provider["days"][reading_date] = {
+                    "first": first,
+                    "last": last,
+                    "intervals": int(intervals or 0),
+                    "resolution": resolution,
+                    "quality_tier": _quality_tier_for_resolution(resolution),
+                    "measurement_counts": counts,
+                    "battery_suitable": battery_suitable,
+                }
+                source["days"] += 1
+                source["intervals"] += int(intervals or 0)
+                source["first_reading"] = min(filter(None, [source["first_reading"], first]), default=first)
+                source["last_reading"] = max(filter(None, [source["last_reading"], last]), default=last)
+                provider["first_reading"] = min(filter(None, [provider["first_reading"], first]), default=first)
+                provider["last_reading"] = max(filter(None, [provider["last_reading"], last]), default=last)
+                tier = _quality_tier_for_resolution(resolution)
+                if tier not in provider["quality_tiers"]:
+                    provider["quality_tiers"].append(tier)
+                for key, value in counts.items():
+                    measurement_totals[key] += value
+            jobs = self.get_historical_backfill_jobs(limit=10)
+            return {
+                "providers": providers,
+                "measurement_totals": measurement_totals,
+                "historical_backfill_jobs": jobs,
+                "quality_tiers": {
+                    "interval_grade": "Can support tariff-aware analysis and battery dispatch when import/export flows are present.",
+                    "daily_aggregate": "Useful for seasonal context, not for replaying battery dispatch.",
+                    "monthly_lifetime_aggregate": "Useful for long-term context only, not for tariff-aware battery dispatch.",
+                },
+            }
+
+        return self._with_connection(query)
+
+    def _historical_backfill_row(self, conn: sqlite3.Connection, household_id: str, job_id: str) -> Optional[dict[str, Any]]:
+        cursor = conn.execute(
+            """
+            SELECT *
+            FROM historical_backfill_jobs
+            WHERE household_id = ? AND job_id = ?
+            """,
+            (household_id, job_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        columns = [column[0] for column in cursor.description]
+        return self._historical_backfill_dict(dict(zip(columns, row)))
+
+    @staticmethod
+    def _historical_backfill_dict(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": row.get("job_id"),
+            "household_id": row.get("household_id"),
+            "provider_id": row.get("provider_id"),
+            "site_id": row.get("site_id"),
+            "range_preset": row.get("range_preset"),
+            "start_date": row.get("start_date"),
+            "end_date": row.get("end_date"),
+            "status": row.get("status"),
+            "resolution": row.get("resolution"),
+            "quality_tier": row.get("quality_tier"),
+            "data_types": _json_value(row.get("data_types_json"), []),
+            "progress": _json_value(row.get("progress_json"), {}),
+            "diagnostics": _json_value(row.get("diagnostics_json"), {}),
+            "warnings": _json_value(row.get("warnings_json"), []),
+            "cancel_requested": bool(row.get("cancel_requested")),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "completed_at": row.get("completed_at"),
+        }
 
     def import_synergy_bill(
         self,
@@ -3926,6 +4365,24 @@ def _observation_count_note(counts: dict[str, int], capability: str) -> str:
     if count <= 0:
         return ""
     return f"{count} source reading{'s' if count != 1 else ''} recorded."
+
+
+def _json_value(raw: Any, fallback: Any) -> Any:
+    if raw in (None, ""):
+        return fallback
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def _quality_tier_for_resolution(resolution: Any) -> str:
+    value = str(resolution or "").lower()
+    if "15" in value or "interval" in value or "quarter" in value:
+        return "interval_grade"
+    if "daily" in value:
+        return "daily_aggregate"
+    return "monthly_lifetime_aggregate"
 
 
 def _measurement_capability_sources(

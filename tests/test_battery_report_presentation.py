@@ -179,6 +179,42 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Overall recommendation", markup)
         self.assertIn("Projection assumes 15-year battery life, 2% annual degradation, 3% electricity price growth and current usage patterns.", markup)
 
+    def test_battery_comparison_renders_seasonal_model_when_history_exists(self):
+        seasonal_rows = []
+        for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+            seasonal_rows.extend(
+                [
+                    {"measurement_time": f"{day}T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 10.0, "grid_import_kwh": 0.0, "solar_generation_kwh": 14.0, "household_consumption_kwh": 8.0, "source_resolution": "interval_15m"},
+                    {"measurement_time": f"{day}T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 10.0, "solar_generation_kwh": 0.0, "household_consumption_kwh": 10.0, "source_resolution": "interval_15m"},
+                ]
+            )
+        for day in ("2026-07-01", "2026-07-02", "2026-07-03"):
+            seasonal_rows.extend(
+                [
+                    {"measurement_time": f"{day}T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0, "solar_generation_kwh": 8.0, "household_consumption_kwh": 5.0, "source_resolution": "interval_15m"},
+                    {"measurement_time": f"{day}T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0, "solar_generation_kwh": 0.0, "household_consumption_kwh": 5.0, "source_resolution": "interval_15m"},
+                ]
+            )
+
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+            seasonal_battery_intervals=seasonal_rows,
+        )
+        markup = report.scenario_analysis_html(analysis)
+
+        self.assertTrue(analysis["battery_comparison"]["seasonal_model"]["available"])
+        self.assertIn("confidence_model", analysis["battery_comparison"])
+        self.assertIn("Seasonal battery model", markup)
+        self.assertIn("Summer", markup)
+        self.assertIn("Winter", markup)
+        self.assertIn("Annual weighting", markup)
+        self.assertEqual(analysis["battery_investment"]["recommended_size"], analysis["battery_comparison"]["seasonal_model"]["annual_recommendation"]["capacity_kwh"])
+
     def test_battery_comparison_renders_limited_benefit_and_oversized_signals(self):
         analysis = report.scenario_analysis(
             summary(),
