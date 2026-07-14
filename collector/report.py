@@ -13,6 +13,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from collector_health import public_health
+from performance import (
+    BoundedHtmlCache,
+    current_context,
+    file_fingerprint,
+    increment as perf_increment,
+    latest_diagnostics,
+    memoize as perf_memoize,
+    performance_context,
+    record_timing as perf_record_timing,
+    settings_fingerprint,
+    stage as perf_stage,
+    timer_start as perf_timer_start,
+)
 from periods import LOCAL_TIMEZONE, Period, previous_equivalent, resolve_period
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +147,7 @@ COLLECT_LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
 DEMO_MODE = False
 DEMO_WEATHER_PATH: Optional[Path] = None
 DEMO_RECOMMENDATIONS_PATH: Optional[Path] = None
+LIVE_HTML_CACHE = BoundedHtmlCache(max_entries=8)
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 BUCKET_LABELS = {
@@ -158,6 +172,121 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
         report_path=REPORT_PATH,
         health_loader=public_health,
     )
+
+
+def performance_diagnostics() -> dict[str, Any]:
+    context = current_context()
+    return context.as_dict() if context is not None else latest_diagnostics()
+
+
+def clear_report_cache() -> None:
+    LIVE_HTML_CACHE.clear()
+
+
+def report_cache_signature(settings: "Settings") -> dict[str, Any]:
+    return perf_memoize("report_signature", "current", lambda: {
+        "database": database_content_signature(),
+        "settings": file_fingerprint(SETTINGS_PATH),
+        "timeline": file_fingerprint(household_timeline_path()),
+        "settings_hash": settings_fingerprint(settings),
+    })
+
+
+def database_content_signature() -> dict[str, Any]:
+    if not DB_PATH.exists():
+        return {"missing": True}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            household_row = conn.execute(
+                """
+                SELECT household_id
+                FROM households
+                WHERE is_default = 1
+                ORDER BY household_id
+                LIMIT 1
+                """
+            ).fetchone()
+            household_id = household_row[0] if household_row else "default_household"
+            readings = conn.execute(
+                """
+                SELECT COUNT(*), MIN(measurement_time), MAX(measurement_time)
+                FROM readings
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            ev_sessions = conn.execute(
+                """
+                SELECT COUNT(*), MIN(start_time), MAX(start_time), MAX(COALESCE(last_seen, end_time, start_time))
+                FROM ev_sessions
+                WHERE household_id = ?
+                """,
+                (household_id,),
+            ).fetchone()
+            return {
+                "readings": {
+                    "count": int((readings or [0])[0] or 0),
+                    "first": (readings or [None, None, None])[1],
+                    "latest": (readings or [None, None, None])[2],
+                },
+                "ev_sessions": {
+                    "count": int((ev_sessions or [0])[0] or 0),
+                    "first": (ev_sessions or [None, None, None, None])[1],
+                    "latest": (ev_sessions or [None, None, None, None])[2],
+                    "last_seen": (ev_sessions or [None, None, None, None])[3],
+                },
+            }
+    except (FileNotFoundError, RuntimeError, sqlite3.Error):
+        return file_fingerprint(DB_PATH)
+
+
+def period_payload(period: Period) -> dict[str, str]:
+    return {
+        "kind": period.kind,
+        "label": period.label,
+        "start": period.start.isoformat(),
+        "end": period.end.isoformat(),
+    }
+
+
+def request_cache_key(name: str, settings: "Settings", *parts: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "parts": parts,
+        "signature": report_cache_signature(settings),
+    }
+
+
+def load_measurements(conn: sqlite3.Connection, start: date, end: date, settings: "Settings"):
+    key = request_cache_key("measurements", settings, start.isoformat(), end.isoformat())
+
+    def loader():
+        measurements = data_engine(conn).get_measurements(start, end)
+        perf_increment(
+            "interval_rows_processed",
+            sum(1 for item in measurements if item.measurement_type == MeasurementType.GRID_IMPORT),
+        )
+        return measurements
+
+    with perf_stage("reading load"):
+        return perf_memoize("measurements", key, loader)
+
+
+def tariff_resolution_for_day(resolver: TariffResolver, day: date):
+    key = {"day": day.isoformat(), "resolver": id(resolver)}
+
+    def loader():
+        if hasattr(resolver, "resolve_with_context"):
+            return resolver.resolve_with_context(day)
+        return None
+
+    return perf_memoize("tariff_resolution", key, loader)
+
+
+def tariff_for_resolved_day(resolver: TariffResolver, day: date):
+    resolution = tariff_resolution_for_day(resolver, day)
+    tariff = resolution.tariff if resolution is not None else resolver.resolve(day)
+    return resolution, tariff
 
 
 def tariff_updates_path() -> Path:
@@ -681,6 +810,9 @@ def dashboard_data(
     current_day = today or local_today()
     settings = load_settings()
     selected = resolve_period(period_kind, settings, current_day, start, end)
+    if current_context() is None:
+        with performance_context(period_payload(selected)):
+            return dashboard_data(current_day, period_kind, start, end)
     billing = resolve_period("current_billing_period", settings, current_day)
     compared = (
         resolve_period("previous_billing_period", settings, current_day)
@@ -689,7 +821,9 @@ def dashboard_data(
     )
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
-    with sqlite3.connect(DB_PATH) as conn:
+    with perf_stage("database connection/setup"):
+        conn_context = sqlite3.connect(DB_PATH)
+    with conn_context as conn:
         validate_database(conn)
         context_engine = data_engine(conn)
         household_context = context_engine.get_household_context()
@@ -711,7 +845,8 @@ def dashboard_data(
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
         compared_trends = load_daily_trends(conn, compared.start, compared.end, settings)
         energy_timeline = build_energy_timeline(conn, current_day, settings, now=datetime.now(LOCAL_TIMEZONE))
-        health = health_data(conn, current_day, settings)
+        with perf_stage("provider/health diagnostics"):
+            health = health_data(conn, current_day, settings)
         capability_summary = context_engine.get_household_capability_summary(current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings, household_context)
         recommendations = active_recommendations(all_recommendations)
@@ -725,8 +860,9 @@ def dashboard_data(
         )
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
-        provider_observations = context_engine.get_provider_observation_summary()
-        promotion_summary = context_engine.promote_provider_observations()
+        with perf_stage("provider/health diagnostics"):
+            provider_observations = context_engine.get_provider_observation_summary()
+            promotion_summary = context_engine.promote_provider_observations()
         actual_bill_comparison = reconcile_latest_synergy_bill(conn, context_engine, settings, household_context)
         bill_reconciliation_summary = context_engine.get_bill_reconciliation_summary()
     scenarios = scenario_analysis(
@@ -1081,6 +1217,7 @@ def dashboard_data(
         "hidden_recommendations": [],
         "recommendation_lifecycle_counts": recommendation_lifecycle_counts,
         "health": health,
+        "performance_diagnostics": performance_diagnostics(),
         **({"demo": demo_metadata()} if DEMO_MODE else {}),
     }
 
@@ -1369,7 +1506,15 @@ def load_actual_ev_sessions(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[dict]:
     sources = actual_ev_sources(settings)
-    return data_engine(conn).get_ev_sessions(start, end, sources=sources)
+    key = request_cache_key("ev_sessions", settings, start.isoformat(), end.isoformat(), tuple(sources))
+
+    def loader():
+        with perf_stage("EV session/history loading"):
+            sessions = data_engine(conn).get_ev_sessions(start, end, sources=sources)
+        perf_increment("ev_sessions_loaded", len(sessions))
+        return sessions
+
+    return perf_memoize("ev_sessions", key, loader)
 
 
 def completed_ev_session(session: dict) -> bool:
@@ -1416,20 +1561,22 @@ def load_daily_ev_history(
     settings: Settings,
     estimated_by_day: Optional[dict[str, float]] = None,
 ) -> dict[str, dict[str, Any]]:
-    if actual_ev_sources(settings):
-        return daily_ev_history_from_sessions(load_completed_ev_sessions(conn, start, end, settings))
-    return {
-        day_text: {
-            "energy_kwh": float(value or 0.0),
-            "cost": financial_engine().cost_of_ev_session(
-                float(value or 0.0),
-                tariff_resolver(settings).resolve(date.fromisoformat(day_text)).usage_rate("overnight"),
-            ),
-            "source": "estimated",
-            "sessions": 0,
+    with perf_stage("EV session/history loading"):
+        if actual_ev_sources(settings):
+            return daily_ev_history_from_sessions(load_completed_ev_sessions(conn, start, end, settings))
+        resolver = tariff_resolver(settings)
+        return {
+            day_text: {
+                "energy_kwh": float(value or 0.0),
+                "cost": financial_engine().cost_of_ev_session(
+                    float(value or 0.0),
+                    tariff_for_resolved_day(resolver, date.fromisoformat(day_text))[1].usage_rate("overnight"),
+                ),
+                "source": "estimated",
+                "sessions": 0,
+            }
+            for day_text, value in (estimated_by_day or {}).items()
         }
-        for day_text, value in (estimated_by_day or {}).items()
-    }
 
 
 def ev_session_analytics(
@@ -1516,7 +1663,17 @@ def ev_session_analytics(
 
 
 def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
-    measurements = data_engine(conn).get_measurements(start, end)
+    key = request_cache_key("summary", settings, start.isoformat(), end.isoformat())
+    return perf_memoize("summary", key, lambda: _timed_load_summary(conn, start, end, settings))
+
+
+def _timed_load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
+    with perf_stage("mixed-tariff cost calculation"):
+        return _load_summary_uncached(conn, start, end, settings)
+
+
+def _load_summary_uncached(conn: sqlite3.Connection, start: date, end: date, settings: Settings) -> Summary:
+    measurements = load_measurements(conn, start, end, settings)
     resolver = tariff_resolver(settings)
     totals = measurement_totals(measurements)
     interval_timestamps = {
@@ -1536,12 +1693,8 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     fallback_intervals = 0
     for measurement in measurements:
         measurement_day = date.fromisoformat(measurement.timestamp[:10])
-        resolution = (
-            resolver.resolve_with_context(measurement_day)
-            if hasattr(resolver, "resolve_with_context")
-            else None
-        )
-        tariff = resolution.tariff if resolution is not None else resolver.resolve(measurement_day)
+        with perf_stage("tariff resolution"):
+            resolution, tariff = tariff_for_resolved_day(resolver, measurement_day)
         if measurement.measurement_type == MeasurementType.GRID_EXPORT:
             export_credit += finances.calculate_export_credit(float(measurement.value or 0.0), tariff.primary_export_rate)
             continue
@@ -1617,8 +1770,8 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     supply_cost = 0.0
     for offset in range(supply_days):
         day = start + timedelta(days=offset)
-        resolution = resolver.resolve_with_context(day) if hasattr(resolver, "resolve_with_context") else None
-        tariff = resolution.tariff if resolution is not None else resolver.resolve(day)
+        with perf_stage("tariff resolution"):
+            resolution, tariff = tariff_for_resolved_day(resolver, day)
         supply_cost += tariff.supply_charge_per_day
         key = resolution.event_id or tariff.version_id if resolution is not None else tariff.version_id
         entry = tariff_periods_used.setdefault(
@@ -1638,8 +1791,8 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         if measurement.measurement_type != MeasurementType.GRID_EXPORT:
             continue
         measurement_day = date.fromisoformat(measurement.timestamp[:10])
-        resolution = resolver.resolve_with_context(measurement_day) if hasattr(resolver, "resolve_with_context") else None
-        tariff = resolution.tariff if resolution is not None else resolver.resolve(measurement_day)
+        with perf_stage("tariff resolution"):
+            resolution, tariff = tariff_for_resolved_day(resolver, measurement_day)
         key = resolution.event_id or tariff.version_id if resolution is not None else tariff.version_id
         if key in tariff_periods_used:
             tariff_periods_used[key]["export_credit"] += finances.calculate_export_credit(float(measurement.value or 0.0), tariff.primary_export_rate)
@@ -1676,7 +1829,10 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         ev_charging_cost=(
             actual_ev_cost
             if actual_ev_cost is not None
-            else finances.cost_of_ev_session(float(estimated_ev_charging), resolver.resolve(end).usage_rate("overnight"))
+            else finances.cost_of_ev_session(
+                float(estimated_ev_charging),
+                tariff_for_resolved_day(resolver, end)[1].usage_rate("overnight"),
+            )
         ),
         ev_charging_source=(
             actual_source if actual_ev_charging is not None else "estimated"
@@ -1702,28 +1858,30 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
 
 
 def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
+    key = request_cache_key("battery_current_intervals", settings, start.isoformat(), end.isoformat())
+    return perf_memoize("battery_current_intervals", key, lambda: _battery_dispatch_intervals_uncached(engine, start, end, settings))
+
+
+def _battery_dispatch_intervals_uncached(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
     resolver = tariff_resolver(settings)
-    grid_rows = {
-        str(row.get("measurement_time")): row
-        for row in engine.get_grid_intervals(start, end)
-    }
-    solar_rows = {
-        str(row.get("measurement_time")): row
-        for row in engine.get_solar_intervals(start, end)
-    }
-    timestamps = sorted(set(grid_rows) | set(solar_rows))
     intervals = []
-    for timestamp in timestamps:
-        bucket = str(grid_rows.get(timestamp, {}).get("tariff_bucket") or "")
-        resolution = resolver.resolve_with_context(date.fromisoformat(timestamp[:10])) if hasattr(resolver, "resolve_with_context") else None
-        tariff = resolution.tariff if resolution is not None else resolver.resolve(date.fromisoformat(timestamp[:10]))
+    with perf_stage("battery current-period interval load"):
+        rows = engine.get_battery_interval_history(start, end)
+    perf_increment("battery_current_interval_rows", len(rows))
+    for row in rows:
+        timestamp = str(row.get("measurement_time") or "")
+        if not timestamp:
+            continue
+        bucket = str(row.get("tariff_bucket") or "")
+        with perf_stage("tariff resolution"):
+            resolution, tariff = tariff_for_resolved_day(resolver, date.fromisoformat(timestamp[:10]))
         intervals.append(
             {
             "measurement_time": timestamp,
             "tariff_bucket": bucket,
             "import_rate": tariff.usage_rate(bucket),
-            "grid_import_kwh": float(grid_rows.get(timestamp, {}).get("grid_to_home_kwh") or 0.0),
-            "solar_export_kwh": float(solar_rows.get(timestamp, {}).get("solar_to_grid_kwh") or 0.0),
+            "grid_import_kwh": float(row.get("grid_import_kwh") or 0.0),
+            "solar_export_kwh": float(row.get("solar_export_kwh") or 0.0),
             "tariff_version_id": tariff.version_id,
             "tariff_effective_from": tariff.effective_from.isoformat(),
             "tariff_name": tariff.tariff_name,
@@ -1735,15 +1893,23 @@ def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, setti
 
 
 def battery_historical_dispatch_intervals(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
+    key = request_cache_key("battery_seasonal_intervals", settings, start.isoformat(), end.isoformat())
+    return perf_memoize("battery_seasonal_intervals", key, lambda: _battery_historical_dispatch_intervals_uncached(engine, start, end, settings))
+
+
+def _battery_historical_dispatch_intervals_uncached(engine: DataEngine, start: date, end: date, settings: Settings) -> list[dict[str, Any]]:
     resolver = tariff_resolver(settings)
     intervals = []
-    for row in engine.get_battery_interval_history(start, end):
+    with perf_stage("seasonal history loading"):
+        rows = engine.get_battery_interval_history(start, end)
+    perf_increment("battery_seasonal_interval_rows", len(rows))
+    for row in rows:
         timestamp = str(row.get("measurement_time") or "")
         if not timestamp:
             continue
         bucket = str(row.get("tariff_bucket") or "")
-        resolution = resolver.resolve_with_context(date.fromisoformat(timestamp[:10])) if hasattr(resolver, "resolve_with_context") else None
-        tariff = resolution.tariff if resolution is not None else resolver.resolve(date.fromisoformat(timestamp[:10]))
+        with perf_stage("tariff resolution"):
+            resolution, tariff = tariff_for_resolved_day(resolver, date.fromisoformat(timestamp[:10]))
         intervals.append(
             {
                 **row,
@@ -1862,6 +2028,30 @@ def scenario_analysis(
     battery_intervals: Optional[list[dict[str, Any]]] = None,
     seasonal_battery_intervals: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
+    key = request_cache_key(
+        "scenario_analysis",
+        settings,
+        summary.start.isoformat(),
+        summary.end.isoformat(),
+        len(battery_intervals or []),
+        len(seasonal_battery_intervals or []),
+        summary.net_cost,
+        summary.grid_import_kwh,
+        summary.solar_exported_kwh,
+    )
+    return perf_memoize(
+        "scenario_analysis",
+        key,
+        lambda: _scenario_analysis_uncached(summary, settings, battery_intervals, seasonal_battery_intervals),
+    )
+
+
+def _scenario_analysis_uncached(
+    summary: Summary,
+    settings: Settings,
+    battery_intervals: Optional[list[dict[str, Any]]] = None,
+    seasonal_battery_intervals: Optional[list[dict[str, Any]]] = None,
+) -> dict:
     actual_bill = summary.net_cost
     ev_kwh = summary.ev_charging_kwh
     ev_actual_cost = summary.ev_charging_cost
@@ -1914,17 +2104,25 @@ def scenario_analysis(
         )
     )
 
-    battery_comparison = financial_engine().compare_home_battery_sizes(
-        battery_intervals or [],
-        settings,
-        baseline_bill=actual_bill,
-        baseline_grid_import_kwh=summary.grid_import_kwh,
-        baseline_solar_exported_kwh=summary.solar_exported_kwh,
-        tariff_version=current_tariff,
-        seasonal_intervals=seasonal_battery_intervals or [],
+    battery_stage = (
+        "annual/seasonal battery simulation"
+        if seasonal_battery_intervals
+        else "battery current-period simulation"
     )
+    with perf_stage(battery_stage):
+        perf_increment("battery_simulations_executed")
+        battery_comparison = financial_engine().compare_home_battery_sizes(
+            battery_intervals or [],
+            settings,
+            baseline_bill=actual_bill,
+            baseline_grid_import_kwh=summary.grid_import_kwh,
+            baseline_solar_exported_kwh=summary.solar_exported_kwh,
+            tariff_version=current_tariff,
+            seasonal_intervals=seasonal_battery_intervals or [],
+        )
     battery_recommendation = battery_comparison.get("battery_recommendation") or {}
-    battery_investment = battery_investment_analysis(battery_comparison, settings)
+    with perf_stage("battery investment calculation"):
+        battery_investment = battery_investment_analysis(battery_comparison, settings)
 
     ev_window_cost = ev_kwh * current_rates[cheapest_bucket]
     ev_window_savings = max(ev_actual_cost - ev_window_cost, 0.0)
@@ -2235,7 +2433,21 @@ def comparison_data(period_a: Period, period_b: Period, settings: Settings) -> d
 def load_daily_trends(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[DailyTrend]:
-    measurements = data_engine(conn).get_measurements(start, end)
+    key = request_cache_key("daily_trends", settings, start.isoformat(), end.isoformat())
+    return perf_memoize("daily_trends", key, lambda: _timed_load_daily_trends(conn, start, end, settings))
+
+
+def _timed_load_daily_trends(
+    conn: sqlite3.Connection, start: date, end: date, settings: Settings
+) -> list[DailyTrend]:
+    with perf_stage("daily aggregation"):
+        return _load_daily_trends_uncached(conn, start, end, settings)
+
+
+def _load_daily_trends_uncached(
+    conn: sqlite3.Connection, start: date, end: date, settings: Settings
+) -> list[DailyTrend]:
+    measurements = load_measurements(conn, start, end, settings)
     resolver = tariff_resolver(settings)
     rows: dict[str, dict[str, float]] = {}
     for measurement in measurements:
@@ -2250,7 +2462,8 @@ def load_daily_trends(
                 "ev_charging": 0.0,
             },
         )
-        tariff = resolver.resolve(date.fromisoformat(day_text))
+        with perf_stage("tariff resolution"):
+            _resolution, tariff = tariff_for_resolved_day(resolver, date.fromisoformat(day_text))
         if measurement.measurement_type == MeasurementType.GRID_IMPORT:
             kwh = float(measurement.value or 0.0)
             bucket = str(measurement.attributes.get("tariff_bucket") or "")
@@ -2277,7 +2490,8 @@ def load_daily_trends(
             (ev_history or {}).get("source")
             or (configured_actual_sources[0] if configured_actual_sources else "estimated")
         )
-        tariff = resolver.resolve(date.fromisoformat(day_text))
+        with perf_stage("tariff resolution"):
+            _resolution, tariff = tariff_for_resolved_day(resolver, date.fromisoformat(day_text))
         export_credit = float(row["exported"]) * tariff.primary_export_rate
         trends.append(
             DailyTrend(
@@ -10002,6 +10216,31 @@ def write_html(
     selected_period = selected_period or Period(
         "current_billing_period", "Current billing period", period_summary.start, period_summary.end
     )
+    if current_context() is None:
+        with performance_context(period_payload(selected_period)):
+            return write_html(
+                today_summary,
+                period_summary,
+                trends,
+                settings,
+                health,
+                recommendations,
+                selected_period,
+                comparison,
+                output_path=output_path,
+                timeline=timeline,
+                recommendation_lifecycle_counts=recommendation_lifecycle_counts,
+                hidden=hidden,
+                billing_summary=billing_summary,
+                glance_only=glance_only,
+                overnight_baseload_watts=overnight_baseload_watts,
+                provider_flash=provider_flash,
+                tariff_update_flash=tariff_update_flash,
+                historical_backfill_flash=historical_backfill_flash,
+                period_flash=period_flash,
+                runtime_check=runtime_check,
+                energy_timeline=energy_timeline,
+            )
     plan = plan_comparison(period_summary, settings)
     try:
         engine = data_engine()
@@ -10110,7 +10349,8 @@ def write_html(
         promotion_summary=promotion_summary,
         settings=settings,
     )
-    provider_runtime = provider_runtime_data()
+    with perf_stage("provider/health diagnostics"):
+        provider_runtime = provider_runtime_data()
     household_state = HouseholdStateEngine().build(
         today_summary=today_summary,
         billing_summary=billing_summary,
@@ -10326,6 +10566,7 @@ def write_html(
         recommendation_presentation=glance_recommendation,
     )
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
+    render_started = perf_timer_start()
     body_class = ' class="glance-only"' if glance_only else ""
     chrome_html = "" if glance_only else f"""
   {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
@@ -10436,6 +10677,7 @@ def write_html(
     body:has(.page:target) #home,
     body:has(#recommendations:target) #home,
     body:has(#timeline:target) #home,
+    body:has(#battery-investment:target) #home,
     body:has(#setup:target) #home,
     body:has(#imports:target) #home,
     body:has(#setup-billing:target) #home,
@@ -10451,6 +10693,7 @@ def write_html(
     body:has(#energy-score-explanation:target) #home,
     body:has(#home-goals:target) #whatif,
     body:has(#recommendations:target) #whatif,
+    body:has(#battery-investment:target) #whatif,
     body:has(#timeline:target) #analytics,
     body:has(#setup:target) #system,
     body:has(#imports:target) #system,
@@ -10908,7 +11151,7 @@ def write_html(
     .system-group .disclosure-body {{ padding-top:1px; }}
     .provider-status-card {{ margin-top:10px; padding:16px; background:#f8fbf9; border:1px solid var(--line); border-radius:14px; }}
     .provider-status-card.good {{ background:#f3fbf7; border-color:#cce9dc; }} .provider-status-card.bad {{ background:#fff5f3; border-color:#f0cec8; }} .provider-status-card.neutral {{ background:#fffaf0; border-color:#eeddb0; }}
-    .provider-status-card:target,.deep-link-target {{ outline:3px solid rgba(31,107,80,.32); scroll-margin-top:24px; }}
+    .provider-status-card:target,.deep-link-target:not(.page) {{ outline:3px solid rgba(31,107,80,.32); scroll-margin-top:24px; }}
     .provider-status-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }}
     .provider-status-head span {{ color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .provider-status-head strong {{ font-size:15px; }}
@@ -11111,6 +11354,7 @@ def write_html(
     .hero-note,.status-strip div {{ backdrop-filter:blur(18px); }}
     .top-nav {{ top:14px; justify-content:center; gap:6px; margin:18px 0 20px; padding:8px; border-radius:999px; background:rgba(255,255,255,.78); }}
     .top-nav a {{ padding:10px 14px; color:#5f6b67; background:transparent; border-color:transparent; transition:all .15s ease; white-space:nowrap; }}
+    .top-nav a:focus-visible,.mobile-shortcuts a:focus-visible {{ outline:3px solid #80bfa3; outline-offset:3px; border-radius:999px; }}
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
@@ -11120,6 +11364,7 @@ def write_html(
     body:has(#ev:target) .top-nav a[href="#ev"],
     body:has(#whatif:target) .top-nav a[href="#whatif"],
     body:has(#recommendations:target) .top-nav a[href="#whatif"],
+    body:has(#battery-investment:target) .top-nav a[href="#whatif"],
     body:has(#timeline:target) .top-nav a[href="#analytics"],
     body:has(#analytics:target) .top-nav a[href="#analytics"],
     body:has(#imports:target) .top-nav a[href="#system"],
@@ -11296,6 +11541,7 @@ def write_html(
 {"<script src='/assets/dashboard.js' defer></script>" if not glance_only else ""}
 </body></html>
 """
+    perf_record_timing("page-section rendering", render_started)
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(document, encoding="utf-8")
@@ -11316,13 +11562,45 @@ def build_live_html(
     settings = load_settings()
     current_day = local_today()
     selected = resolve_period(period_kind, settings, current_day, start, end)
+    if current_context() is None:
+        with performance_context(period_payload(selected)):
+            return build_live_html(
+                period_kind,
+                start=start,
+                end=end,
+                glance_only=glance_only,
+                provider_flash=provider_flash,
+                tariff_update_flash=tariff_update_flash,
+                historical_backfill_flash=historical_backfill_flash,
+                period_flash=period_flash,
+            )
+    cache_allowed = not any(
+        (provider_flash, tariff_update_flash, historical_backfill_flash, period_flash)
+    )
+    cache_key = json.dumps(
+        {
+            "period": period_payload(selected),
+            "glance_only": bool(glance_only),
+            "signature": report_cache_signature(settings),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    if cache_allowed:
+        cached = LIVE_HTML_CACHE.get(cache_key)
+        if cached is not None:
+            perf_increment("html_cache_hits")
+            return cached
+        perf_increment("html_cache_misses")
     billing = resolve_period("current_billing_period", settings, current_day)
     compared = (
         resolve_period("previous_billing_period", settings, current_day)
         if selected.kind == "current_billing_period"
         else previous_equivalent(selected)
     )
-    with sqlite3.connect(DB_PATH) as conn:
+    with perf_stage("database connection/setup"):
+        conn_context = sqlite3.connect(DB_PATH)
+    with conn_context as conn:
         validate_database(conn)
         today_summary = load_summary(conn, current_day, current_day, settings)
         selected_summary = load_summary(conn, selected.start, selected.end, settings)
@@ -11333,7 +11611,8 @@ def build_live_html(
         )
         compared_summary = load_summary(conn, compared.start, compared.end, settings)
         trends = load_daily_trends(conn, selected.start, selected.end, settings)
-        health = health_data(conn, current_day, settings)
+        with perf_stage("provider/health diagnostics"):
+            health = health_data(conn, current_day, settings)
         energy_timeline = build_energy_timeline(conn, current_day, settings, now=datetime.now(LOCAL_TIMEZONE))
         all_recommendations = load_recommendations(conn, selected_summary, settings)
         recommendations = active_recommendations(all_recommendations)
@@ -11349,7 +11628,7 @@ def build_live_html(
         timeline = data_engine(conn).persist_timeline_entries(timeline_candidates.entries)
         overnight_baseload_watts = data_engine(conn).get_overnight_baseload_watts(selected.start, selected.end)
     runtime_check = runtime_check_data()
-    return write_html(
+    html_document = write_html(
         today_summary,
         selected_summary,
         trends,
@@ -11372,21 +11651,31 @@ def build_live_html(
         runtime_check=runtime_check,
         energy_timeline=energy_timeline,
     )
+    if cache_allowed:
+        LIVE_HTML_CACHE.set(cache_key, html_document)
+    return html_document
 
 
 def generate_report(output_path: Optional[Path] = None) -> str:
     settings = load_settings()
     current_day = local_today()
     period_start, period_end = billing_period(current_day, settings)
+    selected = Period("current_billing_period", "Current billing period", period_start, period_end)
+    if current_context() is None:
+        with performance_context(period_payload(selected)):
+            return generate_report(output_path)
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with perf_stage("database connection/setup"):
+        conn_context = sqlite3.connect(DB_PATH)
+    with conn_context as conn:
         validate_database(conn)
         today_summary = load_summary(conn, current_day, current_day, settings)
         period_summary = load_summary(conn, period_start, period_end, settings)
         trends = load_daily_trends(conn, period_start, period_end, settings)
-        health = health_data(conn, current_day, settings)
+        with perf_stage("provider/health diagnostics"):
+            health = health_data(conn, current_day, settings)
         all_recommendations = load_recommendations(conn, period_summary, settings)
         recommendations = active_recommendations(all_recommendations)
         hidden = hidden_recommendations(all_recommendations)
@@ -11394,7 +11683,7 @@ def generate_report(output_path: Optional[Path] = None) -> str:
         previous = resolve_period("previous_billing_period", settings, current_day)
         previous_summary = load_summary(conn, previous.start, previous.end, settings)
         comparison = compare_summaries(
-            Period("current_billing_period", "Current billing period", period_start, period_end),
+            selected,
             period_summary,
             previous,
             previous_summary,

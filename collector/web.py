@@ -452,6 +452,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(self.compare_data(params))
             elif path == "/api/health":
                 self.send_json(live_health())
+            elif path == "/api/performance":
+                self.send_json(report.performance_diagnostics())
             elif path == "/api/runtime-check":
                 self.send_json({"runtime": runtime_check()})
             elif path == "/api/historical-coverage":
@@ -1264,6 +1266,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             summary = None
         result = report.check_tariff_updates(settings, summary)
         regenerate_dashboard_report()
+        report.clear_report_cache()
         status = str(result.get("status") or "checked")
         message = (
             "A tariff update is ready for review."
@@ -1290,6 +1293,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             raise ValueError(f"Unsupported tariff update action: {action}")
         regenerate_dashboard_report()
+        report.clear_report_cache()
         message = (
             "Approved. Future calculations from the effective date will use the new version; historical periods were not rewritten."
             if action == "approve"

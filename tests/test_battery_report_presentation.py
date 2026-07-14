@@ -200,6 +200,28 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Overall recommendation", markup)
         self.assertIn("Projection assumes 15-year battery life, 2% annual degradation, 3% electricity price growth and current usage patterns.", markup)
 
+    def test_battery_investment_anchor_link_targets_section_without_broken_anchor(self):
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+        )
+
+        markup = report.scenario_analysis_html(analysis)
+        report_source = (PROJECT_ROOT / "collector" / "report.py").read_text(encoding="utf-8")
+        dashboard_js = (PROJECT_ROOT / "collector" / "assets" / "dashboard.js").read_text(encoding="utf-8")
+
+        self.assertIn('<a href="#battery-investment">See estimated cost and payback</a>', markup)
+        self.assertIn('id="battery-investment"', markup)
+        self.assertNotIn('href="#home#battery-investment"', markup)
+        self.assertNotIn('href="/#battery-investment"', markup)
+        self.assertIn("body:has(#battery-investment:target) #whatif", report_source)
+        self.assertIn('a[href^="#"]', dashboard_js)
+        self.assertIn("scrollIntoView({ behavior: scrollBehavior", dashboard_js)
+
     def test_battery_comparison_renders_seasonal_model_when_history_exists(self):
         seasonal_rows = []
         for day in ("2026-01-01", "2026-01-02", "2026-01-03"):

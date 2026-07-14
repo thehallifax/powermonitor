@@ -188,6 +188,18 @@ Run those two commands whenever you want to regenerate and open the latest
 local dashboard. The HTML is self-contained, works offline, and includes print
 styles for saving a clean PDF from the browser.
 
+Benchmark report generation without changing dashboard output:
+
+```sh
+python3 collector/benchmark_report.py --period current_billing_period
+python3 collector/benchmark_report.py --period year_to_date
+python3 collector/benchmark_report.py --period last_12_months
+python3 collector/benchmark_report.py --period custom --start 2025-07-14 --end 2026-07-14
+```
+
+The benchmark prints privacy-safe JSON containing total runtime, stage timings,
+rows processed, SQLite statement count, and request-cache hit/miss status.
+
 The dashboard is split into local hash-routed pages with no external assets:
 `#home`, `#glance`, `#recommendations`, `#bills`, `#solar`, `#ev`, `#whatif`,
 `#timeline`, `#analytics`, and `#system`.

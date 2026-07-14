@@ -746,6 +746,12 @@ class DataEngine:
             ON ev_sessions(household_id, start_time)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ev_sessions_household_source_start
+            ON ev_sessions(household_id, source, start_time)
+            """
+        )
         conn.execute("DROP INDEX IF EXISTS idx_ev_sessions_transaction_id")
         conn.execute(
             """

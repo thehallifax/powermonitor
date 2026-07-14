@@ -10,7 +10,8 @@
       .replace(/'/g, "&#39;");
   }
 
-  function revealHashTarget() {
+  function revealHashTarget(options) {
+    const scrollBehavior = options && options.smooth ? "smooth" : "auto";
     document.querySelectorAll(".deep-link-target").forEach((item) => item.classList.remove("deep-link-target"));
     const id = decodeURIComponent((window.location.hash || "").slice(1));
     if (!id) return;
@@ -26,8 +27,24 @@
       if (current.tagName === "DETAILS") current.open = true;
       current = current.parentElement;
     }
-    target.classList.add("deep-link-target");
-    window.requestAnimationFrame(() => target.scrollIntoView({ block: "start", inline: "nearest" }));
+    if (!target.classList.contains("page")) {
+      target.classList.add("deep-link-target");
+    }
+    window.requestAnimationFrame(() => target.scrollIntoView({ behavior: scrollBehavior, block: "start", inline: "nearest" }));
+  }
+
+  function handleSamePageAnchorClick(event) {
+    const link = event.target.closest('a[href^="#"]');
+    if (!link) return;
+    const rawHash = link.getAttribute("href") || "";
+    if (rawHash.length <= 1) return;
+    const targetId = decodeURIComponent(rawHash.slice(1));
+    if (!document.getElementById(targetId)) return;
+    event.preventDefault();
+    if (window.location.hash !== rawHash) {
+      window.history.pushState(null, "", rawHash);
+    }
+    revealHashTarget({ smooth: true });
   }
 
   function payloadFromForm(form) {
@@ -241,8 +258,9 @@
 
   window.addEventListener("DOMContentLoaded", function () {
     revealHashTarget();
-    window.addEventListener("hashchange", revealHashTarget);
+    window.addEventListener("hashchange", () => revealHashTarget({ smooth: true }));
     window.addEventListener("load", revealHashTarget);
+    document.addEventListener("click", handleSamePageAnchorClick);
 
     document.querySelectorAll(".provider-config-form").forEach((form) => {
       form.addEventListener("submit", (event) => {
