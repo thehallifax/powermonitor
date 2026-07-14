@@ -1,5 +1,17 @@
 # Changelog
 
+## UX-006 - Decisions and Battery Experience Polish
+
+- Reworked the Decisions battery section around the primary purchase question:
+  recommendation summary and annual sizing comparison now appear first.
+- Moved current-period evidence, seasonal model details, and methodology into
+  collapsed sections so supporting evidence stays available without dominating
+  the page.
+- Tightened Decisions spacing, scenario card height, Recommendation Centre
+  hierarchy, and Today's Progress card alignment.
+- Reframed Background Checks as supporting evidence below active
+  recommendations.
+
 ## PROVIDER-004 - SolarEdge Historical Backfill and Seasonal Coverage
 
 - Added provider-neutral historical coverage and backfill job tracking, with

@@ -3938,9 +3938,10 @@ def advisor_centre_html(advisors: list[Advisor]) -> str:
     return f"""
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
-        <div><span class="eyebrow">Advisors</span><h2>Background checks</h2></div>
-        <p>{len(advisors)} active</p>
+        <div><span class="eyebrow">Supporting evidence</span><h2>Background checks</h2></div>
+        <p>{len(advisors)} checks</p>
       </div>
+      <p class="scenario-note">These checks explain confidence and missing context behind the recommendations above.</p>
       <div class="recommendation-grid">{''.join(cards)}</div>
     </section>
     """
@@ -4811,17 +4812,17 @@ def goals_progress_html(goals: list[GoalProgress], limit: Optional[int] = None) 
         progress = f"{goal.progress_pct}%" if goal.progress_pct is not None else "Unknown"
         cards.append(
             f"""
-            <article class="briefing-card {html.escape(goal_status_tone(goal))}">
+            <article class="briefing-card goal-progress-card {html.escape(goal_status_tone(goal))}">
+              <div class="goal-progress-topline">
+                <strong>{html.escape(progress)}</strong>
+                <span>{html.escape(goal.status.label)}</span>
+              </div>
               <div class="briefing-card-heading">
                 <span>{html.escape(goal.goal.outcome)}</span>
                 <strong>{html.escape(goal.confidence)} confidence</strong>
               </div>
               <h3>{html.escape(trust_wording(goal.goal.title))}</h3>
               <p>{html.escape(trust_wording(goal.summary))}</p>
-              <div class="briefing-meta">
-                <small>{html.escape(progress)}</small>
-                <small>{html.escape(goal.status.label)}</small>
-              </div>
             </article>
             """
         )
@@ -8865,16 +8866,22 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
 
     return f"""
     <div class="scenario-insights battery-comparison">
-      <div class="chart-heading"><h3>Home battery sizing</h3><span>Tariff-aware actual interval model</span></div>
+      <div class="chart-heading"><h3>Home battery sizing</h3><span>What battery should I buy?</span></div>
       {battery_primary_recommendation_html(comparison, tariff_name)}
-      {battery_annual_sizing_table_html(comparison) if primary_source == "annual_historical" else ""}
-      {battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source)}
-      {battery_seasonal_model_html(comparison.get("seasonal_model"))}
-      <p class="scenario-note">{html.escape(grid_explanation)}</p>
-      <p class="scenario-note">{html.escape(tariff_note)}</p>
-      <p class="scenario-note">Current-period battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the selected period pattern. Seasonal modelling replays only interval-grade historical import/export rows. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>
-      {battery_calculation_details_html(comparison)}
+      {battery_annual_sizing_table_html(comparison)}
+      {battery_accordion_html("Current billing period analysis", "Selected-period evidence", battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source))}
+      {battery_accordion_html("Seasonal battery model", "Historical context", battery_seasonal_model_html(comparison.get("seasonal_model")) or '<p class="scenario-note">Seasonal battery modelling needs interval-grade historical import/export data.</p>')}
+      {battery_accordion_html("Methodology", "Assumptions and calculation notes", f'<p class="scenario-note">{html.escape(grid_explanation)}</p><p class="scenario-note">{html.escape(tariff_note)}</p><p class="scenario-note">Current-period battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the selected period pattern. Seasonal modelling replays only interval-grade historical import/export rows. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>{battery_calculation_details_html(comparison)}')}
     </div>
+    """
+
+
+def battery_accordion_html(title: str, summary: str, body: str) -> str:
+    return f"""
+      <details class="battery-accordion">
+        <summary><span>{html.escape(title)}</span><small>{html.escape(summary)}</small></summary>
+        <div class="battery-accordion-body">{body}</div>
+      </details>
     """
 
 
@@ -8906,26 +8913,30 @@ def battery_primary_recommendation_html(comparison: dict, tariff_name: str) -> s
 
 def battery_annual_sizing_table_html(comparison: dict) -> str:
     model = comparison.get("seasonal_model") or {}
-    options = model.get("annual_options") or []
+    options = battery_investment_source_options(comparison)
     if not options:
         return ""
+    primary = comparison.get("battery_recommendation") or {}
+    recommended_size = float(primary.get("recommended_size_kwh") or (comparison.get("recommended") or {}).get("capacity_kwh") or 0.0)
     rows = "".join(
         f"""
-        <tr class="{'recommended' if option.get('recommended') else ''}">
+        <tr class="{'recommended' if option.get('recommended') or abs(float(option.get('capacity_kwh') or 0.0) - recommended_size) < 1e-9 else ''}">
           <td class="battery-size-cell"><strong>{html.escape(str(option.get("label") or ""))}</strong></td>
           <td class="battery-money-cell">{money(float(option.get("annualised_savings") or 0.0))}</td>
           <td class="battery-money-cell">{money(float(option.get("marginal_savings") or 0.0))}</td>
           <td class="battery-money-cell">{money(float(option.get("marginal_savings_to_next_capacity") or 0.0)) if option.get("marginal_savings_to_next_capacity") is not None else "n/a"}</td>
-          <td class="battery-recommendation-cell"><span class="battery-signal {'recommended' if option.get('recommended') else 'neutral'}">{html.escape(str(option.get("recommendation_signal") or ""))}</span></td>
+          <td class="battery-recommendation-cell"><span class="battery-signal {'recommended' if option.get('recommended') or abs(float(option.get('capacity_kwh') or 0.0) - recommended_size) < 1e-9 else 'neutral'}">{html.escape(str(option.get("recommendation_signal") or ("Recommended" if abs(float(option.get('capacity_kwh') or 0.0) - recommended_size) < 1e-9 else "Option")))}</span></td>
         </tr>
         """
         for option in options
     )
     return f"""
-      <table class="responsive-table battery-homeowner-table battery-annual-table">
-        <thead><tr><th>Battery</th><th>Estimated annual saving</th><th>Marginal gain</th><th>Next-size gain</th><th>Recommendation</th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
+      <div class="battery-table-wrap">
+        <table class="responsive-table battery-homeowner-table battery-annual-table">
+          <thead><tr><th>Battery</th><th>Estimated annual saving</th><th>Marginal gain</th><th>Next-size gain</th><th>Recommendation</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
       <p class="scenario-note">Annual values combine included seasons using transparent seasonal weighting. They are not selected-period bill savings.</p>
     """
 
@@ -8952,19 +8963,21 @@ def battery_current_period_result_html(rows: list[str], recommended: dict, grid_
           {battery_metric("Solar export left", kwh(float(opportunity.get("remaining_solar_export_kwh") or 0.0)), "After selected-period battery model")}
           {battery_metric("Next-size gain", money(float(opportunity.get("marginal_savings_to_next_capacity") or 0.0)), "Extra period saving from the next size")}
         </div>
-        <table class="responsive-table battery-homeowner-table">
-          <thead>
-            <tr>
-              <th>Battery</th>
-              <th>Period solar only</th>
-              <th>Period solar + grid</th>
-              <th>Extra period saving</th>
-              <th>Period bill</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>{''.join(rows)}</tbody>
-        </table>
+        <div class="battery-table-wrap">
+          <table class="responsive-table battery-homeowner-table">
+            <thead>
+              <tr>
+                <th>Battery</th>
+                <th>Period solar only</th>
+                <th>Period solar + grid</th>
+                <th>Extra period saving</th>
+                <th>Period bill</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+        </div>
       </div>
     """
 
@@ -9650,8 +9663,8 @@ def write_html(
     {whatif_page_html(scenarios, plan, recommendation_presentations, goals)}
     <div id="recommendations">
       {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.", parent="Decisions")}
-      {advisor_centre_html(advisor_explanations.active())}
       {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], [], goals, household_decisions)}
+      {advisor_centre_html(advisor_explanations.active())}
     </div>
   </section>
   <section id="analytics" class="page">
@@ -9898,6 +9911,12 @@ def write_html(
     .recommendation-controls form {{ display:flex; flex-wrap:wrap; gap:8px; margin:0; }}
     .recommendation-controls button {{ min-height:30px; padding:6px 9px; color:var(--deep-2); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font:inherit; font-size:11px; font-weight:750; cursor:pointer; }}
     .recommendation-controls button:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
+    .recommendation-centre-section {{ display:grid; gap:14px; }}
+    .recommendation-centre-section .section-title {{ margin:0; }}
+    .recommendation-centre-section .scenario-note {{ margin:0; }}
+    .recommendation-centre-section + .recommendation-centre-section {{ margin-top:16px; }}
+    .recommendation-centre-section:last-child .recommendation-card {{ padding:16px; background:#f8fbf9; }}
+    .recommendation-centre-section:last-child .recommendation-centre-heading strong {{ font-size:18px; letter-spacing:-.025em; }}
     .action-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; }}
     .action-card {{ padding:17px; background:#fff; border:1px solid var(--line); border-radius:16px; }}
     .action-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
@@ -9978,6 +9997,13 @@ def write_html(
     .briefing-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }}
     .briefing-grid.two-up {{ grid-template-columns:1fr 1fr; }}
     .briefing-card {{ padding:20px; background:#fff; border-radius:22px; box-shadow:inset 0 0 0 1px rgba(0,0,0,.04); }}
+    .goal-progress-card {{ display:grid; gap:10px; min-height:0; padding:16px; align-content:start; }}
+    .goal-progress-card .briefing-card-heading {{ align-items:center; }}
+    .goal-progress-card h3 {{ margin:0; font-size:17px; line-height:1.25; letter-spacing:-.02em; }}
+    .goal-progress-card p {{ font-size:12px; line-height:1.42; }}
+    .goal-progress-topline {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }}
+    .goal-progress-topline strong {{ color:var(--ink); font-size:28px; line-height:1; letter-spacing:-.045em; font-variant-numeric:tabular-nums; }}
+    .goal-progress-topline span {{ flex:0 1 auto; padding:4px 8px; color:#315f74; background:var(--blue-soft); border-radius:999px; font-size:9px; font-weight:850; letter-spacing:.06em; text-transform:uppercase; text-align:right; }}
     .household-insight-card {{ padding:20px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
     .household-trend-card,.household-record-card {{ padding:20px; background:#fff; border:1px solid var(--line); border-radius:18px; }}
     .household-record-card {{ background:#f8fbf9; border-color:#cce9dc; }}
@@ -10036,15 +10062,18 @@ def write_html(
     .bills-plan-hero small {{ color:var(--muted); font-size:12px; line-height:1.4; }}
     .bills-plan-hero.secondary {{ background:#f8fbf9; }}
     .bills-plan-outcome p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.4; }}
+    .scenario-section {{ display:grid; gap:14px; }}
+    .scenario-section .section-title {{ margin:0; }}
     .scenario-grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }}
-    .scenario-card {{ min-height:188px; padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
+    .scenario-card {{ min-height:154px; padding:16px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
     .scenario-card span {{ display:inline-block; padding:3px 7px; color:#315f74; background:var(--blue-soft); border-radius:99px; font-size:8px; font-weight:850; letter-spacing:.1em; text-transform:uppercase; }}
-    .scenario-card h3 {{ margin:12px 0 0; font-size:16px; line-height:1.25; }} .scenario-card strong {{ display:block; margin-top:18px; font-size:26px; letter-spacing:-.045em; }}
+    .scenario-card h3 {{ margin:10px 0 0; font-size:15px; line-height:1.25; }} .scenario-card strong {{ display:block; margin-top:13px; font-size:24px; letter-spacing:-.04em; }}
     .scenario-card p {{ margin:7px 0 0; color:var(--muted); font-size:11px; line-height:1.4; }}
     .scenario-card.good {{ border-color:#cce9dc; background:#f4fbf7; }} .scenario-card.good strong {{ color:#226b50; }}
     .scenario-card.bad {{ border-color:#f0cec8; background:#fff5f3; }} .scenario-card.bad strong {{ color:#a74334; }}
     .scenario-insights {{ margin-top:14px; padding:18px; background:#fffaf0; border:1px solid #eeddb0; border-radius:17px; }}
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
+    .battery-comparison {{ display:grid; gap:14px; }}
     .battery-conclusion {{ max-width:920px; color:#4c3f1f; font-size:14px; line-height:1.55; }}
     .battery-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:14px 0; }}
     .battery-metrics div,.battery-diagnostics .config-grid div {{ padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
@@ -10071,9 +10100,29 @@ def write_html(
     .battery-homeowner-table .battery-recommendation-cell {{ min-width:220px; }}
     .battery-homeowner-table tr.recommended td {{ font-weight:650; }}
     .battery-homeowner-table tr.baseline td {{ color:#58625e; }}
+    .battery-table-wrap,.battery-seasonal-table-wrap {{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }}
+    .battery-table-wrap .battery-homeowner-table,.battery-seasonal-table-wrap .battery-homeowner-table {{ min-width:760px; }}
+    .battery-annual-table {{ margin-top:2px; }}
+    .battery-annual-table th:nth-child(1),.battery-annual-table td:nth-child(1),
+    .battery-seasonal-table th:nth-child(1),.battery-seasonal-table td:nth-child(1) {{ width:22%; text-align:left; }}
+    .battery-annual-table th:nth-child(2),.battery-annual-table th:nth-child(3),.battery-annual-table th:nth-child(4),
+    .battery-annual-table td:nth-child(2),.battery-annual-table td:nth-child(3),.battery-annual-table td:nth-child(4),
+    .battery-seasonal-table th:nth-child(n+2),.battery-seasonal-table td:nth-child(n+2) {{ text-align:right; font-variant-numeric:tabular-nums; }}
+    .battery-annual-table th:nth-child(5),.battery-annual-table td:nth-child(5) {{ width:26%; text-align:left; }}
+    .battery-seasonal-table {{ min-width:980px; table-layout:auto; }}
+    .battery-seasonal-table th,.battery-seasonal-table td {{ white-space:nowrap; }}
+    .battery-current-period-result {{ display:grid; gap:10px; }}
     .battery-signal {{ display:inline-block; max-width:100%; padding:4px 9px; border:1px solid rgba(31,42,38,.12); border-radius:999px; font-size:10px; font-weight:850; line-height:1.2; white-space:nowrap; }}
     .battery-signal.neutral {{ color:#4f5b57; background:#f5f7f6; }}
     .battery-signal.recommended {{ color:#226b50; background:#e7f6ee; border-color:#b9dfcc; }}
+    .battery-accordion {{ overflow:hidden; background:#fff; border:1px solid #eeddb0; border-radius:14px; }}
+    .battery-accordion summary {{ display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; cursor:pointer; list-style:none; }}
+    .battery-accordion summary::-webkit-details-marker {{ display:none; }}
+    .battery-accordion summary span {{ color:#302611; font-size:15px; font-weight:850; letter-spacing:-.015em; }}
+    .battery-accordion summary small {{ color:#74571a; font-size:11px; font-weight:750; text-align:right; }}
+    .battery-accordion summary::after {{ content:"+"; display:grid; place-items:center; flex:0 0 24px; height:24px; color:#74571a; background:#fff7df; border-radius:999px; font-weight:900; }}
+    .battery-accordion[open] summary::after {{ content:"-"; }}
+    .battery-accordion-body {{ padding:0 16px 16px; border-top:1px solid rgba(238,221,176,.7); }}
     .battery-calculation-details {{ margin-top:12px; padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
     .battery-calculation-details summary {{ cursor:pointer; font-size:12px; font-weight:850; }}
     .battery-diagnostics-table {{ overflow-x:auto; margin-top:12px; }}
@@ -10441,6 +10490,10 @@ def write_html(
       .period-controls {{ padding:14px; }} .period-controls form {{ grid-template-columns:1fr; }} .period-controls button,.setup-config-form button,.import-form button {{ min-height:46px; }}
       .first-time-question {{ grid-template-columns:1fr; gap:10px; padding:14px; }}
       .disclosure-panel summary {{ align-items:flex-start; flex-direction:column; }} .disclosure-panel summary small {{ text-align:left; }} .disclosure-panel summary::after {{ position:absolute; right:17px; }}
+      .battery-accordion summary {{ align-items:flex-start; flex-direction:column; padding-right:48px; position:relative; }}
+      .battery-accordion summary small {{ text-align:left; }}
+      .battery-accordion summary::after {{ position:absolute; right:16px; top:14px; }}
+      .battery-table-wrap .battery-homeowner-table,.battery-seasonal-table-wrap .battery-homeowner-table {{ min-width:720px; }}
       .actual-ev-head {{ flex-direction:column; }} .actual-ev-metrics {{ grid-template-columns:1fr 1fr; }} .actual-ev-breakdown-row {{ grid-template-columns:1fr; gap:6px; }}
       .ev-session-grid,.ev-insight-metrics {{ grid-template-columns:1fr; }} .ev-tariff-row {{ grid-template-columns:1fr; gap:6px; }}
       .timeline-entry {{ grid-template-columns:1fr; gap:8px; padding:15px; }} .timeline-stamp {{ justify-content:flex-start; }} .timeline-meta small {{ width:100%; }}
