@@ -15,11 +15,12 @@ DEFAULT_QUOTES_PATH = PROJECT_ROOT / "config" / "battery_quotes.json"
 QUOTE_SCHEMA_VERSION = 1
 MAX_ACTIVE_QUOTES = 5
 
-BADGE_BEST_OVERALL = "⭐ Best overall value"
-BADGE_LOWEST_UPFRONT = "💰 Lowest upfront cost"
-BADGE_MAXIMUM_SAVINGS = "⚡ Maximum annual savings"
-BADGE_CLOSEST_FIT = "🎯 Closest capacity fit"
-BADGE_REQUIRES_CLARIFICATION = "⚠ Requires clarification"
+BADGE_BEST_OVERALL = "Best overall value"
+BADGE_LOWEST_UPFRONT = "Lowest upfront cost"
+BADGE_MAXIMUM_SAVINGS = "Highest projected long-term benefit"
+BADGE_CLOSEST_FIT = "Closest capacity match"
+BADGE_REQUIRES_CLARIFICATION = "Requires clarification"
+BADGE_SINGLE_QUOTE = "Add another quote to compare"
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class BatteryQuote:
     product_id: str = ""
     configured_modules: Optional[int] = None
     configured_capacity: Optional[float] = None
+    backup_included: bool = False
     inverter_included: bool = False
     backup_gateway_included: bool = False
     installation_scope: str = ""
@@ -52,6 +54,7 @@ class BatteryQuote:
             product_id=str(data.get("product_id") or ""),
             configured_modules=_optional_int(data.get("configured_modules")),
             configured_capacity=_optional_float(data.get("configured_capacity")),
+            backup_included=_bool(data.get("backup_included")),
             inverter_included=_bool(data.get("inverter_included")),
             backup_gateway_included=_bool(data.get("backup_gateway_included")),
             installation_scope=str(data.get("installation_scope") or ""),
@@ -144,12 +147,14 @@ def compare_battery_quotes(
     summary = quote_comparison_summary(comparisons)
     return {
         "recommended_capacity_kwh": recommended_capacity_kwh,
+        "comparison_ready": len(active_quotes) >= 2,
         "active_quote_count": len(active_quotes),
         "max_active_quotes": MAX_ACTIVE_QUOTES,
         "catalogue_products": quote_catalogue_options(catalogue),
         "quotes": [quote.as_dict() for quote in active_quotes],
         "comparisons": comparisons,
         "summary": summary,
+        "homeowner_summary": summary,
         "warnings": [] if len(active_quote_entries) <= MAX_ACTIVE_QUOTES else ["Only the first 5 active quotes are compared."],
     }
 
@@ -171,7 +176,7 @@ def compare_battery_quote(
     fifteen_year_savings = projected_savings(annual_saving, 15, assumptions)
     ten_year_net = ten_year_savings - net_price if net_price is not None else None
     fifteen_year_net = fifteen_year_savings - net_price if net_price is not None else None
-    missing = quote_missing_information(quote, product)
+    confirmation_questions = quote_confirmation_questions(quote, product)
     capacity_fit = capacity_fit_label(difference, difference_pct) if recommended_capacity_kwh else "Poor capacity fit"
     investment_score = score_investment(payback, fifteen_year_net)
     recommendation_score = score_recommendation(capacity_fit, payback, fifteen_year_net, net_price)
@@ -182,6 +187,7 @@ def compare_battery_quote(
         "quote_date": quote.quote_date,
         "product_id": quote.product_id,
         "product_name": product_name(product),
+        "technical_product_name": technical_product_name(product),
         "configured_modules": quote.configured_modules,
         "configured_capacity": round(capacity, 2),
         "usable_capacity": round(capacity, 2),
@@ -200,7 +206,12 @@ def compare_battery_quote(
         "recommendation_score": recommendation_score,
         "primary_badge": "",
         "badge_explanation": "",
-        "missing_information": missing,
+        "primary_verdict": "",
+        "verdict_explanation": "",
+        "homeowner_summary": "",
+        "confirmation_questions": confirmation_questions,
+        "missing_information": confirmation_questions,
+        "backup_included": quote.backup_included,
         "inverter_included": quote.inverter_included,
         "backup_gateway_included": quote.backup_gateway_included,
         "installation_scope": quote.installation_scope,
@@ -229,31 +240,52 @@ def quote_net_price(quote: BatteryQuote) -> Optional[float]:
 
 
 def quote_missing_information(quote: BatteryQuote, product: Optional[dict[str, Any]]) -> list[str]:
-    missing = []
+    return quote_confirmation_questions(quote, product)
+
+
+def quote_confirmation_questions(quote: BatteryQuote, product: Optional[dict[str, Any]]) -> list[str]:
+    questions = []
     if product is None:
-        missing.append("Product is not in the current battery catalogue.")
+        questions.append("Confirm the quoted battery product and usable capacity.")
     if not quote.inverter_included:
-        missing.append("Confirm whether a required inverter is included.")
+        questions.append("Confirm whether any required inverter is included.")
+    if product and product.get("backup_capable") and not quote.backup_included:
+        questions.append("Confirm whether backup capability is included.")
     if product and product.get("backup_capable") and not quote.backup_gateway_included:
-        missing.append("Confirm whether the backup gateway or controller is included.")
+        questions.append("Confirm whether the required gateway/controller is included.")
     if product and product.get("backup_capable") is None:
-        missing.append("Backup capability is unclear.")
+        questions.append("Confirm whether backup capability is included.")
     if not quote.warranty_notes:
-        missing.append("Warranty conditions are missing.")
+        questions.append("Confirm the battery warranty and installation workmanship warranty.")
     if quote.rebate is None:
-        missing.append("Rebate treatment is unclear.")
+        questions.append("Confirm whether the quoted price already includes the rebate.")
+    if not quote.installation_scope:
+        questions.append("Confirm whether switchboard or meter upgrades are included.")
     if quote.quoted_price is None:
-        missing.append("Quoted price is missing.")
-    return missing
+        questions.append("Confirm the total installed price shown on the quote.")
+    return questions
 
 
 def assign_quote_badges(comparisons: list[dict[str, Any]]) -> None:
     if not comparisons:
         return
+    if len(comparisons) == 1:
+        item = comparisons[0]
+        if item.get("net_price") is None or item.get("product_id") == "":
+            badge = BADGE_REQUIRES_CLARIFICATION
+            reason = "This quote needs price or product details before PowerMonitor can compare it confidently."
+        elif str(item.get("capacity_fit")) in {"Excellent fit", "Close fit"}:
+            badge = "Matches recommendation"
+            reason = "This quote is close to PowerMonitor's recommended usable battery capacity. Add another quote to compare value."
+        else:
+            badge = BADGE_SINGLE_QUOTE
+            reason = "This quote is shown against your PowerMonitor battery recommendation. Add another quote to compare value."
+        apply_verdict(item, badge, reason)
+        return
     priced = [item for item in comparisons if item.get("net_price") is not None]
     best = max(priced or comparisons, key=lambda item: item.get("recommendation_score") or 0)
     lowest = min(priced, key=lambda item: item["net_price"]) if priced else None
-    maximum = max(comparisons, key=lambda item: item.get("estimated_annual_bill_reduction") or 0)
+    maximum = max(comparisons, key=lambda item: item.get("fifteen_year_net_benefit") if item.get("fifteen_year_net_benefit") is not None else -10**12)
     closest = min(comparisons, key=lambda item: abs(float(item.get("capacity_difference_kwh") or 0.0)))
     for item in comparisons:
         if item.get("net_price") is None or item.get("product_id") == "":
@@ -267,31 +299,78 @@ def assign_quote_badges(comparisons: list[dict[str, Any]]) -> None:
             reason = "This quote has the lowest quoted net upfront cost after entered rebates and finance costs."
         elif item is maximum:
             badge = BADGE_MAXIMUM_SAVINGS
-            reason = "This quote is estimated to deliver the highest annual bill reduction using existing battery modelling."
+            reason = "This quote has the strongest projected 15-year benefit using existing battery modelling."
         elif item is closest:
             badge = BADGE_CLOSEST_FIT
             reason = "This quote is closest to PowerMonitor's recommended usable battery capacity."
         else:
-            badge = BADGE_REQUIRES_CLARIFICATION
-            reason = "Review inclusions, warranty, rebate and compatibility details before relying on this quote."
-        item["primary_badge"] = badge
-        item["badge_explanation"] = reason
+            badge, reason = fallback_value_verdict(item)
+        apply_verdict(item, badge, reason)
+
+
+def apply_verdict(item: dict[str, Any], verdict: str, explanation: str) -> None:
+    item["primary_badge"] = verdict
+    item["badge_explanation"] = explanation
+    item["primary_verdict"] = verdict
+    item["verdict_explanation"] = explanation
+    item["homeowner_summary"] = quote_homeowner_summary(item, verdict)
+
+
+def fallback_value_verdict(item: dict[str, Any]) -> tuple[str, str]:
+    payback = item.get("simple_payback_years")
+    fifteen = item.get("fifteen_year_net_benefit")
+    if payback is not None and float(payback) <= 10 and (fifteen is None or float(fifteen) >= 0):
+        return "Strong value", "This quote has a reasonable payback and projected long-term benefit for its capacity."
+    if payback is not None and float(payback) <= 15:
+        return "Reasonable value", "This quote may be reasonable, but another quote has a stronger price, fit or long-term benefit."
+    if str(item.get("capacity_fit")) == "Smaller than recommended":
+        return "Smaller than recommended", "This quote is below PowerMonitor's recommended usable battery capacity."
+    return "Higher cost for limited extra benefit", "This quote appears to offer less value than another quote for the current household usage."
+
+
+def quote_homeowner_summary(item: dict[str, Any], verdict: str) -> str:
+    capacity = float(item.get("usable_capacity") or 0.0)
+    fit = str(item.get("capacity_fit") or "capacity fit")
+    return f"{product_name_from_item(item)} is a {capacity:g} kWh quote with {fit.lower()}. Verdict: {verdict}."
 
 
 def quote_comparison_summary(comparisons: list[dict[str, Any]]) -> str:
     if not comparisons:
         return "Add up to 5 installer quotes to compare them against the existing battery recommendation."
+    if len(comparisons) == 1:
+        return "This quote is shown against your PowerMonitor battery recommendation. Add another quote to compare value."
     best = next((item for item in comparisons if item.get("primary_badge") == BADGE_BEST_OVERALL), comparisons[0])
     return (
-        f"{best['installer_name']} offers the best overall value. "
-        "It balances the modelled capacity fit, estimated savings and quoted net price using PowerMonitor's existing battery modelling."
+        f"{best['installer_name']} currently offers the best overall value. "
+        "It has the strongest combination of capacity fit, price, payback and projected long-term benefit from the quotes entered."
     )
 
 
 def product_name(product: Optional[dict[str, Any]]) -> str:
     if not product:
         return "Unknown product"
+    manufacturer = str(product.get("manufacturer") or "")
+    family = str(product.get("product_family") or "")
+    model = friendly_model_name(str(product.get("model_name") or ""))
+    if family and family.lower() not in model.lower():
+        return f"{manufacturer} {family}".strip()
+    return f"{manufacturer} {model}".strip()
+
+
+def technical_product_name(product: Optional[dict[str, Any]]) -> str:
+    if not product:
+        return "Unknown product"
     return f"{product.get('manufacturer', '')} {product.get('model_name', '')}".strip()
+
+
+def friendly_model_name(model: str) -> str:
+    cleaned = model.replace(" modular system", "").replace("Modular system", "").strip()
+    cleaned = cleaned.replace("BAT 8.0", "").strip()
+    return cleaned or model
+
+
+def product_name_from_item(item: dict[str, Any]) -> str:
+    return str(item.get("product_name") or item.get("installer_name") or "This quote")
 
 
 def compatibility_notes(product: Optional[dict[str, Any]]) -> list[str]:
@@ -317,9 +396,10 @@ def quote_catalogue_options(catalogue: BatteryCatalogue) -> list[dict[str, Any]]
         options.append(
             {
                 "product_id": product_id,
-                "label": f"{manufacturer} {model}".strip() or product_id,
+                "label": product_option_label(product),
                 "manufacturer": manufacturer,
                 "model_name": model,
+                "technical_model_name": model,
                 "modular": bool(product.get("modular")),
                 "module_capacity_kwh": _optional_float(product.get("module_capacity_kwh")),
                 "minimum_modules": _optional_int(product.get("minimum_modules")),
@@ -329,6 +409,18 @@ def quote_catalogue_options(catalogue: BatteryCatalogue) -> list[dict[str, Any]]
             }
         )
     return sorted(options, key=lambda item: item["label"].lower())
+
+
+def product_option_label(product: dict[str, Any]) -> str:
+    name = product_name(product)
+    if product.get("modular"):
+        module_size = _optional_float(product.get("module_capacity_kwh"))
+        if module_size:
+            return f"{name} - modular, {module_size:g} kWh per module"
+        return f"{name} - modular"
+    capacities = product.get("supported_system_capacities_kwh") or []
+    capacity = _optional_float(product.get("usable_capacity_kwh")) or (_optional_float(capacities[0]) if capacities else None)
+    return f"{name} - {capacity:g} kWh" if capacity else name
 
 
 def score_investment(payback: Optional[float], fifteen_year_net: Optional[float]) -> int:

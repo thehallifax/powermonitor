@@ -7,6 +7,7 @@ from engine.battery_catalogue import load_battery_catalogue
 from engine.battery_quotes import (
     BADGE_BEST_OVERALL,
     BADGE_REQUIRES_CLARIFICATION,
+    BADGE_SINGLE_QUOTE,
     BatteryQuote,
     BatteryQuoteStore,
     compare_battery_quotes,
@@ -52,6 +53,7 @@ def quote(**overrides) -> BatteryQuote:
         "product_id": "sigenergy_sigenstor_bat_8_au",
         "configured_modules": 2,
         "configured_capacity": 15.6,
+        "backup_included": True,
         "inverter_included": True,
         "backup_gateway_included": True,
         "installation_scope": "Battery installed beside switchboard.",
@@ -126,7 +128,10 @@ class BatteryQuoteTests(unittest.TestCase):
         self.assertEqual(by_id["quote_unclear"]["primary_badge"], BADGE_REQUIRES_CLARIFICATION)
         self.assertTrue(any(item["primary_badge"] == BADGE_BEST_OVERALL for item in comparisons["comparisons"]))
         self.assertTrue(all(item["primary_badge"] for item in comparisons["comparisons"]))
-        self.assertIn("battery modelling", comparisons["summary"])
+        self.assertTrue(comparisons["comparison_ready"])
+        self.assertIn("currently offers the best overall value", comparisons["summary"])
+        self.assertIn("primary_verdict", by_id["quote_value"])
+        self.assertIn("verdict_explanation", by_id["quote_value"])
 
     def test_missing_information_warns_without_penalising_calculations(self):
         catalogue = load_battery_catalogue()
@@ -138,10 +143,19 @@ class BatteryQuoteTests(unittest.TestCase):
         )
         comparison = result["comparisons"][0]
 
-        self.assertIn("Confirm whether a required inverter is included.", comparison["missing_information"])
-        self.assertIn("Warranty conditions are missing.", comparison["missing_information"])
+        self.assertIn("Confirm whether any required inverter is included.", comparison["confirmation_questions"])
+        self.assertIn("Confirm the battery warranty and installation workmanship warranty.", comparison["confirmation_questions"])
         self.assertAlmostEqual(comparison["estimated_annual_bill_reduction"], 1200.0)
         self.assertIsNotNone(comparison["simple_payback_years"])
+
+    def test_single_quote_uses_neutral_verdict_and_prompts_for_another_quote(self):
+        result = compare_battery_quotes([quote()], load_battery_catalogue(), 15.0, investment_fixture())
+        comparison = result["comparisons"][0]
+
+        self.assertFalse(result["comparison_ready"])
+        self.assertNotEqual(comparison["primary_verdict"], BADGE_BEST_OVERALL)
+        self.assertIn(comparison["primary_verdict"], {"Matches recommendation", BADGE_SINGLE_QUOTE})
+        self.assertIn("Add another quote to compare value", result["summary"])
 
     def test_quote_payload_is_api_safe_and_does_not_mutate_recommendation_outputs(self):
         catalogue = load_battery_catalogue()
@@ -161,12 +175,19 @@ class BatteryQuoteTests(unittest.TestCase):
 
         self.assertIn('id="battery-quotes"', markup)
         self.assertIn("Compare installer quotes", markup)
+        self.assertIn("battery-quote-card", markup)
         self.assertIn("Estimated annual saving", markup)
+        self.assertIn("Why PowerMonitor reached this result", markup)
         self.assertIn("Duplicate quote", markup)
         self.assertIn("Delete quote", markup)
         self.assertIn('action="/battery-quotes/save"', markup)
-        self.assertIn("battery-quote-table-wrap", markup)
-        self.assertIn(".battery-quote-form {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr));", css)
+        self.assertIn("Compare quote details", markup)
+        self.assertIn("More quote details", markup)
+        self.assertIn("Quote PDF upload is planned for a future version.", markup)
+        self.assertNotIn("investment_score", markup)
+        self.assertNotIn("recommendation_score", markup)
+        self.assertNotIn("★★★★★", markup)
+        self.assertIn(".battery-quote-form {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr));", css)
         self.assertIn(".battery-quote-form", css.split("@media (max-width:900px)", 1)[1])
 
     def test_quote_rendering_handles_absent_pricing_gracefully(self):
@@ -178,8 +199,35 @@ class BatteryQuoteTests(unittest.TestCase):
         )
         markup = report.battery_quote_comparison_html(result)
 
-        self.assertIn("Missing", markup)
+        self.assertIn("Confirm with installer", markup)
         self.assertIn("Requires clarification", markup)
+
+    def test_simplified_form_hides_advanced_fields_and_preserves_old_values(self):
+        item = quote(homeowner_notes="Old homeowner note").as_dict()
+        item.update({"usable_capacity": 15.6})
+        products = compare_battery_quotes([], load_battery_catalogue(), 15.0, investment_fixture())["catalogue_products"]
+        markup = report.battery_quote_form_html(item, products, "Save quote")
+
+        self.assertIn("Total quoted price", markup)
+        self.assertIn("Enter the total installed price shown on the quote.", markup)
+        self.assertIn("Enter the rebate separately only if it is not already included", markup)
+        self.assertIn("More quote details", markup)
+        self.assertIn("Finance cost", markup)
+        self.assertIn("Warranty notes", markup)
+        self.assertIn('name="homeowner_notes" value="Old homeowner note"', markup)
+
+    def test_homeowner_friendly_product_labels_and_modular_capacity_display(self):
+        result = compare_battery_quotes([], load_battery_catalogue(), 15.0, investment_fixture())
+        labels = [item["label"] for item in result["catalogue_products"]]
+
+        self.assertTrue(any("Tesla Powerwall 3 - 13.5 kWh" in label for label in labels))
+        self.assertTrue(any("Sigenergy SigenStor - modular" in label for label in labels))
+        self.assertTrue(any("kWh per module" in label for label in labels))
+
+        markup = report.battery_quote_form_html({}, result["catalogue_products"], "Add quote")
+        self.assertIn("data-module-size", markup)
+        self.assertIn("Configured usable capacity", markup)
+        self.assertIn("data-capacity-display", markup)
 
 
 if __name__ == "__main__":

@@ -10371,7 +10371,7 @@ def battery_quote_comparison_html(quote_comparison: Optional[dict]) -> str:
         </div>
         """
     rows = "".join(battery_quote_table_row_html(item) for item in comparisons)
-    details = "".join(battery_quote_detail_html(item, products) for item in comparisons)
+    cards = "".join(battery_quote_card_html(item) for item in comparisons)
     edit_forms = "".join(
         f"""
         <details class="battery-quote-editor">
@@ -10385,36 +10385,104 @@ def battery_quote_comparison_html(quote_comparison: Optional[dict]) -> str:
     <div class="battery-quote-comparison" id="battery-quotes">
       <div class="chart-heading"><h3>Compare installer quotes</h3><span>{int(quote_comparison.get("active_quote_count") or 0)} of {int(quote_comparison.get("max_active_quotes") or 5)} quotes</span></div>
       <p class="battery-conclusion">{html.escape(str(quote_comparison.get("summary") or ""))}</p>
-      <div class="battery-quote-table-wrap">
-        <table class="responsive-table battery-quote-table">
-          <thead><tr><th>Installer</th><th>Product</th><th>Configured capacity</th><th>Quoted price</th><th>Estimated annual saving</th><th>Simple payback</th><th>15-year benefit</th><th>Capacity fit</th><th>Recommendation</th></tr></thead>
-          <tbody>{rows}</tbody>
-        </table>
-      </div>
-      <div class="battery-quote-details">{details}</div>
+      <div class="battery-quote-card-grid">{cards}</div>
+      <details class="battery-quote-detail-table">
+        <summary>Compare quote details</summary>
+        <div class="battery-quote-table-wrap">
+          <table class="responsive-table battery-quote-table">
+            <thead><tr><th>Installer</th><th>Product</th><th>Capacity</th><th>Total price</th><th>Estimated annual saving</th><th>Payback</th><th>15-year benefit</th><th>Capacity match</th><th>Verdict</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+      </details>
       {add_form}
+      <p class="scenario-note">Quote PDF upload is planned for a future version.</p>
       <div class="battery-quote-editors">{edit_forms}</div>
     </div>
     """
+
+
+def battery_quote_card_html(item: dict[str, Any]) -> str:
+    payback = item.get("simple_payback_years")
+    quoted = item.get("quoted_price")
+    net_price = item.get("net_price")
+    confirmation = item.get("confirmation_questions") or item.get("missing_information") or []
+    product = str(item.get("product_name") or "Unknown product")
+    capacity = float(item.get("usable_capacity") or item.get("configured_capacity") or 0.0)
+    recommended_size = capacity - float(item.get("capacity_difference_kwh") or 0.0)
+    fit_sentence = quote_capacity_fit_sentence(item, recommended_size)
+    confirmation_html = (
+        f"""
+        <div class="battery-quote-confirmations">
+          <strong>Details to confirm</strong>
+          <ul>{"".join(f"<li>{html.escape(str(question))}</li>" for question in confirmation)}</ul>
+        </div>
+        """
+        if confirmation
+        else '<p class="scenario-note">No missing quote details detected.</p>'
+    )
+    return f"""
+      <article class="battery-quote-card">
+        <span>{html.escape(str(item.get("primary_verdict") or item.get("primary_badge") or "Quote"))}</span>
+        <h4>{html.escape(str(item.get("installer_name") or "Unnamed installer"))}</h4>
+        <p class="battery-quote-product">{html.escape(product)} - {capacity:g} kWh</p>
+        <div class="battery-quote-card-metrics">
+          {battery_quote_card_metric("Quoted price", money(float(quoted)) if quoted is not None else "Confirm with installer")}
+          {battery_quote_card_metric("Net price after rebate", money(float(net_price)) if net_price is not None else "Confirm with installer")}
+          {battery_quote_card_metric("Estimated annual saving", money(float(item.get("estimated_annual_bill_reduction") or 0.0)))}
+          {battery_quote_card_metric("Simple payback", f"{float(payback):.1f} years" if payback is not None else "Confirm with installer")}
+        </div>
+        <p class="battery-quote-fit">{html.escape(fit_sentence)}</p>
+        <p class="battery-quote-verdict"><strong>Verdict:</strong> {html.escape(str(item.get("primary_verdict") or item.get("primary_badge") or ""))}</p>
+        {confirmation_html}
+        <details class="battery-quote-reasoning">
+          <summary>Why PowerMonitor reached this result</summary>
+          <p>{html.escape(str(item.get("verdict_explanation") or item.get("badge_explanation") or ""))}</p>
+          <div class="battery-quote-detail-grid">
+            {battery_quote_detail_field("Warranty", str(item.get("warranty_notes") or "Confirm with installer"))}
+            {battery_quote_detail_field("Backup", "Included" if item.get("backup_included") else "Confirm with installer")}
+            {battery_quote_detail_field("Gateway/controller", "Included" if item.get("backup_gateway_included") else "Confirm with installer")}
+            {battery_quote_detail_field("Installation scope", str(item.get("installation_scope") or "Confirm with installer"))}
+            {battery_quote_detail_field("Monitoring", "Included" if item.get("monitoring_included") else "Confirm with installer")}
+            {battery_quote_detail_field("Compatibility notes", "; ".join(str(note) for note in item.get("compatibility_notes") or []))}
+          </div>
+          <div class="battery-quote-actions">
+            <form method="post" action="/battery-quotes/duplicate"><input type="hidden" name="quote_id" value="{html.escape(str(item.get("quote_id") or ""))}"><button type="submit">Duplicate quote</button></form>
+            <form method="post" action="/battery-quotes/delete"><input type="hidden" name="quote_id" value="{html.escape(str(item.get("quote_id") or ""))}"><button type="submit">Delete quote</button></form>
+          </div>
+        </details>
+      </article>
+    """
+
+
+def battery_quote_card_metric(label: str, value: str) -> str:
+    return f"<div><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>"
+
+
+def quote_capacity_fit_sentence(item: dict[str, Any], recommended_size: float) -> str:
+    fit = str(item.get("capacity_fit") or "Capacity match")
+    if recommended_size > 0:
+        return f"{fit} to your {recommended_size:g} kWh recommendation"
+    return fit
 
 
 def battery_quote_table_row_html(item: dict[str, Any]) -> str:
     payback = item.get("simple_payback_years")
     fifteen = item.get("fifteen_year_net_benefit")
     quoted = item.get("net_price")
-    warning_count = len(item.get("missing_information") or [])
-    warning_text = f"<small>{warning_count} detail{'s' if warning_count != 1 else ''} to confirm</small>" if warning_count else ""
+    questions = item.get("confirmation_questions") or item.get("missing_information") or []
+    warning_text = f"<small>{html.escape('; '.join(str(question) for question in questions[:2]))}</small>" if questions else ""
     return f"""
       <tr>
         <td><strong>{html.escape(str(item.get("installer_name") or "Unnamed installer"))}</strong>{warning_text}</td>
         <td>{html.escape(str(item.get("product_name") or "Unknown product"))}</td>
-        <td>{float(item.get("configured_capacity") or 0.0):g} kWh</td>
-        <td>{money(float(quoted)) if quoted is not None else "Missing"}</td>
+        <td>{float(item.get("usable_capacity") or item.get("configured_capacity") or 0.0):g} kWh</td>
+        <td>{money(float(quoted)) if quoted is not None else "Confirm with installer"}</td>
         <td>{money(float(item.get("estimated_annual_bill_reduction") or 0.0))}</td>
-        <td>{f"{float(payback):.1f} years" if payback is not None else "Not available"}</td>
-        <td>{signed_money(float(fifteen)) if fifteen is not None else "Not available"}</td>
+        <td>{f"{float(payback):.1f} years" if payback is not None else "Confirm with installer"}</td>
+        <td>{signed_money(float(fifteen)) if fifteen is not None else "Confirm with installer"}</td>
         <td>{html.escape(str(item.get("capacity_fit") or ""))}</td>
-        <td><span class="battery-quote-badge">{html.escape(str(item.get("primary_badge") or ""))}</span><small>{html.escape(str(item.get("badge_explanation") or ""))}</small></td>
+        <td><span class="battery-quote-badge">{html.escape(str(item.get("primary_verdict") or item.get("primary_badge") or ""))}</span><small>{html.escape(str(item.get("verdict_explanation") or item.get("badge_explanation") or ""))}</small></td>
       </tr>
     """
 
@@ -10449,29 +10517,40 @@ def battery_quote_detail_field(label: str, value: str) -> str:
 def battery_quote_form_html(item: dict[str, Any], products: list[dict[str, Any]], button_label: str) -> str:
     product_id = str(item.get("product_id") or "")
     product_options = ["<option value=\"\">Choose product</option>"]
+    selected_product = next((product for product in products if str(product.get("product_id") or "") == product_id), None)
+    selected_is_modular = bool(selected_product and selected_product.get("modular"))
     for product in products:
         selected = " selected" if str(product.get("product_id") or "") == product_id else ""
-        capacity_hint = product_capacity_hint(product)
-        label = f"{product.get('label') or product.get('product_id')} {capacity_hint}".strip()
-        product_options.append(f'<option value="{html.escape(str(product.get("product_id") or ""))}"{selected}>{html.escape(label)}</option>')
+        product_options.append(f'<option value="{html.escape(str(product.get("product_id") or ""))}" data-modular="{str(bool(product.get("modular"))).lower()}" data-module-size="{html.escape(str(product.get("module_capacity_kwh") or ""))}" data-capacity="{html.escape(str(product.get("usable_capacity_kwh") or ""))}"{selected}>{html.escape(str(product.get("label") or product.get("product_id")))}</option>')
+    capacity = item.get("usable_capacity") if item.get("usable_capacity") is not None else item.get("configured_capacity")
+    capacity_text = f"{float(capacity):g} kWh" if capacity not in (None, "") else "Choose a product"
+    notes_value = str(item.get("homeowner_notes") or "")
     return f"""
-      <form class="battery-quote-form" method="post" action="/battery-quotes/save">
+      <form class="battery-quote-form" method="post" action="/battery-quotes/save" data-battery-quote-form>
         <input type="hidden" name="quote_id" value="{html.escape(str(item.get("quote_id") or ""))}">
+        <input type="hidden" name="configured_capacity" value="{html.escape(str(item.get("configured_capacity") or ""))}" data-configured-capacity>
+        <input type="hidden" name="homeowner_notes" value="{html.escape(notes_value)}">
         <label><span>Installer</span><input name="installer_name" value="{html.escape(str(item.get("installer_name") or ""))}" maxlength="80"></label>
         <label><span>Quote date</span><input type="date" name="quote_date" value="{html.escape(str(item.get("quote_date") or ""))}"></label>
         <label><span>Product</span><select name="product_id">{"".join(product_options)}</select></label>
-        <label><span>Module count</span><input type="number" min="1" step="1" name="configured_modules" value="{html.escape(str(item.get("configured_modules") or ""))}"><small>Modular products calculate capacity from modules when saved.</small></label>
-        <label><span>Configured capacity</span><input type="number" min="0" step="0.1" name="configured_capacity" value="{html.escape(str(item.get("configured_capacity") or ""))}"></label>
-        <label><span>Quoted price</span><input type="number" min="0" step="1" name="quoted_price" value="{html.escape(str(item.get("quoted_price") if item.get("quoted_price") is not None else ""))}"></label>
-        <label><span>Rebate</span><input type="number" min="0" step="1" name="rebate" value="{html.escape(str(item.get("rebate") if item.get("rebate") is not None else ""))}"></label>
-        <label><span>Finance cost</span><input type="number" min="0" step="1" name="finance_cost" value="{html.escape(str(item.get("finance_cost") if item.get("finance_cost") is not None else ""))}"></label>
-        <label><span>Installation scope</span><input name="installation_scope" value="{html.escape(str(item.get("installation_scope") or ""))}"></label>
-        <label><span>Warranty notes</span><input name="warranty_notes" value="{html.escape(str(item.get("warranty_notes") or ""))}"></label>
-        <label><span>Installer notes</span><textarea name="installer_notes">{html.escape(str(item.get("installer_notes") or ""))}</textarea></label>
-        <label><span>Homeowner notes</span><textarea name="homeowner_notes">{html.escape(str(item.get("homeowner_notes") or ""))}</textarea></label>
-        <label class="battery-quote-check"><input type="checkbox" name="inverter_included" value="on"{" checked" if item.get("inverter_included") else ""}> <span>Inverter included</span></label>
-        <label class="battery-quote-check"><input type="checkbox" name="backup_gateway_included" value="on"{" checked" if item.get("backup_gateway_included") else ""}> <span>Backup gateway included</span></label>
-        <label class="battery-quote-check"><input type="checkbox" name="monitoring_included" value="on"{" checked" if item.get("monitoring_included") else ""}> <span>Monitoring included</span></label>
+        <label class="battery-quote-module-field{' visible' if selected_is_modular else ''}"><span>Module count</span><input type="number" min="1" step="1" name="configured_modules" value="{html.escape(str(item.get("configured_modules") or ""))}" data-module-count><small>PowerMonitor calculates usable capacity from the selected modules.</small></label>
+        <label class="battery-quote-capacity-confirm"><span>Configured usable capacity</span><input value="{html.escape(capacity_text)}" readonly data-capacity-display></label>
+        <label><span>Total quoted price</span><input type="number" min="0" step="1" name="quoted_price" value="{html.escape(str(item.get("quoted_price") if item.get("quoted_price") is not None else ""))}"><small>Enter the total installed price shown on the quote.</small></label>
+        <label><span>Rebate</span><input type="number" min="0" step="1" name="rebate" value="{html.escape(str(item.get("rebate") if item.get("rebate") is not None else ""))}"><small>Enter the rebate separately only if it is not already included in the quoted price.</small></label>
+        <label class="battery-quote-check"><input type="checkbox" name="backup_included" value="on"{" checked" if item.get("backup_included") else ""}> <span>Backup included</span><small>Tick this if the quote includes backup power during an outage.</small></label>
+        <label class="battery-quote-check"><input type="checkbox" name="backup_gateway_included" value="on"{" checked" if item.get("backup_gateway_included") else ""}> <span>Gateway/controller included</span><small>Tick this if the required gateway or battery controller is included.</small></label>
+        <label><span>Notes, optional</span><textarea name="installer_notes">{html.escape(str(item.get("installer_notes") or notes_value))}</textarea></label>
+        <details class="battery-quote-more-details">
+          <summary>More quote details</summary>
+          <div class="battery-quote-more-grid">
+            <label><span>Finance cost</span><input type="number" min="0" step="1" name="finance_cost" value="{html.escape(str(item.get("finance_cost") if item.get("finance_cost") is not None else ""))}"></label>
+            <label><span>Installation scope</span><input name="installation_scope" value="{html.escape(str(item.get("installation_scope") or ""))}"></label>
+            <label><span>Warranty notes</span><input name="warranty_notes" value="{html.escape(str(item.get("warranty_notes") or ""))}"></label>
+            <label class="battery-quote-check"><input type="checkbox" name="monitoring_included" value="on"{" checked" if item.get("monitoring_included") else ""}> <span>Monitoring included</span></label>
+            <label class="battery-quote-check"><input type="checkbox" name="inverter_included" value="on"{" checked" if item.get("inverter_included") else ""}> <span>Inverter included</span></label>
+            <label><span>Additional installer notes</span><textarea name="homeowner_notes">{html.escape(notes_value)}</textarea></label>
+          </div>
+        </details>
         <div class="battery-quote-form-actions"><button type="submit">{html.escape(button_label)}</button></div>
       </form>
     """
@@ -11949,9 +12028,19 @@ def write_html(
     .battery-quote-table td:nth-child(3),.battery-quote-table td:nth-child(4),.battery-quote-table td:nth-child(5),.battery-quote-table td:nth-child(6),.battery-quote-table td:nth-child(7) {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }}
     .battery-quote-table small {{ display:block; margin-top:4px; color:#6e7a76; font-size:10px; line-height:1.3; }}
     .battery-quote-badge {{ display:inline-block; padding:4px 8px; color:#226b50; background:#e7f6ee; border:1px solid #b9dfcc; border-radius:999px; font-size:10px; font-weight:850; line-height:1.2; }}
-    .battery-quote-details,.battery-quote-editors {{ display:grid; gap:10px; }}
-    .battery-quote-detail,.battery-quote-editor {{ padding:12px; background:#fffdf7; border:1px solid #eeddb0; border-radius:12px; }}
-    .battery-quote-detail summary,.battery-quote-editor summary {{ cursor:pointer; color:#302611; font-size:12px; font-weight:850; }}
+    .battery-quote-card-grid,.battery-quote-editors {{ display:grid; gap:10px; }}
+    .battery-quote-card {{ display:grid; gap:10px; padding:15px; background:#fffdf7; border:1px solid #eeddb0; border-radius:12px; }}
+    .battery-quote-card span,.battery-quote-detail-grid span,.battery-quote-card-metrics span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .battery-quote-card h4 {{ margin:0; color:#1f2a26; font-size:17px; letter-spacing:-.02em; }}
+    .battery-quote-product,.battery-quote-fit,.battery-quote-verdict,.battery-quote-reasoning p {{ margin:0; color:#4c3f1f; font-size:12px; line-height:1.45; }}
+    .battery-quote-card-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }}
+    .battery-quote-card-metrics div {{ padding:9px; background:#fff; border:1px solid rgba(238,221,176,.75); border-radius:10px; }}
+    .battery-quote-card-metrics strong {{ display:block; margin-top:4px; color:#1f2a26; font-size:13px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }}
+    .battery-quote-confirmations {{ padding:10px 12px; background:#fffaf0; border:1px solid rgba(238,221,176,.9); border-radius:10px; }}
+    .battery-quote-confirmations strong {{ display:block; color:#302611; font-size:12px; }}
+    .battery-quote-confirmations ul {{ display:grid; gap:4px; margin:6px 0 0; padding-left:18px; color:#74571a; font-size:12px; line-height:1.4; }}
+    .battery-quote-detail-table,.battery-quote-editor,.battery-quote-reasoning,.battery-quote-more-details {{ padding:12px; background:#fffdf7; border:1px solid #eeddb0; border-radius:12px; }}
+    .battery-quote-detail-table summary,.battery-quote-editor summary,.battery-quote-reasoning summary,.battery-quote-more-details summary {{ cursor:pointer; color:#302611; font-size:12px; font-weight:850; }}
     .battery-quote-detail-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:10px; }}
     .battery-quote-detail-grid div {{ min-width:0; padding:10px; background:#fff; border:1px solid rgba(238,221,176,.75); border-radius:10px; }}
     .battery-quote-detail-grid span,.battery-quote-detail-grid strong {{ display:block; }}
@@ -11962,7 +12051,7 @@ def write_html(
     .battery-quote-actions form {{ margin:0; }}
     .battery-quote-actions button,.battery-quote-form-actions button {{ min-height:36px; padding:8px 11px; color:#174b3d; background:#fff; border:1px solid var(--line); border-radius:10px; font:inherit; font-size:12px; font-weight:800; cursor:pointer; }}
     .battery-quote-actions form:last-child button {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
-    .battery-quote-form {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; padding:12px; background:#fffdf7; border:1px solid #eeddb0; border-radius:12px; }}
+    .battery-quote-form {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; padding:12px; background:#fffdf7; border:1px solid #eeddb0; border-radius:12px; }}
     .battery-quote-form label {{ min-width:0; display:grid; gap:5px; align-content:start; padding:9px; background:#fff; border:1px solid rgba(238,221,176,.75); border-radius:10px; }}
     .battery-quote-form label span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .battery-quote-form input,.battery-quote-form select,.battery-quote-form textarea {{ width:100%; min-height:36px; padding:7px 9px; color:var(--ink); background:#f8fbf9; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:12px; }}
@@ -11970,6 +12059,10 @@ def write_html(
     .battery-quote-form small {{ color:#6e7a76; font-size:10px; line-height:1.3; }}
     .battery-quote-check {{ display:flex !important; flex-direction:row; align-items:center; gap:8px; }}
     .battery-quote-check input {{ width:auto; min-height:0; }}
+    .js .battery-quote-module-field {{ display:none !important; }}
+    .js .battery-quote-module-field.visible {{ display:grid !important; }}
+    .battery-quote-more-details {{ grid-column:1 / -1; }}
+    .battery-quote-more-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:10px; }}
     .battery-quote-form-actions {{ grid-column:1 / -1; margin-top:0; }}
     .battery-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:14px 0; }}
     .battery-metrics div,.battery-diagnostics .config-grid div {{ padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
@@ -12414,7 +12507,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics,.battery-tradeoff-grid,.battery-quote-detail-grid,.battery-quote-form,.tariff-update-hero,.tariff-decision-actions {{ grid-template-columns:1fr; }} .battery-quote-form-actions,.household-timeline-form .timeline-notes {{ grid-column:auto; }} .tariff-update-hero > strong {{ white-space:normal; }} .tariff-comparison-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics,.battery-tradeoff-grid,.battery-quote-card-metrics,.battery-quote-detail-grid,.battery-quote-form,.battery-quote-more-grid,.tariff-update-hero,.tariff-decision-actions {{ grid-template-columns:1fr; }} .battery-quote-form-actions,.battery-quote-more-details,.household-timeline-form .timeline-notes {{ grid-column:auto; }} .tariff-update-hero > strong {{ white-space:normal; }} .tariff-comparison-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

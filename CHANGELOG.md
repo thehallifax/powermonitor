@@ -1,5 +1,22 @@
 # Changelog
 
+## BAT-008A - Simplified Battery Quote Comparison UX
+
+- Simplified installer quote entry so the primary form asks for quote details a
+  homeowner is likely to have: installer, date, product, total price, rebate,
+  backup/gateway inclusions, module count when needed, and optional notes.
+- Moved less-common quote fields such as finance cost, warranty, installation
+  scope, monitoring, inverter and extra notes into a collapsed "More quote
+  details" section while preserving existing quote persistence.
+- Added homeowner quote cards ahead of the detailed table, with neutral
+  verdicts, confirmation questions, capacity fit, payback and long-term value
+  wording based on existing battery modelling.
+- Added explicit single-quote behaviour so one quote is shown against the
+  PowerMonitor recommendation without awarding a comparative "best" verdict.
+- Kept the comparison table available behind "Compare quote details", added a
+  future PDF-upload note, and added regression coverage for simplified forms,
+  modular capacity display, verdicts, confirmation wording and hidden scores.
+
 ## UX-018 - Decisions and Provider Experience
 
 - Reworked Decisions so the page now leads with "What this means", then
