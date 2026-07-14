@@ -93,8 +93,8 @@ events such as `tariff_period`, `solar_installation`, `battery_installation`,
 Each event records an id, type, title, effective start/end dates, source,
 confidence, optional notes, creation/update timestamps, active state, metadata,
 and checksum/version information where useful. Changes written through Settings
-append an audit record with previous values, new values, timestamp, action, and
-optional reason.
+append an audit record with previous values, new values, affected event IDs,
+timestamp, source, action, and optional reason.
 
 Only `tariff_period` affects calculations today. A tariff period stores a stable
 tariff snapshot or catalogue-derived `TariffVersion` reference with provider,

@@ -1,4 +1,5 @@
 import json
+import io
 import sqlite3
 import sys
 import tempfile
@@ -7,6 +8,7 @@ from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR_DIR = PROJECT_ROOT / "collector"
@@ -16,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
+import web
 from engine.financial_engine import FinancialEngine
 from engine.household_timeline import (
     HouseholdTimeline,
@@ -157,6 +160,8 @@ class HouseholdTimelineTests(unittest.TestCase):
             self.assertEqual(len(saved["events"]), 2)
             self.assertEqual(audit_record["action"], "test_save")
             self.assertEqual(audit_record["reason"], "unit test")
+            self.assertEqual(audit_record["affected_event_ids"], ["ev", "flat"])
+            self.assertEqual(audit_record["source"], "settings")
 
     def test_interval_cost_before_and_after_tariff_change(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -200,14 +205,133 @@ class HouseholdTimelineTests(unittest.TestCase):
         self.assertGreater(by_day["2026-05-01"]["grid_energy_used_to_charge_battery_kwh"], 0.0)
         self.assertEqual(len(comparison["tariff_periods_used"]), 2)
 
-    def test_settings_timeline_presentation_and_delete_confirmation(self):
-        markup = report.household_timeline_html(settings())
+    def test_settings_timeline_presentation_is_read_only_until_action_selected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timeline_path = Path(temp_dir) / "household_timeline.json"
+            timeline_path.write_text(json.dumps(mixed_timeline().as_dict()), encoding="utf-8")
+            with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", timeline_path):
+                markup = report.household_timeline_html(settings())
 
-        self.assertIn("Household timeline", markup)
+        self.assertIn("Home energy history", markup)
+        self.assertIn("Current tariff", markup)
+        self.assertIn("Previous tariff", markup)
+        self.assertIn("Edit details", markup)
+        self.assertIn("Change tariff", markup)
+        self.assertIn("Edit previous tariff", markup)
+        self.assertNotIn("End current period", markup)
+        self.assertNotIn("Edit event", markup)
         self.assertIn("Add previous tariff", markup)
-        self.assertIn("Edit event", markup)
-        self.assertIn("Delete event", markup)
+        self.assertIn("value=\"2026-04-30\"", markup)
+        self.assertIn("Deleting this tariff period may cause PowerMonitor to use fallback rates", markup)
         self.assertIn("data-confirm", markup)
+
+    def test_inferred_timeline_wording_is_neutral_but_diagnostics_keep_provenance(self):
+        markup = report.household_timeline_html(settings())
+        primary_markup = markup.split("Diagnostics", 1)[0]
+
+        self.assertIn("Current settings", markup)
+        self.assertNotIn("Created from the current configured tariff because no household tariff timeline exists yet.", primary_markup)
+        self.assertIn("Created from current tariff settings.", primary_markup)
+        self.assertIn("inferred_current_settings", markup)
+        self.assertIn("Confirm timeline", markup)
+
+    def test_edit_current_tariff_start_date_and_overlap_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "household_timeline.json"
+            audit = Path(temp_dir) / "household_timeline_audit.jsonl"
+            path.write_text(json.dumps(mixed_timeline().as_dict()), encoding="utf-8")
+            with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", path), patch.object(web, "regenerate_dashboard_report", lambda: None):
+                run_timeline_post(
+                    "edit",
+                    {
+                        "event_id": "ev",
+                        "current_tariff": "1",
+                        "effective_from": "2026-05-02",
+                        "confidence": "high",
+                        "notes": "Corrected current start",
+                    },
+                )
+                updated = HouseholdTimelineStore(path, audit).load(settings())
+                current = updated.get_event("ev")
+                self.assertEqual(current.effective_from, date(2026, 5, 2))
+                self.assertIsNone(current.effective_to)
+                self.assertEqual(current.notes, "Corrected current start")
+
+                with self.assertRaisesRegex(HouseholdTimelineError, "overlap"):
+                    run_timeline_post(
+                        "edit",
+                        {
+                            "event_id": "ev",
+                            "current_tariff": "1",
+                            "effective_from": "2026-04-30",
+                            "confidence": "high",
+                        },
+                    )
+
+    def test_replace_current_tariff_closes_old_period_and_creates_one_current(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "household_timeline.json"
+            audit = Path(temp_dir) / "household_timeline_audit.jsonl"
+            path.write_text(json.dumps(mixed_timeline().as_dict()), encoding="utf-8")
+            with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", path), patch.object(web, "regenerate_dashboard_report", lambda: None):
+                run_timeline_post(
+                    "replace-current",
+                    {
+                        "event_id": "ev",
+                        "plan_id": "synergy_home_plan",
+                        "effective_from": "2026-08-01",
+                        "provider": "Synergy",
+                        "notes": "Changed plan",
+                    },
+                )
+
+            updated = HouseholdTimelineStore(path, audit).load(settings())
+            old = updated.get_event("ev")
+            open_periods = [event for event in updated.tariff_periods() if event.effective_to is None]
+            self.assertEqual(old.effective_to, date(2026, 7, 31))
+            self.assertEqual(len(open_periods), 1)
+            self.assertEqual(open_periods[0].title, "Synergy Home Plan")
+            audit_actions = [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("replace_current_tariff", audit_actions)
+
+    def test_previous_tariff_edit_replaces_stable_tariff_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "household_timeline.json"
+            audit = Path(temp_dir) / "household_timeline_audit.jsonl"
+            path.write_text(json.dumps(mixed_timeline().as_dict()), encoding="utf-8")
+            with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", path), patch.object(web, "regenerate_dashboard_report", lambda: None):
+                run_timeline_post(
+                    "edit",
+                    {
+                        "event_id": "flat",
+                        "current_tariff": "0",
+                        "plan_id": "synergy_ev_add_on",
+                        "provider": "Synergy",
+                        "effective_from": "2026-04-01",
+                        "effective_to": "2026-04-30",
+                        "confidence": "high",
+                        "notes": "Corrected previous plan",
+                    },
+                )
+
+            updated = HouseholdTimelineStore(path, audit).load(settings())
+            previous = updated.get_event("flat")
+            self.assertEqual(previous.title, "Synergy EV Add On")
+            self.assertEqual(previous.tariff_version().tariff_name, "Synergy EV Add On")
+            self.assertEqual(previous.notes, "Corrected previous plan")
+
+    def test_confirm_inferred_timeline_removes_unresolved_primary_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "household_timeline.json"
+            audit = Path(temp_dir) / "household_timeline_audit.jsonl"
+            timeline = migrate_timeline_from_settings(settings())
+            path.write_text(json.dumps(timeline.as_dict()), encoding="utf-8")
+            with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", path), patch.object(web, "regenerate_dashboard_report", lambda: None):
+                run_timeline_post("confirm", {"event_id": "current_tariff"})
+
+            confirmed = HouseholdTimelineStore(path, audit).load(settings()).get_event("current_tariff")
+            self.assertEqual(confirmed.source, "manual_settings")
+            self.assertEqual(confirmed.notes, "Created from current tariff settings.")
 
     def test_api_safe_summary_payload_includes_tariff_resolution(self):
         summary = report.Summary(
@@ -247,6 +371,15 @@ class HouseholdTimelineTests(unittest.TestCase):
 
         self.assertIn("tariff_resolution", payload)
         self.assertEqual(payload["tariff_resolution"]["periods_used"][0]["tariff"]["tariff_name"], "Flat")
+
+
+def run_timeline_post(action: str, params: dict[str, str]) -> None:
+    body = urlencode(params).encode("utf-8")
+    handler = web.DashboardHandler.__new__(web.DashboardHandler)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler.redirect = lambda _location: None
+    handler.update_household_timeline(f"/household-timeline/{action}")
 
 
 def create_readings(conn) -> None:

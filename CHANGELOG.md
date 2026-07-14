@@ -1,5 +1,21 @@
 # Changelog
 
+## HOME-009 - Simplified Household Timeline Editing
+
+- Reframed Settings timeline management as Home energy history, with read-only
+  tariff cards by default and homeowner-facing actions for editing details,
+  changing tariff, editing previous tariffs, disabling, and deleting.
+- Added a single Change tariff workflow that closes the existing current tariff
+  on the previous local calendar day and creates one new open current tariff.
+- Added current-tariff confirmation/edit handling so inferred setup wording is
+  neutral in the primary card while provenance remains available in
+  diagnostics.
+- Expanded audit records with affected event IDs, previous values, new values,
+  timestamp, source, action, and optional reason.
+- Added regression coverage for read-only presentation, suggested previous
+  tariff dates, current start edits, overlap rejection, tariff replacement,
+  previous tariff edits, inferred-state confirmation, and audit metadata.
+
 ## HOME-008 - Household Timeline and Historical Tariff Periods
 
 - Added a provider-neutral Household Timeline with local JSON persistence,

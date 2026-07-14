@@ -5303,8 +5303,13 @@ def household_timeline_html(settings: Optional[Settings]) -> str:
         timeline = household_timeline(settings)
     except (HouseholdTimelineError, ValueError, OSError):
         return ""
-    events = sorted([event for event in timeline.events if event.active], key=lambda item: item.effective_from, reverse=True)
-    rows = "".join(household_timeline_event_html(event, timeline) for event in events) or '<p class="notice">No household timeline events have been added yet.</p>'
+    current_day = local_today()
+    events = sorted(
+        [event for event in timeline.events if event.active],
+        key=lambda item: (item.effective_to is None and item.event_type == "tariff_period", item.effective_from),
+        reverse=True,
+    )
+    rows = "".join(household_timeline_event_html(event, timeline, settings) for event in events) or '<p class="notice">No household history events have been added yet.</p>'
     gaps = timeline.tariff_gaps()
     gap_notice = ""
     if gaps:
@@ -5320,25 +5325,41 @@ def household_timeline_html(settings: Optional[Settings]) -> str:
           <ul>{gap_rows}</ul>
         </div>
         """
-    plan_options = "".join(
-        f'<option value="{html.escape(plan_id)}">{html.escape(plan.label)}</option>'
-        for plan_id, plan in SUPPORTED_PLANS.items()
-    )
+    active_tariff = next((event for event in timeline.tariff_periods() if event.effective_to is None), None)
+    suggested_previous_end = active_tariff.effective_from - timedelta(days=1) if active_tariff else None
+    suggested_text = ""
+    suggested_end_value = ""
+    if active_tariff and suggested_previous_end:
+        suggested_text = (
+            f"<p class=\"timeline-helper\">Current tariff starts {html.escape(display_date(active_tariff.effective_from))}. "
+            f"Suggested previous tariff end: {html.escape(display_date(suggested_previous_end))}.</p>"
+        )
+        suggested_end_value = suggested_previous_end.isoformat()
+    confirm_timeline = ""
+    if active_tariff and active_tariff.source.startswith("inferred"):
+        confirm_timeline = f"""
+        <form class="timeline-confirm-form" method="post" action="/household-timeline/confirm">
+          <input type="hidden" name="event_id" value="{html.escape(active_tariff.event_id)}">
+          <button type="submit">Confirm timeline</button>
+        </form>
+        """
     return f"""
     <section id="household-timeline" class="report-section setup-section household-timeline-section">
       <div class="section-title">
-        <div><span class="eyebrow">Settings</span><h2>Household timeline</h2></div>
-        <p>Tell PowerMonitor when important household conditions changed so historical analysis uses the right context.</p>
+        <div><span class="eyebrow">Settings</span><h2>Home energy history</h2></div>
+        <p>Tell PowerMonitor when plans or household conditions changed so historical analysis uses the right context.</p>
       </div>
       {gap_notice}
+      {confirm_timeline}
       <div class="household-timeline-list">{rows}</div>
-      <details class="battery-calculation-details household-timeline-editor" open>
+      <details class="battery-calculation-details household-timeline-editor">
         <summary>Add previous tariff</summary>
+        {suggested_text}
         <form class="setup-config-form household-timeline-form" method="post" action="/household-timeline/add-tariff">
           <label><span>Provider</span><input name="provider" value="{html.escape(str(settings.retailer or 'Synergy'))}"></label>
-          <label><span>Tariff plan</span><select name="plan_id">{plan_options}<option value="{MANUAL_TARIFF_ID}">Manual historical tariff</option></select></label>
+          <label><span>Tariff plan</span><select name="plan_id">{household_timeline_plan_options()}</select></label>
           <label><span>Effective from</span><input type="date" name="effective_from" required></label>
-          <label><span>Effective to</span><input type="date" name="effective_to"></label>
+          <label><span>Effective to</span><input type="date" name="effective_to" value="{html.escape(suggested_end_value)}"></label>
           <label><span>Manual tariff name</span><input name="manual_tariff_name" placeholder="Only for manual tariffs"></label>
           <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="supply_charge_per_day" value="{settings.supply_charge_per_day:.6f}"></label>
           <label><span>Export credit</span><input type="number" step="0.000001" min="0" name="export_credit_rate" value="{settings.export_credit_rate:.6f}"></label>
@@ -5375,57 +5396,129 @@ def household_timeline_html(settings: Optional[Settings]) -> str:
     """
 
 
-def household_timeline_event_html(event: HouseholdTimelineEvent, timeline: HouseholdTimeline) -> str:
+def household_timeline_event_html(event: HouseholdTimelineEvent, timeline: HouseholdTimeline, settings: Settings) -> str:
     current = event.event_type == "tariff_period" and event.effective_to is None
-    status = "Current" if current else "Previous" if event.event_type == "tariff_period" else event.event_type.replace("_", " ").title()
+    status = "Current tariff" if current else "Previous tariff" if event.event_type == "tariff_period" else event.event_type.replace("_", " ").title()
     date_text = (
         f"From {display_date(event.effective_from)}"
         if event.effective_to is None
         else f"{display_date(event.effective_from)} to {display_date(event.effective_to)}"
     )
     metadata = event.metadata.get("tariff") if isinstance(event.metadata, dict) else {}
-    rates = ""
+    diagnostics = ""
+    source_label = "Current settings" if event.source.startswith("inferred") else event.source.replace("_", " ").title()
     if isinstance(metadata, dict):
-        rates = f"<small>{html.escape(str(metadata.get('provider') or ''))} · {html.escape(str(metadata.get('version') or ''))}</small>"
-    disabled_confirm = "Disable this household timeline event? Historical calculations will stop using it."
-    delete_confirm = "Delete this household timeline event? This changes financial history and should only be done to correct an error."
-    end_form = ""
-    if current:
-        end_form = f"""
-        <form method="post" action="/household-timeline/end-current">
-          <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
-          <input type="date" name="effective_to" required>
-          <button type="submit" data-confirm="End this current tariff period?">End current period</button>
-        </form>
+        diagnostics = f"""
+        <details class="timeline-diagnostics">
+          <summary>Diagnostics</summary>
+          <pre>{html.escape(json.dumps(event.public_dict(), indent=2, sort_keys=True))}</pre>
+        </details>
         """
-    return f"""
-    <article class="timeline-entry compact household-timeline-event">
-      <div class="timeline-stamp"><span>{html.escape(status[:1])}</span><time>{html.escape(status)}</time></div>
-      <div>
-        <span>{html.escape(event.source.replace('_', ' '))}</span>
-        <h3>{html.escape(event.title)}</h3>
-        <p>{html.escape(date_text)}{(' · ' + html.escape(event.notes)) if event.notes else ''}</p>
-        {rates}
-        <div class="provider-action-row household-timeline-actions">
-          <form method="post" action="/household-timeline/edit">
+    disabled_confirm = "Disable this tariff period? PowerMonitor may use fallback rates for the affected historical dates."
+    delete_confirm = "Deleting this tariff period may cause PowerMonitor to use fallback rates for the affected dates."
+    edit_label = "Edit details" if current else "Edit previous tariff" if event.event_type == "tariff_period" else "Edit"
+    edit_form = household_timeline_edit_form(event, settings, current=current)
+    change_form = ""
+    if current:
+        tomorrow = local_today() + timedelta(days=1)
+        change_form = f"""
+        <details class="timeline-action-panel">
+          <summary>Change tariff</summary>
+          <p class="timeline-review">Choose the new tariff and start date. PowerMonitor will end {html.escape(event.title)} on the previous local calendar day and create one new current tariff.</p>
+          <form class="setup-config-form household-timeline-form" method="post" action="/household-timeline/replace-current">
             <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
-            <input type="date" name="effective_from" value="{event.effective_from.isoformat()}" required>
-            <input type="date" name="effective_to" value="{event.effective_to.isoformat() if event.effective_to else ''}">
-            <button type="submit" data-confirm="Update this household timeline event? Existing historical periods will be validated before saving.">Edit event</button>
+            <label><span>New tariff</span><select name="plan_id">{household_timeline_plan_options()}</select></label>
+            <label><span>New tariff starts</span><input type="date" name="effective_from" value="{tomorrow.isoformat()}" required></label>
+            <label><span>Provider</span><input name="provider" value="{html.escape(str(settings.retailer or 'Synergy'))}"></label>
+            <label><span>Manual tariff name</span><input name="manual_tariff_name" placeholder="Only for manual tariffs"></label>
+            <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="supply_charge_per_day" value="{settings.supply_charge_per_day:.6f}"></label>
+            <label><span>Export credit</span><input type="number" step="0.000001" min="0" name="export_credit_rate" value="{settings.export_credit_rate:.6f}"></label>
+            <label><span>Flat/import rate</span><input type="number" step="0.000001" min="0" name="flat_import_rate" value="{settings.import_rates.get('peak', 0.0):.6f}"></label>
+            <label class="timeline-notes"><span>Notes</span><input name="notes" placeholder="Optional"></label>
+            <div class="timeline-review">
+              <strong>Review before saving</strong>
+              <span>You are changing from {html.escape(event.title)}. The existing tariff will close the day before the new tariff starts. Historical calculations from that date will use the new tariff snapshot.</span>
+            </div>
+            <button type="submit" data-confirm="Change tariff? PowerMonitor will close the current tariff period and create a new current tariff. Historical calculations from the change date will use the new tariff.">Change tariff</button>
           </form>
-          {end_form}
+        </details>
+        """
+    card_class = "timeline-entry compact household-timeline-event"
+    if current:
+        card_class += " current-tariff-card"
+    elif event.event_type == "tariff_period":
+        card_class += " previous-tariff-card"
+    return f"""
+    <article class="{card_class}">
+      <div class="timeline-stamp"><span>{html.escape(status[:1])}</span><time>{html.escape('Current' if current else 'Previous' if event.event_type == 'tariff_period' else status)}</time></div>
+      <div class="timeline-card-body">
+        <span>{html.escape(status)}</span>
+        <h3>{html.escape(event.title)}</h3>
+        <p>{html.escape(date_text)}</p>
+        {f'<p class="timeline-note">{html.escape(event.notes)}</p>' if event.notes and not event.source.startswith("inferred") else ''}
+        <small class="timeline-source">{html.escape(source_label)}</small>
+        <div class="household-timeline-actions">
+          <details class="timeline-action-panel">
+            <summary>{html.escape(edit_label)}</summary>
+            {edit_form}
+          </details>
+          {change_form}
           <form method="post" action="/household-timeline/disable">
             <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
-            <button type="submit" data-confirm="{html.escape(disabled_confirm)}">Disable event</button>
+            <button type="submit" data-confirm="{html.escape(disabled_confirm)}">Disable</button>
           </form>
           <form method="post" action="/household-timeline/delete">
             <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
-            <button type="submit" data-confirm="{html.escape(delete_confirm)}">Delete event</button>
+            <button type="submit" data-confirm="{html.escape(delete_confirm)}">Delete</button>
           </form>
         </div>
+        {diagnostics}
       </div>
     </article>
     """
+
+
+def household_timeline_edit_form(event: HouseholdTimelineEvent, settings: Settings, *, current: bool) -> str:
+    metadata = event.metadata.get("tariff") if isinstance(event.metadata, dict) else {}
+    manual = isinstance(metadata, dict) and str(metadata.get("source_identifier") or "").startswith("manual")
+    note_value = "Created from current tariff settings." if event.source.startswith("inferred") else event.notes or ""
+    plan_fields = ""
+    if event.event_type == "tariff_period" and not current:
+        plan_fields = f"""
+          <label><span>Tariff plan</span><select name="plan_id">{household_timeline_plan_options(event.title)}</select></label>
+          <label><span>Provider</span><input name="provider" value="{html.escape(str(metadata.get('provider') if isinstance(metadata, dict) else settings.retailer or 'Synergy'))}"></label>
+          <label><span>Manual tariff name</span><input name="manual_tariff_name" value="{html.escape(event.title if manual else '')}" placeholder="Only for manual tariffs"></label>
+          <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="supply_charge_per_day" value="{float(metadata.get('supply_charge_per_day', settings.supply_charge_per_day)) if isinstance(metadata, dict) else settings.supply_charge_per_day:.6f}"></label>
+          <label><span>Export credit</span><input type="number" step="0.000001" min="0" name="export_credit_rate" value="{float((metadata.get('export_rates') or {}).get('standard', settings.export_credit_rate)) if isinstance(metadata, dict) else settings.export_credit_rate:.6f}"></label>
+          <label><span>Flat/import rate</span><input type="number" step="0.000001" min="0" name="flat_import_rate" value="{float((metadata.get('usage_rates') or {}).get('peak', settings.import_rates.get('peak', 0.0))) if isinstance(metadata, dict) else settings.import_rates.get('peak', 0.0):.6f}"></label>
+        """
+    end_field = "" if current else f'<label><span>Effective to</span><input type="date" name="effective_to" value="{event.effective_to.isoformat() if event.effective_to else ""}" required></label>'
+    confidence_selected = lambda value: " selected" if event.confidence == value else ""
+    return f"""
+        <form class="setup-config-form household-timeline-form" method="post" action="/household-timeline/edit">
+          <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
+          <input type="hidden" name="current_tariff" value="{'1' if current else '0'}">
+          {plan_fields}
+          <label><span>Effective from</span><input type="date" name="effective_from" value="{event.effective_from.isoformat()}" required></label>
+          {end_field}
+          <label><span>Confidence</span><select name="confidence">
+            <option value="high"{confidence_selected("high")}>High</option>
+            <option value="medium"{confidence_selected("medium")}>Medium</option>
+            <option value="low"{confidence_selected("low")}>Low</option>
+          </select></label>
+          <label class="timeline-notes"><span>Notes</span><input name="notes" value="{html.escape(note_value)}"></label>
+          <button type="submit" data-confirm="Update this tariff period? PowerMonitor will validate the dates before saving.">Save changes</button>
+        </form>
+    """
+
+
+def household_timeline_plan_options(selected_label: Optional[str] = None) -> str:
+    options = []
+    for plan_id, plan in SUPPORTED_PLANS.items():
+        selected = " selected" if selected_label and plan.label == selected_label else ""
+        options.append(f'<option value="{html.escape(plan_id)}"{selected}>{html.escape(plan.label)}</option>')
+    options.append(f'<option value="{MANUAL_TARIFF_ID}">Manual historical tariff</option>')
+    return "".join(options)
 
 
 def household_timeline_gap_label(start: date, end: Optional[date]) -> str:
@@ -10468,9 +10561,27 @@ def write_html(
     .timeline-meta {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
     .timeline-meta small {{ padding:6px 8px; color:var(--muted); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font-size:10px; }}
     .household-timeline-list,.household-history-list {{ display:grid; gap:12px; margin-bottom:14px; }}
-    .household-timeline-event small {{ display:block; margin-top:7px; color:var(--muted); font-size:11px; }}
-    .household-timeline-actions {{ margin-top:12px; }}
-    .household-timeline-actions form {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .current-tariff-card {{ border-color:#bfe7d1; background:#f3fbf7; }}
+    .previous-tariff-card {{ background:#fbfdfc; }}
+    .timeline-card-body {{ min-width:0; }}
+    .timeline-note {{ margin-top:5px !important; }}
+    .timeline-source {{ display:block; margin-top:7px; color:#6e7a76; font-size:11px; }}
+    .timeline-helper,.timeline-review {{ margin:0 0 12px; padding:11px 12px; color:#48645b; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; font-size:12px; line-height:1.45; }}
+    .timeline-review strong,.timeline-review span {{ display:block; }}
+    .timeline-review span {{ margin-top:3px; color:#5f6b67; }}
+    .timeline-confirm-form {{ margin:0 0 12px; }}
+    .timeline-confirm-form button {{ min-height:36px; padding:8px 12px; color:#174b3d; background:#e7f7ef; border:1px solid #bfe7d1; border-radius:10px; font:inherit; font-size:12px; font-weight:800; cursor:pointer; }}
+    .timeline-action-panel {{ display:inline-block; margin:0; }}
+    .timeline-action-panel summary {{ min-height:36px; display:inline-flex; align-items:center; padding:7px 10px; color:#174b3d; background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font-size:12px; font-weight:800; cursor:pointer; }}
+    .timeline-action-panel[open] {{ display:block; width:100%; margin-top:8px; }}
+    .timeline-action-panel[open] summary {{ margin-bottom:10px; }}
+    .timeline-diagnostics {{ margin-top:10px; }}
+    .timeline-diagnostics summary {{ color:var(--muted); font-size:11px; font-weight:800; cursor:pointer; }}
+    .timeline-diagnostics pre {{ max-height:260px; overflow:auto; padding:12px; background:#f8fbf9; border:1px solid var(--line); border-radius:10px; font-size:10px; }}
+    .household-timeline-actions {{ display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start; margin-top:12px; }}
+    .household-timeline-actions form {{ display:flex; flex-wrap:wrap; gap:8px; margin:0; }}
+    .household-timeline-actions > form button,.household-timeline-form button {{ min-height:36px; padding:8px 12px; color:#174b3d; background:#fff; border:1px solid var(--line); border-radius:10px; font:inherit; font-size:12px; font-weight:800; cursor:pointer; }}
+    .household-timeline-actions > form:last-child button {{ color:#8f3327; background:#fff5f3; border-color:#f0cec8; }}
     .household-timeline-actions input[type="date"] {{ min-height:38px; padding:8px 10px; border:1px solid var(--line); border-radius:9px; font:inherit; }}
     .household-timeline-form .timeline-notes {{ grid-column:span 2; }}
     .tariff-context-note {{ background:#f8fbf9; }}

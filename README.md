@@ -71,10 +71,12 @@ bill estimates, tariff buckets, plan baselines, and battery modelling resolve
 the tariff that was active for each interval or local day.
 
 If no timeline file exists, PowerMonitor infers one open current tariff period
-from the current settings and marks earlier tariff history as uncertain. Add a
-previous tariff from Settings -> Household timeline. Catalogue plans can be
-selected for known Synergy plans, while manual historical tariffs support plans
-that are no longer in the catalogue. Timeline changes are audited locally in
+from the current settings and marks earlier tariff history as uncertain. In
+Settings, this appears as **Home energy history**: edit the current tariff start
+date with **Edit details**, use **Change tariff** when a new plan starts, or add
+a previous tariff to fill older history. Catalogue plans can be selected for
+known Synergy plans, while manual historical tariffs support plans that are no
+longer in the catalogue. Timeline changes are audited locally in
 `config/household_timeline_audit.jsonl`.
 
 Unknown tariff history is reported as a gap. Reports continue for known

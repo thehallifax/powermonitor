@@ -421,10 +421,21 @@ class HouseholdTimelineStore:
 
     def append_audit(self, previous: HouseholdTimeline, new: HouseholdTimeline, *, action: str, reason: Optional[str] = None) -> None:
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_by_id = {event.event_id: event.as_dict() for event in previous.events}
+        new_by_id = {event.event_id: event.as_dict() for event in new.events}
+        affected_event_ids = sorted(
+            event_id
+            for event_id in set(previous_by_id) | set(new_by_id)
+            if previous_by_id.get(event_id) != new_by_id.get(event_id)
+        )
         record = {
             "changed_at": now_iso(),
             "action": action,
             "reason": reason,
+            "affected_event_ids": affected_event_ids,
+            "source": "settings",
+            "previous_values": {event_id: previous_by_id.get(event_id) for event_id in affected_event_ids},
+            "new_values": {event_id: new_by_id.get(event_id) for event_id in affected_event_ids},
             "previous": previous.as_dict(),
             "new": new.as_dict(),
         }

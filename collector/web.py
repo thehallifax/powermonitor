@@ -1128,16 +1128,64 @@ class DashboardHandler(BaseHTTPRequestHandler):
             event_id = self.param(params, "event_id")
             event = previous.get_event(event_id)
             effective_from = self.parse_timeline_date(self.param(params, "effective_from"), "effective from")
-            effective_to = self.parse_optional_timeline_date(self.param(params, "effective_to"), "effective to")
+            is_current_tariff = event.event_type == "tariff_period" and event.effective_to is None and self.param(params, "current_tariff") == "1"
+            effective_to = None if is_current_tariff else self.parse_optional_timeline_date(self.param(params, "effective_to"), "effective to")
             metadata = dict(event.metadata)
             tariff = metadata.get("tariff") if isinstance(metadata.get("tariff"), dict) else None
-            if tariff is not None:
+            updates = {
+                "effective_from": effective_from,
+                "effective_to": effective_to,
+                "confidence": self.param(params, "confidence", event.confidence) or event.confidence,
+                "notes": self.param(params, "notes") or None,
+            }
+            if tariff is not None and not is_current_tariff and self.param(params, "plan_id"):
+                replacement_tariff = self.timeline_tariff_version(params, effective_from, effective_to)
+                metadata["tariff"] = replacement_tariff.as_dict()
+                updates.update({"title": replacement_tariff.tariff_name, "version": replacement_tariff.version, "source": "manual_settings", "metadata": metadata})
+            elif tariff is not None:
                 tariff["effective_from"] = effective_from.isoformat()
-                tariff["effective_to"] = effective_to.isoformat() if effective_to else None
+                tariff["effective_to"] = None if is_current_tariff else effective_to.isoformat() if effective_to else None
                 metadata["tariff"] = tariff
-            replacement = event.with_updates(effective_from=effective_from, effective_to=effective_to, metadata=metadata)
+                updates.update({"source": "manual_settings" if event.source.startswith("inferred") else event.source, "metadata": metadata})
+            replacement = event.with_updates(**updates)
             timeline = previous.replace_event(event_id, replacement)
-            store.save(timeline, action="edit_event", previous=previous)
+            store.save(timeline, action="edit_current_tariff" if is_current_tariff else "edit_timeline_event", previous=previous, reason=self.param(params, "notes"))
+        elif action == "replace-current":
+            event_id = self.param(params, "event_id")
+            event = previous.get_event(event_id)
+            if event.event_type != "tariff_period" or event.effective_to is not None:
+                raise ValueError("Choose the current tariff period to change.")
+            new_start = self.parse_timeline_date(self.param(params, "effective_from"), "new tariff start")
+            old_end = new_start - timedelta(days=1)
+            if old_end < event.effective_from:
+                raise ValueError("The new tariff must start after the current tariff period begins. Use Edit details to correct the current start date.")
+            closed_metadata = dict(event.metadata)
+            closed_tariff = closed_metadata.get("tariff") if isinstance(closed_metadata.get("tariff"), dict) else None
+            if isinstance(closed_tariff, dict):
+                closed_tariff["effective_to"] = old_end.isoformat()
+                closed_metadata["tariff"] = closed_tariff
+            closed_event = event.with_updates(effective_to=old_end, metadata=closed_metadata)
+            new_tariff = self.timeline_tariff_version(params, new_start, None)
+            new_event = report.HouseholdTimelineEvent.tariff_period(
+                new_tariff,
+                effective_from=new_start,
+                effective_to=None,
+                source="manual_settings",
+                confidence="high",
+                notes=self.param(params, "notes") or None,
+            )
+            timeline = previous.replace_event(event_id, closed_event).add_event(new_event)
+            store.save(timeline, action="replace_current_tariff", previous=previous, reason=self.param(params, "notes"))
+        elif action == "confirm":
+            event_id = self.param(params, "event_id")
+            event = previous.get_event(event_id)
+            replacement = event.with_updates(
+                source="manual_settings" if event.source.startswith("inferred") else event.source,
+                notes="Created from current tariff settings." if event.source.startswith("inferred") else event.notes,
+                confidence="high" if event.source.startswith("inferred") else event.confidence,
+            )
+            timeline = previous.replace_event(event_id, replacement)
+            store.save(timeline, action="confirm_timeline", previous=previous)
         elif action == "disable":
             event_id = self.param(params, "event_id")
             timeline = previous.disable_event(event_id)
@@ -1154,10 +1202,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def timeline_tariff_event(self, params: dict):
         effective_from = self.parse_timeline_date(self.param(params, "effective_from"), "effective from")
         effective_to = self.parse_optional_timeline_date(self.param(params, "effective_to"), "effective to")
+        tariff = self.timeline_tariff_version(params, effective_from, effective_to)
+        return report.HouseholdTimelineEvent.tariff_period(
+            tariff,
+            effective_from=effective_from,
+            effective_to=effective_to,
+            source="manual_settings",
+            confidence="high",
+            notes=self.param(params, "notes") or None,
+        )
+
+    def timeline_tariff_version(self, params: dict, effective_from: date, effective_to: Optional[date]):
         plan_id = self.param(params, "plan_id", DEFAULT_PLAN)
         if plan_id == MANUAL_TARIFF_ID:
             flat_rate = self.parse_non_negative_float(self.param(params, "flat_import_rate"), "flat/import rate")
-            tariff = report.tariff_version_from_catalog_or_manual(
+            return report.tariff_version_from_catalog_or_manual(
                 provider=self.param(params, "provider", "Manual") or "Manual",
                 tariff_name=self.param(params, "manual_tariff_name", "Manual historical tariff") or "Manual historical tariff",
                 version=f"manual-{effective_from.isoformat()}",
@@ -1168,16 +1227,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 export_credit_rate=self.parse_non_negative_float(self.param(params, "export_credit_rate"), "export credit"),
                 tariff_windows=("Manual historical tariff period.",),
             )
-        else:
-            tariff = report.tariff_version_for_plan(plan_id, effective_from, effective_to)
-        return report.HouseholdTimelineEvent.tariff_period(
-            tariff,
-            effective_from=effective_from,
-            effective_to=effective_to,
-            source="manual_settings",
-            confidence="high",
-            notes=self.param(params, "notes") or None,
-        )
+        return report.tariff_version_for_plan(plan_id, effective_from, effective_to)
 
     @staticmethod
     def parse_timeline_date(value, label: str) -> date:
