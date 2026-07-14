@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from engine.financial_engine import FinancialEngine, au_season_for_date
 
@@ -21,6 +21,15 @@ def interval(day: str, hour: int, bucket: str, grid_import: float = 0.0, solar_e
         "grid_import_kwh": grid_import,
         "solar_export_kwh": solar_export,
     }
+
+
+def seasonal_days(start: date, count: int, solar_export: float = 12.0, grid_import: float = 12.0) -> list[dict]:
+    rows = []
+    for offset in range(count):
+        day = (start + timedelta(days=offset)).isoformat()
+        rows.append(interval(day, 12, "super_off_peak", solar_export=solar_export))
+        rows.append(interval(day, 18, "peak", grid_import=grid_import))
+    return rows
 
 
 class BatteryFinancialEngineTests(unittest.TestCase):
@@ -284,11 +293,11 @@ class BatteryFinancialEngineTests(unittest.TestCase):
     def test_seasonal_battery_model_weights_included_interval_days(self):
         seasonal = []
         for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
-            seasonal.append(interval(day, 12, "super_off_peak", solar_export=15.0))
-            seasonal.append(interval(day, 18, "peak", grid_import=15.0))
+            seasonal.append(interval(day, 12, "super_off_peak", solar_export=10.0))
+            seasonal.append(interval(day, 18, "peak", grid_import=12.0))
         for day in ("2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06"):
-            seasonal.append(interval(day, 12, "super_off_peak", solar_export=6.0))
-            seasonal.append(interval(day, 18, "peak", grid_import=6.0))
+            seasonal.append(interval(day, 12, "super_off_peak", solar_export=10.0))
+            seasonal.append(interval(day, 18, "peak", grid_import=12.0))
         comparison = self.engine.compare_home_battery_sizes(
             [interval("2026-07-01", 12, "super_off_peak", solar_export=6.0), interval("2026-07-01", 18, "peak", grid_import=6.0)],
             self.settings,
@@ -305,9 +314,74 @@ class BatteryFinancialEngineTests(unittest.TestCase):
         self.assertAlmostEqual(seasonal_model["annual_weighting"]["summer"], 3 / 9)
         self.assertAlmostEqual(seasonal_model["annual_weighting"]["winter"], 6 / 9)
         self.assertEqual(seasonal_model["annual_recommendation"]["capacity_kwh"], 15.0)
+        mismatch = seasonal_model["recommendation_mismatch"]
+        self.assertTrue(mismatch["exists"])
+        self.assertEqual(mismatch["annual_size_kwh"], 15.0)
+        self.assertGreater(mismatch["additional_annual_saving"], 0.0)
+        self.assertIn("combined annual model", mismatch["reason"])
         self.assertEqual(comparison["confidence_model"]["level"], "Low")
+        self.assertEqual(comparison["battery_recommendation"]["source"], "current_period")
         self.assertIn("seasonal_model", comparison)
         self.assertIn("current_period", comparison)
+
+    def test_high_confidence_annual_history_becomes_primary(self):
+        seasonal = []
+        seasonal.extend(seasonal_days(date(2026, 1, 1), 40))
+        seasonal.extend(seasonal_days(date(2026, 4, 1), 40))
+        seasonal.extend(seasonal_days(date(2026, 7, 1), 40))
+
+        comparison = self.engine.compare_home_battery_sizes(
+            [interval("2026-07-01", 12, "super_off_peak", solar_export=5.0), interval("2026-07-01", 18, "peak", grid_import=5.0)],
+            self.settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=5.0,
+            baseline_solar_exported_kwh=5.0,
+            seasonal_intervals=seasonal,
+        )
+
+        recommendation = comparison["battery_recommendation"]
+
+        self.assertEqual(comparison["confidence_model"]["level"], "High")
+        self.assertEqual(recommendation["source"], "annual_historical")
+        self.assertEqual(recommendation["interval_days"], 120)
+        self.assertEqual(set(recommendation["seasons_included"]), {"summer", "autumn", "winter"})
+        self.assertEqual(recommendation["recommended_size_kwh"], comparison["seasonal_model"]["annual_recommendation"]["capacity_kwh"])
+
+    def test_very_high_confidence_annual_history_becomes_primary(self):
+        seasonal = []
+        seasonal.extend(seasonal_days(date(2026, 1, 1), 68))
+        seasonal.extend(seasonal_days(date(2026, 4, 1), 68))
+        seasonal.extend(seasonal_days(date(2026, 7, 1), 68))
+        seasonal.extend(seasonal_days(date(2026, 10, 1), 68))
+
+        comparison = self.engine.compare_home_battery_sizes(
+            [interval("2026-07-01", 12, "super_off_peak", solar_export=5.0), interval("2026-07-01", 18, "peak", grid_import=5.0)],
+            self.settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=5.0,
+            baseline_solar_exported_kwh=5.0,
+            seasonal_intervals=seasonal,
+        )
+
+        self.assertEqual(comparison["confidence_model"]["level"], "Very High")
+        self.assertEqual(comparison["battery_recommendation"]["source"], "annual_historical")
+        self.assertEqual(set(comparison["battery_recommendation"]["seasons_included"]), {"summer", "autumn", "winter", "spring"})
+
+    def test_medium_history_falls_back_to_current_period(self):
+        seasonal = seasonal_days(date(2026, 1, 1), 30) + seasonal_days(date(2026, 7, 1), 20)
+
+        comparison = self.engine.compare_home_battery_sizes(
+            [interval("2026-07-01", 12, "super_off_peak", solar_export=5.0), interval("2026-07-01", 18, "peak", grid_import=5.0)],
+            self.settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=5.0,
+            baseline_solar_exported_kwh=5.0,
+            seasonal_intervals=seasonal,
+        )
+
+        self.assertEqual(comparison["confidence_model"]["level"], "Medium")
+        self.assertEqual(comparison["battery_recommendation"]["source"], "current_period")
+        self.assertTrue(comparison["battery_recommendation"]["warnings"])
 
     def test_seasonal_model_ignores_insufficient_seasons_and_aggregate_rows(self):
         rows = [
@@ -320,6 +394,24 @@ class BatteryFinancialEngineTests(unittest.TestCase):
         self.assertFalse(model["available"])
         self.assertEqual(model["confidence_model"]["level"], "Insufficient history")
         self.assertIn("interval household energy flows", model["summary"])
+
+    def test_aggregate_only_history_cannot_be_primary(self):
+        rows = [
+            {**interval("2026-01-01", 12, "super_off_peak", solar_export=12.0), "source_resolution": "daily_aggregate"},
+            {**interval("2026-07-01", 18, "peak", grid_import=12.0), "source_resolution": "daily_aggregate"},
+        ]
+
+        comparison = self.engine.compare_home_battery_sizes(
+            [interval("2026-07-01", 12, "super_off_peak", solar_export=5.0), interval("2026-07-01", 18, "peak", grid_import=5.0)],
+            self.settings,
+            baseline_bill=20.0,
+            baseline_grid_import_kwh=5.0,
+            baseline_solar_exported_kwh=5.0,
+            seasonal_intervals=rows,
+        )
+
+        self.assertEqual(comparison["battery_recommendation"]["source"], "current_period")
+        self.assertIn("interval household energy flows", " ".join(comparison["battery_recommendation"]["warnings"]))
 
 
 if __name__ == "__main__":

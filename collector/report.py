@@ -1012,6 +1012,7 @@ def dashboard_data(
         "latest_synergy_bill": actual_bill_comparison.get("latest_bill") if actual_bill_comparison else None,
         "scenario_analysis": scenarios,
         "billing_scenarios": scenarios["scenarios"],
+        "battery_recommendation": scenarios.get("battery_recommendation"),
         "battery_comparison": scenarios["battery_comparison"],
         "battery_investment": scenarios["battery_investment"],
         "timeline": display_timeline.as_dict(),
@@ -1758,6 +1759,7 @@ def scenario_analysis(
         tariff_version=current_tariff,
         seasonal_intervals=seasonal_battery_intervals or [],
     )
+    battery_recommendation = battery_comparison.get("battery_recommendation") or {}
     battery_investment = battery_investment_analysis(battery_comparison, settings)
 
     ev_window_cost = ev_kwh * current_rates[cheapest_bucket]
@@ -1786,6 +1788,7 @@ def scenario_analysis(
         "scenarios": scenarios,
         "ev_insights": insights,
         "battery_comparison": battery_comparison,
+        "battery_recommendation": battery_recommendation,
         "battery_investment": battery_investment,
     }
 
@@ -1802,13 +1805,8 @@ def battery_investment_analysis(comparison: Optional[dict], settings: Settings) 
             "assumptions": assumptions,
         }
 
-    seasonal = comparison.get("seasonal_model") or {}
-    recommended = (
-        seasonal.get("annual_recommendation")
-        if seasonal.get("available") and seasonal.get("annual_recommendation")
-        else comparison.get("recommended") or {}
-    )
-    recommended_size = float(recommended.get("capacity_kwh") or 0.0)
+    battery_recommendation = comparison.get("battery_recommendation") or {}
+    recommended_size = float(battery_recommendation.get("recommended_size_kwh") or (comparison.get("recommended") or {}).get("capacity_kwh") or 0.0)
     source_options = battery_investment_source_options(comparison)
     options = [
         battery_investment_option(option, assumptions, comparison)
@@ -1840,6 +1838,9 @@ def battery_investment_analysis(comparison: Optional[dict], settings: Settings) 
     return {
         "available": True,
         "recommended_size": selected["capacity_kwh"],
+        "recommendation_source": str(battery_recommendation.get("source") or "current_period"),
+        "interval_days": int(battery_recommendation.get("interval_days") or 0),
+        "seasonal_confidence": str(((comparison.get("seasonal_model") or {}).get("confidence_model") or {}).get("level") or ""),
         "installed_cost": selected["installed_cost"],
         "rebate": selected["rebate"],
         "net_cost": selected["net_cost"],
@@ -1877,9 +1878,10 @@ def battery_investment_assumptions(settings: Settings) -> dict[str, Any]:
 
 
 def battery_investment_source_options(comparison: dict) -> list[dict[str, Any]]:
+    recommendation = comparison.get("battery_recommendation") or {}
     seasonal = comparison.get("seasonal_model") or {}
     annual_options = seasonal.get("annual_options") or []
-    if seasonal.get("available") and annual_options:
+    if recommendation.get("source") == "annual_historical" and annual_options:
         return annual_options
     grid_options = ((comparison.get("strategies") or {}).get("solar_plus_grid_arbitrage") or {}).get("options") or []
     return grid_options or comparison.get("options", []) or []
@@ -8812,6 +8814,7 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
     grid_options = (strategies.get("solar_plus_grid_arbitrage") or {}).get("options") or []
     grid_by_capacity = {float(option.get("capacity_kwh") or 0.0): option for option in grid_options}
     recommended = comparison.get("recommended", {})
+    primary = comparison.get("battery_recommendation") or {}
     data_quality = comparison.get("data_quality", {})
     if not comparison.get("available"):
         reason = data_quality.get("note") or "Battery modelling is unavailable for this period."
@@ -8834,9 +8837,11 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         if effective_label
         else f"Calculated using {tariff_name} tariff."
     )
-    rows = [battery_strategy_row_html(baseline, None, recommended_capacity, baseline=True)]
+    primary_source = str(primary.get("source") or "current_period")
+    current_label = "Best for selected period" if primary_source == "annual_historical" else "Recommended"
+    rows = [battery_strategy_row_html(baseline, None, recommended_capacity, baseline=True, recommended_label=current_label)]
     for option in options:
-        rows.append(battery_strategy_row_html(option, grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0)), recommended_capacity))
+        rows.append(battery_strategy_row_html(option, grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0)), recommended_capacity, recommended_label=current_label))
     opportunity = comparison.get("opportunity_metrics", {}) or {}
     grid_strategy = strategies.get("solar_plus_grid_arbitrage") or {}
     grid_recommended = grid_strategy.get("recommended") or {}
@@ -8861,31 +8866,9 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
     return f"""
     <div class="scenario-insights battery-comparison">
       <div class="chart-heading"><h3>Home battery sizing</h3><span>Tariff-aware actual interval model</span></div>
-      <p class="battery-conclusion">{html.escape(str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period."))}</p>
-      <p class="battery-conclusion secondary">{html.escape(str(grid_recommended.get("summary") or grid_explanation))}</p>
-      <div class="battery-metrics">
-        {battery_metric("Solar export available", kwh(float(opportunity.get("average_daily_solar_export_available_kwh") or 0.0)), "Average per day for charging")}
-        {battery_metric("Non-cheapest import", kwh(float(opportunity.get("average_daily_non_cheapest_grid_import_kwh") or 0.0)), "Average daily import a battery can economically offset")}
-        {battery_metric("Battery charged", kwh(float(opportunity.get("average_daily_battery_energy_charged_kwh") or 0.0)), "Average daily charge at recommended size")}
-        {battery_metric("Battery discharged", kwh(float(opportunity.get("average_daily_battery_energy_discharged_kwh") or 0.0)), "Average daily discharge at recommended size")}
-        {battery_metric("Utilisation", f"{float(opportunity.get('average_battery_utilisation_pct') or 0.0):.0f}%", "Average capacity used each day")}
-        {battery_metric("Full / depleted days", f"{int(opportunity.get('days_battery_reached_full_charge') or 0)} / {int(opportunity.get('days_battery_fully_depleted') or 0)}", "Reached full charge / fully discharged")}
-        {battery_metric("Solar export left", kwh(float(opportunity.get("remaining_solar_export_kwh") or 0.0)), "After recommended battery model")}
-        {battery_metric("Next-size gain", money(float(opportunity.get("marginal_savings_to_next_capacity") or 0.0)), "Extra period saving from the next size")}
-      </div>
-      <table class="responsive-table battery-homeowner-table">
-        <thead>
-          <tr>
-            <th>Battery</th>
-            <th>Solar only</th>
-            <th>Solar + grid</th>
-            <th>Extra saving</th>
-            <th>New bill</th>
-            <th>Recommendation</th>
-          </tr>
-        </thead>
-        <tbody>{''.join(rows)}</tbody>
-      </table>
+      {battery_primary_recommendation_html(comparison, tariff_name)}
+      {battery_annual_sizing_table_html(comparison) if primary_source == "annual_historical" else ""}
+      {battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source)}
       {battery_seasonal_model_html(comparison.get("seasonal_model"))}
       <p class="scenario-note">{html.escape(grid_explanation)}</p>
       <p class="scenario-note">{html.escape(tariff_note)}</p>
@@ -8895,10 +8878,103 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
     """
 
 
-def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], recommended_capacity: float, baseline: bool = False) -> str:
+def battery_primary_recommendation_html(comparison: dict, tariff_name: str) -> str:
+    primary = comparison.get("battery_recommendation") or {}
+    size = float(primary.get("recommended_size_kwh") or 0.0)
+    confidence = str(primary.get("confidence") or "Low")
+    interval_days = int(primary.get("interval_days") or 0)
+    seasons = primary.get("seasons_included") or []
+    source = str(primary.get("source") or "current_period")
+    basis = (
+        f"Based on {interval_days} days of interval history across {len(seasons)} season{'s' if len(seasons) != 1 else ''}."
+        if source == "annual_historical"
+        else "Based on the selected billing period because annual interval history is not yet strong enough."
+    )
+    warning_text = " ".join(str(item) for item in primary.get("warnings") or [])
+    return f"""
+      <div class="battery-primary-summary">
+        <div class="chart-heading"><h3>Recommended battery</h3><span>{html.escape('Annual history' if source == 'annual_historical' else 'Current period')}</span></div>
+        <div class="battery-metrics battery-investment-cards">
+          {battery_metric("Recommended size", f"{size:g} kWh usable", basis)}
+          {battery_metric("Estimated annual saving", money(float(primary.get("annual_saving") or 0.0)), "From the selected recommendation source")}
+          {battery_metric("Confidence", confidence, str(primary.get("reason") or warning_text))}
+          {battery_metric("Current tariff", tariff_name, "Tariff calculations are unchanged")}
+        </div>
+      </div>
+    """
+
+
+def battery_annual_sizing_table_html(comparison: dict) -> str:
+    model = comparison.get("seasonal_model") or {}
+    options = model.get("annual_options") or []
+    if not options:
+        return ""
+    rows = "".join(
+        f"""
+        <tr class="{'recommended' if option.get('recommended') else ''}">
+          <td class="battery-size-cell"><strong>{html.escape(str(option.get("label") or ""))}</strong></td>
+          <td class="battery-money-cell">{money(float(option.get("annualised_savings") or 0.0))}</td>
+          <td class="battery-money-cell">{money(float(option.get("marginal_savings") or 0.0))}</td>
+          <td class="battery-money-cell">{money(float(option.get("marginal_savings_to_next_capacity") or 0.0)) if option.get("marginal_savings_to_next_capacity") is not None else "n/a"}</td>
+          <td class="battery-recommendation-cell"><span class="battery-signal {'recommended' if option.get('recommended') else 'neutral'}">{html.escape(str(option.get("recommendation_signal") or ""))}</span></td>
+        </tr>
+        """
+        for option in options
+    )
+    return f"""
+      <table class="responsive-table battery-homeowner-table battery-annual-table">
+        <thead><tr><th>Battery</th><th>Estimated annual saving</th><th>Marginal gain</th><th>Next-size gain</th><th>Recommendation</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <p class="scenario-note">Annual values combine included seasons using transparent seasonal weighting. They are not selected-period bill savings.</p>
+    """
+
+
+def battery_current_period_result_html(rows: list[str], recommended: dict, grid_recommended: dict, grid_explanation: str, opportunity: dict, primary_source: str) -> str:
+    title = "Current billing-period result" if primary_source == "annual_historical" else "Current billing-period sizing"
+    lead = (
+        str(recommended.get("summary") or "Battery sizing uses actual imports, exports, and tariff rates for this period.")
+        if primary_source == "current_period"
+        else str(recommended.get("summary") or "The selected billing period remains useful supporting context, but it is not the primary household recommendation.")
+    )
+    return f"""
+      <div class="battery-current-period-result">
+        <div class="chart-heading"><h3>{html.escape(title)}</h3><span>{html.escape('Supporting context' if primary_source == 'annual_historical' else 'Primary source')}</span></div>
+        <p class="battery-conclusion">{html.escape(lead)}</p>
+        <p class="battery-conclusion secondary">{html.escape(str(grid_recommended.get("summary") or grid_explanation))}</p>
+        <div class="battery-metrics">
+          {battery_metric("Solar export available", kwh(float(opportunity.get("average_daily_solar_export_available_kwh") or 0.0)), "Average per day for charging")}
+          {battery_metric("Non-cheapest import", kwh(float(opportunity.get("average_daily_non_cheapest_grid_import_kwh") or 0.0)), "Average daily import a battery can economically offset")}
+          {battery_metric("Battery charged", kwh(float(opportunity.get("average_daily_battery_energy_charged_kwh") or 0.0)), "Average daily charge at selected-period size")}
+          {battery_metric("Battery discharged", kwh(float(opportunity.get("average_daily_battery_energy_discharged_kwh") or 0.0)), "Average daily discharge at selected-period size")}
+          {battery_metric("Utilisation", f"{float(opportunity.get('average_battery_utilisation_pct') or 0.0):.0f}%", "Average capacity used each day")}
+          {battery_metric("Full / depleted days", f"{int(opportunity.get('days_battery_reached_full_charge') or 0)} / {int(opportunity.get('days_battery_fully_depleted') or 0)}", "Reached full charge / fully discharged")}
+          {battery_metric("Solar export left", kwh(float(opportunity.get("remaining_solar_export_kwh") or 0.0)), "After selected-period battery model")}
+          {battery_metric("Next-size gain", money(float(opportunity.get("marginal_savings_to_next_capacity") or 0.0)), "Extra period saving from the next size")}
+        </div>
+        <table class="responsive-table battery-homeowner-table">
+          <thead>
+            <tr>
+              <th>Battery</th>
+              <th>Period solar only</th>
+              <th>Period solar + grid</th>
+              <th>Extra period saving</th>
+              <th>Period bill</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>
+    """
+
+
+def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], recommended_capacity: float, baseline: bool = False, recommended_label: str = "Recommended") -> str:
     capacity = float(solar_option.get("capacity_kwh") or 0.0)
     is_recommended = not baseline and abs(capacity - recommended_capacity) < 1e-9
     signal = str(solar_option.get("recommendation_signal") or ("Current baseline" if baseline else "Limited additional benefit"))
+    if is_recommended:
+        signal = recommended_label
     capacity_label = "No battery" if baseline else str(solar_option.get("label") or f"{capacity:g} kWh usable")
     grid_option = grid_option or {}
     solar_saving = float(solar_option.get("period_savings") or 0.0)
@@ -8932,11 +9008,12 @@ def battery_seasonal_model_html(model: Optional[dict]) -> str:
     rows = "".join(
         f"""
         <tr>
-          <td><strong>{html.escape(str(season.get("label") or season.get("season") or ""))}</strong><small>{int(season.get("interval_days") or 0)} days</small></td>
+          <td><strong>{html.escape(str(season.get("label") or season.get("season") or ""))}</strong></td>
+          <td>{int(season.get("interval_days") or 0)} days</td>
           <td>{kwh(float(season.get("average_solar_generation_kwh") or 0.0))}/day</td>
           <td>{kwh(float(season.get("average_import_kwh") or 0.0))}/day</td>
           <td>{kwh(float(season.get("average_export_kwh") or 0.0))}/day</td>
-          <td>{money(float(season.get("estimated_battery_saving") or 0.0))}/yr</td>
+          <td>{money(float(season.get("estimated_battery_saving") or 0.0))}</td>
           <td>{float(season.get("recommended_battery_kwh") or 0.0):g} kWh</td>
         </tr>
         """
@@ -8948,17 +9025,31 @@ def battery_seasonal_model_html(model: Optional[dict]) -> str:
         f"{AU_SEASON_LABELS_FOR_REPORT.get(season, season.title())} {float(weight) * 100:.0f}%"
         for season, weight in weights.items()
     )
+    included_text = ", ".join(AU_SEASON_LABELS_FOR_REPORT.get(str(season), str(season).title()) for season in weights) or "none"
+    excluded = model.get("excluded_periods") or []
+    excluded_text = "; ".join(
+        f"{AU_SEASON_LABELS_FOR_REPORT.get(str(item.get('season')), str(item.get('season')).title())}: {item.get('reason')}"
+        for item in excluded
+    ) or "none"
+    interval_days = int(diagnostics.get("seasonal_interval_days") or confidence.get("interval_days") or 0)
+    mismatch = model.get("recommendation_mismatch") or {}
+    mismatch_note = (
+        f'<p class="scenario-note">{html.escape(str(mismatch.get("reason") or ""))}</p>'
+        if mismatch.get("exists")
+        else ""
+    )
     return f"""
     <div class="battery-seasonal-summary">
       <div class="chart-heading"><h3>Seasonal battery model</h3><span>{html.escape(str(confidence.get("level") or "Low"))} confidence</span></div>
       <div class="battery-seasonal-table-wrap">
         <table class="responsive-table battery-homeowner-table battery-seasonal-table">
-          <thead><tr><th>Season</th><th>Solar</th><th>Import</th><th>Export</th><th>Estimated battery saving</th><th>Recommended battery</th></tr></thead>
+          <thead><tr><th>Season</th><th>Interval days</th><th>Avg solar</th><th>Avg import</th><th>Avg export</th><th>Annual-equivalent saving</th><th>Recommended battery</th></tr></thead>
           <tbody>{rows}</tbody>
         </table>
       </div>
       <p class="battery-conclusion secondary">{html.escape(str(model.get("summary") or ""))}</p>
-      <p class="scenario-note">Annual weighting: {html.escape(weight_text or "unavailable")}. Coverage: {float(diagnostics.get("coverage_percentage") or 0.0):.0f}% across stored interval history. {html.escape(str(confidence.get("reason") or ""))}</p>
+      {mismatch_note}
+      <p class="scenario-note">Annual weighting: {html.escape(weight_text or "unavailable")}. Annual recommendation combines all included seasons using transparent seasonal weighting. Included seasons: {html.escape(included_text)}. Excluded seasons: {html.escape(excluded_text)}. Total interval days: {interval_days}. Coverage: {float(diagnostics.get("coverage_percentage") or 0.0):.0f}% across stored interval history. {html.escape(str(confidence.get("reason") or ""))}</p>
       <details class="battery-calculation-details">
         <summary>Seasonal diagnostics</summary>
         <pre>{html.escape(json.dumps({"coverage_by_season": diagnostics.get("coverage_by_season"), "annual_weighting": diagnostics.get("annual_weighting"), "excluded_periods": diagnostics.get("excluded_periods"), "confidence": confidence}, indent=2, sort_keys=True))}</pre>

@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,6 +72,19 @@ def settings():
         battery_discount_rate_pct=0.0,
         battery_government_rebate=0.0,
     )
+
+
+def seasonal_days(start: date, count: int, solar_export: float = 12.0, grid_import: float = 12.0) -> list[dict]:
+    rows = []
+    for offset in range(count):
+        day = (start + timedelta(days=offset)).isoformat()
+        rows.extend(
+            [
+                {"measurement_time": f"{day}T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": solar_export, "grid_import_kwh": 0.0, "solar_generation_kwh": solar_export + 4.0, "household_consumption_kwh": 8.0, "source_resolution": "interval_15m"},
+                {"measurement_time": f"{day}T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": grid_import, "solar_generation_kwh": 0.0, "household_consumption_kwh": grid_import, "source_resolution": "interval_15m"},
+            ]
+        )
+    return rows
 
 
 class BatteryReportPresentationTests(unittest.TestCase):
@@ -163,9 +176,9 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Battery discharged", markup)
         self.assertIn("Recommended", markup)
         self.assertIn("Solar only", markup)
-        self.assertIn("Solar + grid", markup)
-        self.assertIn("Extra saving", markup)
-        self.assertIn("New bill", markup)
+        self.assertIn("Period solar + grid", markup)
+        self.assertIn("Extra period saving", markup)
+        self.assertIn("Period bill", markup)
         self.assertIn("scheduled grid charging", markup)
         self.assertIn("How was this calculated?", markup)
         self.assertNotIn("<th>Peak avoided</th>", markup.split("How was this calculated?", 1)[0])
@@ -213,7 +226,65 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Summer", markup)
         self.assertIn("Winter", markup)
         self.assertIn("Annual weighting", markup)
-        self.assertEqual(analysis["battery_investment"]["recommended_size"], analysis["battery_comparison"]["seasonal_model"]["annual_recommendation"]["capacity_kwh"])
+        self.assertEqual(analysis["battery_recommendation"]["source"], "current_period")
+        self.assertEqual(analysis["battery_investment"]["recommended_size"], analysis["battery_comparison"]["recommended"]["capacity_kwh"])
+
+    def test_high_confidence_annual_history_drives_primary_presentation_api_and_investment(self):
+        seasonal_rows = []
+        seasonal_rows.extend(seasonal_days(date(2026, 1, 1), 40))
+        seasonal_rows.extend(seasonal_days(date(2026, 4, 1), 40))
+        seasonal_rows.extend(seasonal_days(date(2026, 7, 1), 40))
+
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+            seasonal_battery_intervals=seasonal_rows,
+        )
+        markup = report.scenario_analysis_html(analysis)
+        recommendation = analysis["battery_recommendation"]
+        annual_size = analysis["battery_comparison"]["seasonal_model"]["annual_recommendation"]["capacity_kwh"]
+
+        self.assertEqual(recommendation["source"], "annual_historical")
+        self.assertEqual(recommendation["recommended_size_kwh"], annual_size)
+        self.assertEqual(analysis["battery_investment"]["recommended_size"], annual_size)
+        self.assertEqual(analysis["battery_investment"]["recommendation_source"], "annual_historical")
+        self.assertEqual(analysis["battery_investment"]["interval_days"], 120)
+        self.assertEqual(analysis["battery_investment"]["seasonal_confidence"], "High")
+        self.assertIn("Recommended battery", markup)
+        self.assertIn("Annual history", markup)
+        self.assertIn("Estimated annual saving", markup)
+        self.assertIn("Current billing-period result", markup)
+        self.assertIn("Best for selected period", markup)
+        self.assertIn("Annual values combine included seasons", markup)
+        self.assertIn("Period solar only", markup)
+        self.assertNotIn("<th>Solar only</th>", markup)
+
+    def test_annual_seasonal_mismatch_is_explained_in_homeowner_wording(self):
+        seasonal_rows = []
+        for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+            seasonal_rows.extend(seasonal_days(date.fromisoformat(day), 1, solar_export=10.0, grid_import=12.0))
+        for day in ("2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06"):
+            seasonal_rows.extend(seasonal_days(date.fromisoformat(day), 1, solar_export=10.0, grid_import=12.0))
+
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 6.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 6.0},
+            ],
+            seasonal_battery_intervals=seasonal_rows,
+        )
+        mismatch = analysis["battery_comparison"]["seasonal_model"]["recommendation_mismatch"]
+        markup = report.scenario_analysis_html(analysis)
+
+        self.assertTrue(mismatch["exists"])
+        self.assertIn("combined annual model", mismatch["reason"])
+        self.assertIn("combined annual model", markup)
 
     def test_battery_comparison_renders_limited_benefit_and_oversized_signals(self):
         analysis = report.scenario_analysis(
