@@ -2152,7 +2152,20 @@ def _scenario_analysis_uncached(
         "battery_comparison": battery_comparison,
         "battery_recommendation": battery_recommendation,
         "battery_investment": battery_investment,
+        "battery_future_growth_note": battery_future_growth_note_supported(summary, settings),
     }
+
+
+def battery_future_growth_note_supported(summary: Summary, settings: Settings) -> bool:
+    battery_setup = str(getattr(settings, "battery_setup_choice", "none") or "none").strip().lower()
+    ev_setup = str(getattr(settings, "ev_setup_choice", "none") or "none").strip().lower()
+    no_battery = battery_setup in {"", "none", "not_configured", "manual_later", "future"}
+    ev_configured = ev_setup not in {"", "none", "not_configured"}
+    ev_observed = (
+        float(getattr(summary, "ev_charging_kwh", 0.0) or 0.0) > 0
+        or float(getattr(summary, "actual_ev_charging_kwh", 0.0) or 0.0) > 0
+    )
+    return bool(no_battery or ev_configured or ev_observed)
 
 
 def battery_investment_analysis(comparison: Optional[dict], settings: Settings) -> dict[str, Any]:
@@ -9511,10 +9524,11 @@ def battery_comparison_html(comparison: Optional[dict], investment: Optional[dic
         else f"Calculated using {tariff_name} tariff."
     )
     primary_source = str(primary.get("source") or "current_period")
+    primary_confidence = str(primary.get("confidence") or ((comparison.get("seasonal_model") or {}).get("confidence_model") or {}).get("level") or "")
     current_label = "Best for selected period" if primary_source == "annual_historical" else "Recommended"
-    rows = [battery_strategy_row_html(baseline, None, recommended_capacity, baseline=True, recommended_label=current_label)]
+    rows = [battery_strategy_row_html(baseline, None, recommended_capacity, baseline=True, recommended_label=current_label, confidence=primary_confidence)]
     for option in options:
-        rows.append(battery_strategy_row_html(option, grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0)), recommended_capacity, recommended_label=current_label))
+        rows.append(battery_strategy_row_html(option, grid_by_capacity.get(float(option.get("capacity_kwh") or 0.0)), recommended_capacity, recommended_label=current_label, confidence=primary_confidence))
     opportunity = comparison.get("opportunity_metrics", {}) or {}
     grid_strategy = strategies.get("solar_plus_grid_arbitrage") or {}
     grid_recommended = grid_strategy.get("recommended") or {}
@@ -9669,11 +9683,26 @@ def battery_purchase_decision_context(comparison: dict, investment: Optional[dic
         if float(option.get("capacity_kwh") or 0.0) > 0
     }
     recommended_size = float(context.get("recommended_size") or 0.0)
+    smaller = context.get("smaller")
     larger = context.get("larger")
+    smaller_size = float((smaller or {}).get("capacity_kwh") or 0.0)
     larger_size = float((larger or {}).get("capacity_kwh") or 0.0)
     recommended_investment = investment_by_capacity.get(recommended_size)
+    smaller_investment = investment_by_capacity.get(smaller_size)
     larger_investment = investment_by_capacity.get(larger_size)
     upgrade_economics = None
+    budget_economics = None
+    assumptions = (investment or {}).get("assumptions") or {}
+    battery_life = int(assumptions.get("battery_life_years") or 15)
+    if recommended_investment and smaller_investment and context.get("smaller_delta") is not None:
+        lower_cost = float(recommended_investment.get("net_cost") or 0.0) - float(smaller_investment.get("net_cost") or 0.0)
+        if lower_cost > 0:
+            budget_economics = {
+                "from_size": recommended_size,
+                "to_size": smaller_size,
+                "lower_cost": lower_cost,
+                "annual_saving_given_up": float(context.get("smaller_delta") or 0.0),
+            }
     if recommended_investment and larger_investment and context.get("larger_delta") is not None:
         additional_cost = float(larger_investment.get("net_cost") or 0.0) - float(recommended_investment.get("net_cost") or 0.0)
         additional_saving = float(context.get("larger_delta") or 0.0)
@@ -9685,7 +9714,29 @@ def battery_purchase_decision_context(comparison: dict, investment: Optional[dic
                 "additional_annual_saving": additional_saving,
                 "additional_payback_years": additional_cost / additional_saving,
             }
-    return {**context, "investment_by_capacity": investment_by_capacity, "upgrade_economics": upgrade_economics}
+    return {
+        **context,
+        "investment_by_capacity": investment_by_capacity,
+        "recommended_investment": recommended_investment,
+        "smaller_investment": smaller_investment,
+        "larger_investment": larger_investment,
+        "budget_economics": budget_economics,
+        "upgrade_economics": upgrade_economics,
+        "battery_life_years": battery_life,
+    }
+
+
+def battery_value_label(payback_years: Optional[float], battery_life_years: int, annual_saving: float = 0.0) -> str:
+    if payback_years is None:
+        return "Low additional return" if annual_saving > 0 else "Not recommended"
+    payback = float(payback_years)
+    if payback <= 7:
+        return "Excellent value"
+    if payback <= 10:
+        return "Good value"
+    if payback > battery_life_years:
+        return "Consider only if future electricity usage is expected to increase"
+    return "Low additional return"
 
 
 def battery_why_this_size_html(comparison: dict) -> str:
@@ -9699,15 +9750,16 @@ def battery_why_this_size_html(comparison: dict) -> str:
     parts = []
     if smaller:
         parts.append(
-            f"{float(smaller.get('capacity_kwh') or 0.0):g} kWh captures much of the available value, "
-            f"but {recommended_size:g} kWh adds about {money(float(context['smaller_delta'] or 0.0))} per year."
+            f"Moving from {float(smaller.get('capacity_kwh') or 0.0):g} kWh to {recommended_size:g} kWh increases "
+            f"estimated annual savings by around {money(float(context['smaller_delta'] or 0.0))}."
         )
     else:
         parts.append(f"{recommended_size:g} kWh is the smallest tested size with a measurable household benefit.")
     if larger:
         parts.append(
-            f"Moving to {float(larger.get('capacity_kwh') or 0.0):g} kWh adds about {money(float(context['larger_delta'] or 0.0))} per year, "
-            f"so {recommended_size:g} kWh is the best overall fit."
+            f"Moving from {recommended_size:g} kWh to {float(larger.get('capacity_kwh') or 0.0):g} kWh only increases "
+            f"savings by around {money(float(context['larger_delta'] or 0.0))} per year. "
+            "Most of the available benefit is captured by the recommended size."
         )
     else:
         parts.append("Larger tested sizes did not provide a better overall fit.")
@@ -9728,15 +9780,32 @@ def battery_purchase_decision_cards_html(comparison: dict, investment: Optional[
         return ""
     recommended_size = float(context.get("recommended_size") or 0.0)
     recommended_saving = float(context.get("recommended_saving") or 0.0)
+    smaller_saving = float((smaller or {}).get("annualised_savings") or 0.0)
+    larger_delta = float(context.get("larger_delta") or 0.0)
+    budget = context.get("budget_economics") or {}
+    upgrade = context.get("upgrade_economics") or {}
+    battery_life = int(context.get("battery_life_years") or 15)
+    recommended_investment = context.get("recommended_investment") or {}
+    recommended_label = battery_value_label(
+        recommended_investment.get("simple_payback_years"),
+        battery_life,
+        recommended_saving,
+    )
+    upgrade_label = battery_value_label(
+        upgrade.get("additional_payback_years"),
+        battery_life,
+        larger_delta,
+    )
+    upgrade_unlikely = bool(upgrade.get("additional_payback_years") and float(upgrade["additional_payback_years"]) > battery_life)
     smaller_html = (
         battery_purchase_decision_card_html(
-            "Smaller battery",
+            "Budget option",
             smaller,
             [
-                "Lower purchase cost",
-                f"Around {money(float(context['smaller_delta'] or 0.0))}/year less saving",
-                f"{kwh(float(context['smaller_energy_delta'] or 0.0))} less usable storage",
-                "May suit tighter budgets",
+                f"Estimated annual savings: {money(smaller_saving)}",
+                f"Gives up around {money(float(context['smaller_delta'] or 0.0))}/year compared with the recommendation",
+                f"Estimated lower purchase cost: {money(float(budget['lower_cost']))}" if budget else "",
+                "May suit tighter budgets where upfront cost matters most",
             ],
         )
         if smaller
@@ -9746,26 +9815,27 @@ def battery_purchase_decision_cards_html(comparison: dict, investment: Optional[
         "Recommended",
         recommended,
         [
-            "Best overall value",
-            f"Estimated annual bill reduction of {money(recommended_saving)}",
-            "Best balance of purchase cost and savings",
+            recommended_label,
+            f"Estimated annual savings: {money(recommended_saving)}",
+            (
+                f"Estimated payback: {float(recommended_investment['simple_payback_years']):.1f} years"
+                if recommended_investment.get("simple_payback_years") is not None
+                else ""
+            ),
+            "Best balance of purchase cost and savings for current usage",
         ],
         recommended=True,
     )
     larger_html = (
         battery_purchase_decision_card_html(
-            "Larger battery",
+            "Maximum savings",
             larger,
             [
-                f"Around {money(float(context['larger_delta'] or 0.0))}/year additional saving",
-                f"{kwh(float(context['larger_energy_delta'] or 0.0))} more usable storage",
-                (
-                    f"Diminishing return: {money(float(context['diminishing_return']))}/year less than the previous size step"
-                    if context.get("diminishing_return")
-                    else ""
-                ),
-                "Likely longer payback",
-                "Consider only if future usage is expected to increase",
+                upgrade_label,
+                f"Additional annual savings: {money(larger_delta)}",
+                f"Estimated additional purchase cost: {money(float(upgrade['additional_cost']))}" if upgrade else "",
+                f"Estimated extra payback: {float(upgrade['additional_payback_years']):.1f} years" if upgrade else "",
+                "Extra capacity is unlikely to repay itself from current usage" if upgrade_unlikely else "",
             ],
         )
         if larger
@@ -9773,7 +9843,7 @@ def battery_purchase_decision_cards_html(comparison: dict, investment: Optional[
     )
     future_note = (
         '<p class="scenario-note battery-future-usage-note">This recommendation is based on your current household usage. '
-        "Future EVs, electric heating/cooling or pool equipment may justify a larger battery.</p>"
+        "Future EVs, pool pumps, electric heating/cooling or household growth may justify a larger battery.</p>"
         if show_future_usage_note
         else ""
     )
@@ -9809,21 +9879,22 @@ def battery_upgrade_economics_html(context: dict[str, Any]) -> str:
         <h4>Estimated upgrade economics</h4>
         <p>Choosing {float(economics['to_size']):g} kWh instead of {float(economics['from_size']):g} kWh</p>
         <div class="battery-metrics battery-investment-cards">
-          {battery_metric("Estimated additional cost", money(float(economics["additional_cost"])), "From configured battery cost assumptions")}
-          {battery_metric("Estimated additional saving", f"{money(float(economics['additional_annual_saving']))}/year", "From existing simulated annual savings")}
-          {battery_metric("Estimated additional payback", f"{payback:.1f} years", "Additional purchase cost divided by additional annual saving")}
+          {battery_metric("Additional investment", money(float(economics["additional_cost"])), "From configured battery cost assumptions")}
+          {battery_metric("Additional annual saving", f"{money(float(economics['additional_annual_saving']))}/year", "From existing simulated annual savings")}
+          {battery_metric("Extra payback", f"{payback:.1f} years", "Additional purchase cost divided by additional annual saving")}
         </div>
       </div>
     """
 
 
-def homeowner_battery_signal(signal: str) -> str:
+def homeowner_battery_signal(signal: str, confidence: str = "") -> str:
     cleaned = str(signal or "").strip()
+    strong_confidence = str(confidence or "").strip().lower() in {"high", "very high"}
     mapping = {
         "Good value": "Strong value",
         "Optional tariff benefit": "Strong value",
         "Limited additional benefit": "Limited extra value",
-        "Likely oversized for this usage pattern": "Likely oversized",
+        "Likely oversized for this usage pattern": "Likely oversized" if strong_confidence else "Low additional return",
         "Recommended": "Recommended",
     }
     return mapping.get(cleaned, cleaned or "Option")
@@ -9835,6 +9906,7 @@ def battery_annual_sizing_table_html(comparison: dict) -> str:
     if not options:
         return ""
     primary = comparison.get("battery_recommendation") or {}
+    confidence = str(primary.get("confidence") or (model.get("confidence_model") or {}).get("level") or "")
     recommended_size = float(primary.get("recommended_size_kwh") or (comparison.get("recommended") or {}).get("capacity_kwh") or 0.0)
     recommended_option = next((option for option in options if abs(float(option.get("capacity_kwh") or 0.0) - recommended_size) < 1e-9), {})
     recommended_saving = float(recommended_option.get("annualised_savings") or 0.0)
@@ -9852,7 +9924,7 @@ def battery_annual_sizing_table_html(comparison: dict) -> str:
         elif capacity < recommended_size:
             signal = "Strong value"
         else:
-            signal = homeowner_battery_signal(str(option.get("recommendation_signal") or "Limited extra value"))
+            signal = homeowner_battery_signal(str(option.get("recommendation_signal") or "Limited extra value"), confidence)
         rows += f"""
         <tr>
           <td class="battery-size-cell"><strong>{html.escape(str(option.get("label") or f"{capacity:g} kWh usable"))}</strong>{'<small>Best overall fit</small>' if is_recommended else ''}</td>
@@ -9945,12 +10017,14 @@ def battery_current_period_dates(comparison: dict) -> str:
     return f"{first} to {last}"
 
 
-def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], recommended_capacity: float, baseline: bool = False, recommended_label: str = "Recommended") -> str:
+def battery_strategy_row_html(solar_option: dict, grid_option: Optional[dict], recommended_capacity: float, baseline: bool = False, recommended_label: str = "Recommended", confidence: str = "") -> str:
     capacity = float(solar_option.get("capacity_kwh") or 0.0)
     is_recommended = not baseline and abs(capacity - recommended_capacity) < 1e-9
     signal = str(solar_option.get("recommendation_signal") or ("Current baseline" if baseline else "Limited additional benefit"))
     if is_recommended:
         signal = recommended_label
+    else:
+        signal = homeowner_battery_signal(signal, confidence)
     capacity_label = "No battery" if baseline else str(solar_option.get("label") or f"{capacity:g} kWh usable")
     grid_option = grid_option or {}
     solar_saving = float(solar_option.get("period_savings") or 0.0)
@@ -10238,7 +10312,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     <section class="report-section scenario-section">
       <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
-      {battery_comparison_html(analysis.get("battery_comparison"), analysis.get("battery_investment"), show_future_usage_note=bool(analysis.get("battery_investment", {}).get("available")))}
+      {battery_comparison_html(analysis.get("battery_comparison"), analysis.get("battery_investment"), show_future_usage_note=bool(analysis.get("battery_future_growth_note")))}
       {battery_investment_html(analysis.get("battery_investment"))}
       {insights_html}
     </section>

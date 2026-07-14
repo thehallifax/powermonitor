@@ -181,8 +181,8 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Period bill", markup)
         self.assertIn("scheduled grid charging", markup)
         self.assertIn("Why this size?", markup)
-        self.assertIn("Larger battery", markup)
-        self.assertIn("Best overall value", markup)
+        self.assertIn("Maximum savings", markup)
+        self.assertIn("Best balance of purchase cost and savings for current usage", markup)
         self.assertIn("Current billing-period evidence", markup)
         self.assertIn("Seasonal evidence", markup)
         self.assertIn("Methodology", markup)
@@ -290,9 +290,9 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Estimated annual bill reduction", markup)
         self.assertLess(markup.index("Recommended battery"), markup.index("Why this size?"))
         self.assertIn("Why this size?", markup)
-        self.assertIn("Smaller battery", markup)
+        self.assertIn("Budget option", markup)
         self.assertIn("Recommended", markup)
-        self.assertIn("Larger battery", markup)
+        self.assertIn("Maximum savings", markup)
         self.assertIn("This recommendation is based on your current household usage.", markup)
         self.assertIn("Current billing-period result", markup)
         self.assertIn("Best for selected period", markup)
@@ -350,16 +350,36 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertEqual(context["larger_energy_delta"], 5.0)
         self.assertAlmostEqual(context["larger_percentage_improvement"], 85.0 / 1188.0 * 100)
         self.assertEqual(context["diminishing_return"], 103.0)
+        self.assertEqual(context["budget_economics"]["lower_cost"], 2500.0)
+        self.assertEqual(context["budget_economics"]["annual_saving_given_up"], 188.0)
         self.assertEqual(context["upgrade_economics"]["additional_cost"], 3500.0)
         self.assertEqual(context["upgrade_economics"]["additional_annual_saving"], 85.0)
         self.assertAlmostEqual(context["upgrade_economics"]["additional_payback_years"], 3500.0 / 85.0)
-        self.assertIn("Around $188.00/year less saving", markup)
-        self.assertIn("Around $85.00/year additional saving", markup)
-        self.assertIn("Diminishing return: $103.00/year less than the previous size step", markup)
+        self.assertIn("Budget option", markup)
+        self.assertIn("Estimated annual savings: $1,000.00", markup)
+        self.assertIn("Gives up around $188.00/year compared with the recommendation", markup)
+        self.assertIn("Estimated lower purchase cost: $2,500.00", markup)
+        self.assertIn("Low additional return", markup)
+        self.assertIn("Maximum savings", markup)
+        self.assertIn("Additional annual savings: $85.00", markup)
+        self.assertIn("Estimated additional purchase cost: $3,500.00", markup)
+        self.assertIn("Estimated extra payback: 41.2 years", markup)
+        self.assertIn("Extra capacity is unlikely to repay itself from current usage", markup)
+        self.assertIn("Moving from 10 kWh to 15 kWh increases estimated annual savings by around $188.00.", markup)
+        self.assertIn("Moving from 15 kWh to 20 kWh only increases savings by around $85.00 per year.", markup)
+        self.assertIn("Most of the available benefit is captured by the recommended size.", markup)
         self.assertIn("Choosing 20 kWh instead of 15 kWh", markup)
-        self.assertIn("$3,500.00", markup)
+        self.assertIn("Additional investment", markup)
+        self.assertIn("Additional annual saving", markup)
+        self.assertIn("Extra payback", markup)
         self.assertIn("41.2 years", markup)
-        self.assertIn("Future EVs, electric heating/cooling or pool equipment may justify a larger battery.", markup)
+        self.assertIn("Future EVs, pool pumps, electric heating/cooling or household growth may justify a larger battery.", markup)
+        self.assertEqual(report.battery_value_label(6.0, 15, 100.0), "Excellent value")
+        self.assertEqual(report.battery_value_label(9.0, 15, 100.0), "Good value")
+        self.assertEqual(
+            report.battery_value_label(20.0, 15, 100.0),
+            "Consider only if future electricity usage is expected to increase",
+        )
 
     def test_battery_purchase_decision_omits_upgrade_economics_without_pricing(self):
         comparison = {
@@ -392,9 +412,31 @@ class BatteryReportPresentationTests(unittest.TestCase):
         markup = report.battery_comparison_html(comparison, investment)
 
         self.assertIsNone(context["upgrade_economics"])
-        self.assertIn("Larger battery", markup)
-        self.assertIn("Around $85.00/year additional saving", markup)
+        self.assertIsNone(context["budget_economics"])
+        self.assertIn("Maximum savings", markup)
+        self.assertIn("Additional annual savings: $85.00", markup)
         self.assertNotIn("Estimated upgrade economics", markup)
+        self.assertNotIn("Estimated additional purchase cost", markup)
+
+    def test_battery_future_growth_note_uses_household_configuration(self):
+        base_summary = summary()
+        base_settings = settings()
+        analysis = report.scenario_analysis(
+            base_summary,
+            base_settings,
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+        )
+        markup = report.scenario_analysis_html(analysis)
+
+        self.assertTrue(analysis["battery_future_growth_note"])
+        self.assertIn("Future EVs, pool pumps, electric heating/cooling or household growth may justify a larger battery.", markup)
+        self.assertNotIn(
+            "Future EVs, pool pumps, electric heating/cooling or household growth may justify a larger battery.",
+            report.battery_comparison_html(analysis["battery_comparison"], analysis["battery_investment"], show_future_usage_note=False),
+        )
 
     def test_battery_purchase_decision_rendering_does_not_change_sizing_or_api_shape(self):
         analysis = report.scenario_analysis(
@@ -425,6 +467,14 @@ class BatteryReportPresentationTests(unittest.TestCase):
             "assumptions",
         ):
             self.assertIn(field, analysis["battery_investment"])
+        self.assertIn("battery_future_growth_note", analysis)
+
+    def test_battery_cards_keep_responsive_grid_rules(self):
+        css = (PROJECT_ROOT / "collector" / "report.py").read_text()
+
+        self.assertIn(".battery-tradeoff-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr));", css)
+        self.assertIn(".battery-tradeoff-card {{ display:grid;", css)
+        self.assertIn(".battery-tradeoff-grid", css.split("@media (max-width:900px)", 1)[1])
 
     def test_mixed_tariff_explanation_renders_in_battery_summary(self):
         seasonal_rows = []
@@ -478,7 +528,7 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("combined annual model", mismatch["reason"])
         self.assertIn("combined annual model", markup)
 
-    def test_battery_comparison_renders_limited_benefit_and_oversized_signals(self):
+    def test_battery_comparison_hides_oversized_wording_without_high_confidence(self):
         analysis = report.scenario_analysis(
             summary(),
             settings(),
@@ -489,8 +539,10 @@ class BatteryReportPresentationTests(unittest.TestCase):
         )
         markup = report.scenario_analysis_html(analysis)
 
-        self.assertIn("Limited additional benefit", markup)
-        self.assertIn("Likely oversized for this usage pattern", markup)
+        self.assertIn("Limited extra value", markup)
+        self.assertIn("Low additional return", markup)
+        self.assertNotIn("Likely oversized for this usage pattern", markup)
+        self.assertNotIn("Likely oversized", markup)
 
     def test_battery_dispatch_diagnostics_view_renders_daily_validation_table(self):
         analysis = report.scenario_analysis(
