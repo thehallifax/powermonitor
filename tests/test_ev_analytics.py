@@ -162,6 +162,65 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertIn("Actual charging sessions", html)
         self.assertIn("zero-kWh or incomplete charger session ignored", html)
 
+    def test_history_actual_ev_charging_uses_same_completed_sessions_as_ev_page(self):
+        with sqlite3.connect(":memory:") as conn:
+            create_ev_sessions(conn)
+            for day in range(10, 15):
+                create_readings(conn, f"2026-07-{day:02d}T23:30:00", grid_to_home_w=5000.0)
+            insert_ev_session(conn, "jul-10", "2026-07-10T20:00:00", "2026-07-10T22:00:00", 18.0)
+            report.data_engine(conn).validate_database()
+
+            summary = report.load_summary(conn, date(2026, 7, 10), date(2026, 7, 14), Settings())
+            trends = report.load_daily_trends(conn, date(2026, 7, 10), date(2026, 7, 14), Settings())
+
+        session_dates = [session["date"] for session in summary.ev_session_analytics["sessions"]]
+        trend_dates = [
+            trend.day.isoformat()
+            for trend in trends
+            if trend.ev_charging_source in {"ocular_export", "home_assistant_ocpp"} and trend.ev_charging_kwh > 0
+        ]
+
+        self.assertEqual(session_dates, ["2026-07-10"])
+        self.assertEqual(trend_dates, ["2026-07-10"])
+        self.assertAlmostEqual(
+            sum(session["energy_kwh"] for session in summary.ev_session_analytics["sessions"]),
+            sum(trend.ev_charging_kwh for trend in trends if trend.ev_charging_kwh > 0),
+        )
+        self.assertEqual([trend.ev_charging_kwh for trend in trends[1:]], [0.0, 0.0, 0.0, 0.0])
+
+    def test_historical_session_import_updates_ev_page_and_history_dates_totals_and_ordering(self):
+        with sqlite3.connect(":memory:") as conn:
+            create_ev_sessions(conn)
+            for day in range(10, 15):
+                create_readings(conn, f"2026-07-{day:02d}T23:30:00", grid_to_home_w=5000.0)
+                insert_ev_session(
+                    conn,
+                    f"jul-{day}",
+                    f"2026-07-{day:02d}T20:00:00",
+                    f"2026-07-{day:02d}T22:00:00",
+                    float(day),
+                )
+            report.data_engine(conn).validate_database()
+
+            summary = report.load_summary(conn, date(2026, 7, 10), date(2026, 7, 14), Settings())
+            trends = report.load_daily_trends(conn, date(2026, 7, 10), date(2026, 7, 14), Settings())
+
+        sessions = summary.ev_session_analytics["sessions"]
+        session_dates_latest_first = [session["date"] for session in sessions]
+        trend_dates_chronological = [
+            trend.day.isoformat()
+            for trend in trends
+            if trend.ev_charging_source == "ocular_export" and trend.ev_charging_kwh > 0
+        ]
+
+        self.assertEqual(session_dates_latest_first, ["2026-07-14", "2026-07-13", "2026-07-12", "2026-07-11", "2026-07-10"])
+        self.assertEqual(trend_dates_chronological, ["2026-07-10", "2026-07-11", "2026-07-12", "2026-07-13", "2026-07-14"])
+        self.assertEqual(list(reversed(trend_dates_chronological)), session_dates_latest_first)
+        self.assertAlmostEqual(
+            sum(session["energy_kwh"] for session in sessions),
+            sum(trend.ev_charging_kwh for trend in trends),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

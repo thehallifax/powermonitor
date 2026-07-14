@@ -1376,6 +1376,62 @@ def completed_ev_session(session: dict) -> bool:
     return float(session.get("energy_kwh") or 0) > 0 and bool(session.get("end_time"))
 
 
+def load_completed_ev_sessions(
+    conn: sqlite3.Connection, start: date, end: date, settings: Settings
+) -> list[dict]:
+    return [
+        session
+        for session in load_actual_ev_sessions(conn, start, end, settings)
+        if completed_ev_session(session)
+    ]
+
+
+def daily_ev_history_from_sessions(sessions: list[dict]) -> dict[str, dict[str, Any]]:
+    daily: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        day_text = str(session.get("date") or session.get("start_time") or "")[:10]
+        if not day_text:
+            continue
+        row = daily.setdefault(
+            day_text,
+            {
+                "energy_kwh": 0.0,
+                "cost": 0.0,
+                "source": session.get("source") or "unknown",
+                "sessions": 0,
+            },
+        )
+        row["energy_kwh"] += float(session.get("energy_kwh") or 0.0)
+        row["cost"] += float(session.get("cost") or 0.0)
+        row["sessions"] += 1
+        if session.get("source") == "ocular_export":
+            row["source"] = "ocular_export"
+    return daily
+
+
+def load_daily_ev_history(
+    conn: sqlite3.Connection,
+    start: date,
+    end: date,
+    settings: Settings,
+    estimated_by_day: Optional[dict[str, float]] = None,
+) -> dict[str, dict[str, Any]]:
+    if actual_ev_sources(settings):
+        return daily_ev_history_from_sessions(load_completed_ev_sessions(conn, start, end, settings))
+    return {
+        day_text: {
+            "energy_kwh": float(value or 0.0),
+            "cost": financial_engine().cost_of_ev_session(
+                float(value or 0.0),
+                tariff_resolver(settings).resolve(date.fromisoformat(day_text)).usage_rate("overnight"),
+            ),
+            "source": "estimated",
+            "sessions": 0,
+        }
+        for day_text, value in (estimated_by_day or {}).items()
+    }
+
+
 def ev_session_analytics(
     sessions: list[dict],
     settings: Settings,
@@ -1542,7 +1598,7 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     actual_ev_partial = False
     actual_source = "estimated"
     raw_actual_sessions = load_actual_ev_sessions(conn, start, end, settings)
-    actual_sessions = [session for session in raw_actual_sessions if completed_ev_session(session)]
+    actual_sessions = load_completed_ev_sessions(conn, start, end, settings)
     ignored_incomplete_sessions = len(raw_actual_sessions) - len(actual_sessions)
     analytics = ev_session_analytics(actual_sessions, settings, ignored_incomplete_sessions)
     if actual_sessions:
@@ -2210,19 +2266,17 @@ def load_daily_trends(
             row["exported"] += float(measurement.value or 0.0)
 
     trends = []
-    actual_ev_totals = data_engine(conn).get_daily_ev_session_totals(
-        start,
-        end,
-        sources=actual_ev_sources(settings),
-    )
+    estimated_ev_by_day = {day_text: float(row["ev_charging"]) for day_text, row in rows.items()}
+    daily_ev_history = load_daily_ev_history(conn, start, end, settings, estimated_ev_by_day)
+    configured_actual_sources = actual_ev_sources(settings)
     for day_text in sorted(rows):
         row = rows[day_text]
-        ev_value = float(row["ev_charging"])
-        ev_source = "estimated"
-        actual_ev = actual_ev_totals.get(day_text)
-        if actual_ev and float(actual_ev.get("energy_kwh") or 0) > 0:
-            ev_value = float(actual_ev["energy_kwh"])
-            ev_source = actual_ev["source"]
+        ev_history = daily_ev_history.get(day_text)
+        ev_value = float((ev_history or {}).get("energy_kwh") or 0.0)
+        ev_source = str(
+            (ev_history or {}).get("source")
+            or (configured_actual_sources[0] if configured_actual_sources else "estimated")
+        )
         tariff = resolver.resolve(date.fromisoformat(day_text))
         export_credit = float(row["exported"]) * tariff.primary_export_rate
         trends.append(
