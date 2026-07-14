@@ -25,6 +25,7 @@ reports/
 config/secrets.json
 config/demo/
 config/home_profile.json
+config/battery_quotes.json
 config/household_timeline.json
 config/household_timeline_audit.jsonl
 config/provider_mappings.json

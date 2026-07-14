@@ -480,6 +480,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if request.path == "/recommendations/lifecycle":
                 self.update_recommendation_lifecycle()
+            elif request.path == "/battery-quotes/save":
+                self.save_battery_quote()
+            elif request.path == "/battery-quotes/delete":
+                self.delete_battery_quote()
+            elif request.path == "/battery-quotes/duplicate":
+                self.duplicate_battery_quote()
             elif request.path == "/setup/billing-cycle":
                 self.update_billing_cycle()
             elif request.path == "/tariff-updates/check":
@@ -519,6 +525,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.redirect("/#tariff-updates")
             elif request.path.startswith("/household-timeline/"):
                 self.redirect("/#household-timeline")
+            elif request.path.startswith("/battery-quotes/"):
+                self.redirect("/#battery-quotes")
             elif request.path.startswith("/api/historical-backfill/") and not self.provider_request_wants_json():
                 action_name = request.path.rsplit("/", 1)[-1]
                 payload = {
@@ -1064,6 +1072,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             reason=reason,
         )
         self.redirect("/#recommendations")
+
+    def save_battery_quote(self) -> None:
+        payload = self.read_request_payload()
+        quote = report.normalize_battery_quote_payload(payload)
+        report.battery_quote_store().upsert(quote)
+        report.clear_report_cache()
+        regenerate_dashboard_report()
+        self.redirect("/#battery-quotes")
+
+    def delete_battery_quote(self) -> None:
+        payload = self.read_request_payload()
+        quote_id = str(payload.get("quote_id") or "")
+        if not quote_id:
+            raise ValueError("quote_id is required")
+        report.battery_quote_store().delete(quote_id)
+        report.clear_report_cache()
+        regenerate_dashboard_report()
+        self.redirect("/#battery-quotes")
+
+    def duplicate_battery_quote(self) -> None:
+        payload = self.read_request_payload()
+        quote_id = str(payload.get("quote_id") or "")
+        if not quote_id:
+            raise ValueError("quote_id is required")
+        report.battery_quote_store().duplicate(quote_id)
+        report.clear_report_cache()
+        regenerate_dashboard_report()
+        self.redirect("/#battery-quotes")
 
     def update_billing_cycle(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
