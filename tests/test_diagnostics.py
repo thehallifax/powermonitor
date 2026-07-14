@@ -95,6 +95,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(payload["canonical_report_path"], str(report_path.resolve()))
         self.assertTrue(payload["live_report_hash"]["matches"])
         self.assertEqual(payload["loaded_launch_agents"], ["com.local.powermonitor.web"])
+        self.assertIn("battery_catalogue", payload)
+        self.assertEqual(payload["battery_catalogue"]["validation_status"], "valid")
 
     def test_settings_runtime_diagnostics_rendering(self):
         html = report.runtime_check_html(

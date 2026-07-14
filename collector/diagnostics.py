@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from engine.battery_catalogue import load_battery_catalogue
+
 import report
 import validate_launch_agents
 
@@ -244,6 +246,7 @@ def diagnostics_payload(
     listener_duplicates = duplicate_listeners(port)
     stale = stale_report(report_path, stale_minutes)
     missing = missing_files(report_path)
+    battery_catalogue = load_battery_catalogue().summary()
     issues = []
     issues.extend(launch_agents.get("issues") or [])
     if process_duplicates["duplicate_roles"]:
@@ -261,6 +264,8 @@ def diagnostics_payload(
     live_match = live_hash_matches_report(report_path=report_path, host=host, port=port, fetcher=fetcher)
     if not live_match["matches"]:
         issues.append("live dashboard does not match report hash")
+    if battery_catalogue.get("errors"):
+        issues.append("battery catalogue validation errors")
     return {
         "ok": not issues,
         "canonical_report_path": str(report_path),
@@ -273,6 +278,7 @@ def diagnostics_payload(
         "wrong_working_directory": plist_mismatches["wrong_working_directory"],
         "mismatched_executable": plist_mismatches["mismatched_executable"],
         "missing_files": missing,
+        "battery_catalogue": battery_catalogue,
         "issues": sorted(set(issues)),
     }
 

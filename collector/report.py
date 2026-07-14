@@ -35,6 +35,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from engine.briefing_engine import BriefingEngine
 from engine.advisor_presenter import attach_decision_to_advisors, explain_household_decisions
 from engine.bill_reconciliation_engine import BillReconciliationEngine
+from engine.battery_catalogue import (
+    CATALOGUE_DISCLAIMER,
+    load_battery_catalogue,
+    match_battery_products,
+)
 from engine.charging_advisor import ChargingAdvisor
 from engine.context_engine import ContextEngine
 from engine.cost_advisor import CostAdvisor
@@ -1219,6 +1224,8 @@ def dashboard_data(
         "battery_recommendation": scenarios.get("battery_recommendation"),
         "battery_comparison": scenarios["battery_comparison"],
         "battery_investment": scenarios["battery_investment"],
+        "battery_catalogue": scenarios.get("battery_catalogue"),
+        "battery_product_matches": scenarios.get("battery_product_matches"),
         "timeline": display_timeline.as_dict(),
         "comparison": comparison,
         "historical_comparison": historical_comparison,
@@ -2155,6 +2162,16 @@ def _scenario_analysis_uncached(
     battery_recommendation = battery_comparison.get("battery_recommendation") or {}
     with perf_stage("battery investment calculation"):
         battery_investment = battery_investment_analysis(battery_comparison, settings)
+    with perf_stage("battery catalogue matching"):
+        battery_catalogue = load_battery_catalogue()
+        battery_catalogue_summary = battery_catalogue.summary()
+        battery_product_matches = match_battery_products(
+            float(battery_recommendation.get("recommended_size_kwh") or (battery_comparison.get("recommended") or {}).get("capacity_kwh") or 0.0),
+            battery_catalogue,
+            household_context=battery_product_household_context(settings),
+            investment=battery_investment,
+            max_matches=5,
+        )
 
     ev_window_cost = ev_kwh * current_rates[cheapest_bucket]
     ev_window_savings = max(ev_actual_cost - ev_window_cost, 0.0)
@@ -2184,7 +2201,27 @@ def _scenario_analysis_uncached(
         "battery_comparison": battery_comparison,
         "battery_recommendation": battery_recommendation,
         "battery_investment": battery_investment,
+        "battery_catalogue": battery_catalogue_summary,
+        "battery_product_matches": battery_product_matches,
         "battery_future_growth_note": battery_future_growth_note_supported(summary, settings),
+    }
+
+
+def battery_product_household_context(settings: Settings) -> dict[str, Any]:
+    try:
+        profile = load_home_profile(settings=settings)
+    except (OSError, ValueError):
+        profile = HomeProfile.default(settings)
+    extra = getattr(profile, "extra_fields", {}) or {}
+    return {
+        "region": getattr(profile, "location_region", "") or getattr(settings, "state_or_territory", "") or "AU",
+        "inverter_brand": getattr(profile, "inverter_brand", "") or getattr(settings, "inverter_brand", ""),
+        "inverter_model": getattr(profile, "inverter_model", "") or getattr(settings, "inverter_model", ""),
+        "inverter_family": extra.get("inverter_family") or getattr(settings, "inverter_family", ""),
+        "phase_configuration": extra.get("phase_configuration") or getattr(settings, "phase_configuration", ""),
+        "solar_capacity_kw": getattr(profile, "solar_capacity_kw", None),
+        "backup_required": bool(extra.get("backup_required") or getattr(settings, "battery_backup_required", False)),
+        "current_tariff": getattr(settings, "current_plan", ""),
     }
 
 
@@ -9136,6 +9173,7 @@ def system_page_html(
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
     battery_comparison: Optional[dict] = None,
+    battery_catalogue: Optional[dict] = None,
 ) -> str:
     counts = ev_source_counts()
     count_rows = "".join(
@@ -9168,6 +9206,7 @@ def system_page_html(
       </div>
       {provider_observations_diagnostics_html(provider_observations)}
       {runtime_check_html(runtime_check)}
+      {battery_catalogue_diagnostics_html(battery_catalogue)}
       {battery_dispatch_diagnostics_html(battery_comparison)}
       {provider_runtime_html(provider_runtime)}
       {provider_registry_html(provider_registry)}
@@ -9211,6 +9250,40 @@ def system_page_html(
       ''', css_class="system-group")}
       {disclosure_html("Advanced Diagnostics", "Data connections, behaviour, recommendation trail, notifications, and local configuration", advanced_body, css_class="system-group advanced-diagnostics")}
     </section>
+    """
+
+
+def battery_catalogue_diagnostics_html(catalogue: Optional[dict]) -> str:
+    if not catalogue:
+        return ""
+    warnings = catalogue.get("warnings") or []
+    errors = catalogue.get("errors") or []
+    missing_cost = catalogue.get("products_missing_cost_data") or []
+    uncertain = catalogue.get("products_with_uncertain_compatibility_data") or []
+    review_dates = ", ".join(str(item) for item in catalogue.get("last_source_review_dates") or []) or "Not published"
+    rows = {
+        "Catalogue version": catalogue.get("version") or "Unknown",
+        "Product count": catalogue.get("product_count", 0),
+        "Australian active products": catalogue.get("australian_active_product_count", 0),
+        "Validation": catalogue.get("validation_status") or "unknown",
+        "Last source review": review_dates,
+        "Warnings": len(warnings),
+        "Errors": len(errors),
+        "Missing cost data": len(missing_cost),
+        "Uncertain compatibility": len(uncertain),
+    }
+    grid = "".join(f"<div><span>{html.escape(label)}</span><strong>{html.escape(str(value))}</strong></div>" for label, value in rows.items())
+    details = warnings + errors
+    detail_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in details) or "<li>No validation warnings.</li>"
+    return f"""
+    <div class="system-card battery-catalogue-diagnostics">
+      <div class="chart-heading"><h3>Battery catalogue diagnostics</h3><span>Product matching</span></div>
+      <div class="config-grid">{grid}</div>
+      <details class="timeline-diagnostics">
+        <summary>Catalogue validation details</summary>
+        <ul>{detail_html}</ul>
+      </details>
+    </div>
     """
 
 
@@ -9697,7 +9770,12 @@ def bills_actions_html(recommendations: list, plan: dict) -> str:
     """
 
 
-def battery_comparison_html(comparison: Optional[dict], investment: Optional[dict] = None, show_future_usage_note: bool = False) -> str:
+def battery_comparison_html(
+    comparison: Optional[dict],
+    investment: Optional[dict] = None,
+    show_future_usage_note: bool = False,
+    product_matches: Optional[dict] = None,
+) -> str:
     if not comparison:
         return ""
     baseline = comparison.get("baseline", {})
@@ -9764,6 +9842,7 @@ def battery_comparison_html(comparison: Optional[dict], investment: Optional[dic
       {battery_primary_recommendation_html(comparison, tariff_name)}
       {battery_why_this_size_html(comparison)}
       {battery_purchase_decision_cards_html(comparison, investment, show_future_usage_note)}
+      {battery_product_matches_html(product_matches)}
       {battery_annual_sizing_table_html(comparison)}
       {battery_accordion_html("Current billing-period evidence", "Selected-period context", battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source, comparison))}
       {battery_accordion_html("Seasonal evidence", "Historical seasonal context", battery_seasonal_model_html(comparison.get("seasonal_model"), comparison) or '<p class="scenario-note">Seasonal battery modelling needs interval-grade historical import/export data.</p>')}
@@ -10091,6 +10170,135 @@ def battery_upgrade_economics_html(context: dict[str, Any]) -> str:
         </div>
       </div>
     """
+
+
+def battery_product_matches_html(product_matches: Optional[dict]) -> str:
+    if not product_matches:
+        return ""
+    matches = product_matches.get("matches") or []
+    if not matches:
+        warnings = product_matches.get("warnings") or ["No catalogue products could be matched to this battery recommendation."]
+        return f"""
+        <div class="battery-product-matches">
+          <div class="chart-heading"><h3>Battery systems near your recommended size</h3><span>Catalogue matching</span></div>
+          <p class="scenario-note">{html.escape(str(warnings[0]))}</p>
+        </div>
+        """
+    cards = "".join(battery_product_card_html(match) for match in matches[:5])
+    table_rows = "".join(battery_product_table_row_html(match) for match in matches)
+    disclaimer = str(product_matches.get("disclaimer") or CATALOGUE_DISCLAIMER)
+    return f"""
+      <div class="battery-product-matches">
+        <div class="chart-heading"><h3>Battery systems near your recommended size</h3><span>Catalogue matching</span></div>
+        <div class="battery-product-grid">{cards}</div>
+        <p class="scenario-note">{html.escape(disclaimer)}</p>
+        <details class="battery-calculation-details battery-product-table-details">
+          <summary>Compare matched systems</summary>
+          <div class="battery-product-table-wrap">
+            <table class="responsive-table battery-product-table">
+              <thead><tr><th>Product</th><th>Usable capacity</th><th>Difference</th><th>Modular</th><th>Power</th><th>Backup</th><th>Compatibility</th><th>Indicative cost</th><th>Data confidence</th></tr></thead>
+              <tbody>{table_rows}</tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    """
+
+
+def battery_product_card_html(match: dict[str, Any]) -> str:
+    manufacturer = str(match.get("manufacturer") or "")
+    model = str(match.get("model_name") or "")
+    capacity = float(match.get("configured_capacity_kwh") or 0.0)
+    difference = float(match.get("capacity_difference_kwh") or 0.0)
+    relation = "above" if difference > 0 else "below" if difference < 0 else "matching"
+    diff_text = (
+        f"{abs(difference):g} kWh {relation} your {float(match.get('configured_capacity_kwh') or 0.0) - difference:g} kWh recommendation"
+        if relation != "matching"
+        else "Matches your modelled recommendation"
+    )
+    warnings = match.get("warnings") or []
+    warning = str(warnings[0]) if warnings else "Final installation requirements need installer confirmation."
+    payback = match.get("estimated_payback_range") or {}
+    payback_text = (
+        f"Estimated payback {float(payback['low_years']):.1f}-{float(payback['high_years']):.1f} years"
+        if payback.get("low_years") is not None and payback.get("high_years") is not None
+        else "Installer quote required for product-specific payback"
+    )
+    return f"""
+      <article class="battery-product-card">
+        <span>{html.escape(str(match.get("capacity_fit") or "Capacity fit"))}</span>
+        <h4>{html.escape(manufacturer)} {html.escape(model)}</h4>
+        <strong>{capacity:g} kWh usable</strong>
+        <p>{html.escape(diff_text)}</p>
+        <ul>
+          <li>{html.escape(module_text(match))}</li>
+          <li>{html.escape(str(match.get("compatibility_status") or "Requires installer confirmation"))}</li>
+          <li>{html.escape(backup_text(match.get("backup_capable")))}</li>
+          <li>{html.escape(cost_text(match.get("cost_range")))}</li>
+          <li>{html.escape(payback_text)}</li>
+          <li>{html.escape(warning)}</li>
+          <li>Specification confidence: {html.escape(str(match.get("data_confidence") or "Low"))}; source checked {html.escape(str(match.get("source_checked_at") or "unknown"))}</li>
+        </ul>
+      </article>
+    """
+
+
+def battery_product_table_row_html(match: dict[str, Any]) -> str:
+    return f"""
+      <tr>
+        <td>{html.escape(str(match.get("manufacturer") or ""))} {html.escape(str(match.get("model_name") or ""))}</td>
+        <td>{float(match.get("configured_capacity_kwh") or 0.0):g} kWh</td>
+        <td>{signed_product_kwh(float(match.get("capacity_difference_kwh") or 0.0))}</td>
+        <td>{html.escape(module_text(match))}</td>
+        <td>{html.escape(product_power_text(match))}</td>
+        <td>{html.escape(backup_text(match.get("backup_capable")))}</td>
+        <td>{html.escape(str(match.get("compatibility_status") or "Requires installer confirmation"))}</td>
+        <td>{html.escape(cost_text(match.get("cost_range")))}</td>
+        <td>{html.escape(str(match.get("data_confidence") or "Low"))}</td>
+      </tr>
+    """
+
+
+def module_text(match: dict[str, Any]) -> str:
+    config = match.get("module_configuration") or {}
+    if not config.get("modular"):
+        return "Fixed system"
+    modules = config.get("modules")
+    module_size = config.get("module_capacity_kwh")
+    if modules and module_size:
+        return f"{int(modules)} x {float(module_size):g} kWh modules"
+    return "Modular configuration; confirm with installer"
+
+
+def product_power_text(match: dict[str, Any]) -> str:
+    discharge = match.get("continuous_discharge_power_kw")
+    peak = match.get("peak_discharge_power_kw")
+    if discharge is None and peak is None:
+        return "Not published"
+    text = f"{float(discharge):g} kW continuous" if discharge is not None else "Continuous power not published"
+    if peak is not None:
+        text += f"; {float(peak):g} kW peak"
+    return text
+
+
+def backup_text(value: Any) -> str:
+    if value is True:
+        return "Backup capable where correctly configured"
+    if value is False:
+        return "Backup not published as supported"
+    return "Confirm with installer"
+
+
+def cost_text(cost_range: Optional[dict]) -> str:
+    if not cost_range:
+        return "Installer quote required"
+    return f"{money(float(cost_range['low']))}-{money(float(cost_range['high']))} indicative"
+
+
+def signed_product_kwh(value: float) -> str:
+    if abs(value) < 0.005:
+        return "0 kWh"
+    return f"{'+' if value > 0 else '-'}{abs(value):g} kWh"
 
 
 def homeowner_battery_signal(signal: str, confidence: str = "") -> str:
@@ -10518,7 +10726,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     <section class="report-section scenario-section">
       <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
-      {battery_comparison_html(analysis.get("battery_comparison"), analysis.get("battery_investment"), show_future_usage_note=bool(analysis.get("battery_future_growth_note")))}
+      {battery_comparison_html(analysis.get("battery_comparison"), analysis.get("battery_investment"), show_future_usage_note=bool(analysis.get("battery_future_growth_note")), product_matches=analysis.get("battery_product_matches"))}
       {battery_investment_html(analysis.get("battery_investment"))}
       {insights_html}
     </section>
@@ -11005,7 +11213,7 @@ def write_html(
       {imports_page_html(capability_summary=capability_summary, setup=setup_checklist, provider_registry=provider_registry, provider_management=provider_management, provider_observations=provider_observations)}
     </div>
     {historical_coverage_html(historical_data, historical_backfill_flash)}
-    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check, battery_comparison=scenarios.get("battery_comparison"))}
+    {system_page_html(health, settings, period_summary, capability_summary, setup_checklist, provider_registry, provider_management, provider_runtime, provider_observations, promotion_summary, household_current_context, household_state, household_behaviour.as_dict(), household_anomalies, household_decisions, decision_summary, advisor_explanations.active(), latest_state_snapshot, recent_state_snapshots, state_change_summary, notification_readiness_summary, notification_preferences.as_dict(), notification_history_summary, provider_flash, runtime_check, battery_comparison=scenarios.get("battery_comparison"), battery_catalogue=scenarios.get("battery_catalogue"))}
   </section>
 """
     )
@@ -11404,7 +11612,7 @@ def write_html(
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
     .battery-comparison {{ display:grid; gap:14px; }}
     .battery-conclusion {{ max-width:920px; color:#4c3f1f; font-size:14px; line-height:1.55; }}
-    .battery-primary-summary,.battery-why-size,.battery-tradeoff-card,.battery-upgrade-economics {{ padding:16px; background:#fff; border:1px solid #eeddb0; border-radius:14px; }}
+    .battery-primary-summary,.battery-why-size,.battery-tradeoff-card,.battery-upgrade-economics,.battery-product-matches,.battery-product-card {{ padding:16px; background:#fff; border:1px solid #eeddb0; border-radius:14px; }}
     .battery-primary-summary {{ display:grid; gap:12px; }}
     .battery-primary-summary .battery-metrics {{ margin:0; }}
     .battery-based-on {{ display:grid; gap:8px; padding:12px 14px; background:#fffaf0; border:1px solid #eeddb0; border-radius:12px; }}
@@ -11426,6 +11634,17 @@ def write_html(
     .battery-upgrade-economics h4,.battery-upgrade-economics p {{ margin:0; }}
     .battery-upgrade-economics h4 {{ color:#302611; font-size:13px; letter-spacing:-.01em; }}
     .battery-upgrade-economics p {{ color:#5f6b67; font-size:12px; line-height:1.45; }}
+    .battery-product-matches {{ display:grid; gap:12px; }}
+    .battery-product-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; }}
+    .battery-product-card {{ display:grid; gap:7px; align-content:start; background:#fffdf7; }}
+    .battery-product-card span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
+    .battery-product-card h4 {{ margin:0; color:#1f2a26; font-size:15px; line-height:1.25; }}
+    .battery-product-card strong {{ font-size:20px; letter-spacing:-.03em; }}
+    .battery-product-card p {{ margin:0; color:#4c3f1f; font-size:12px; line-height:1.4; }}
+    .battery-product-card ul {{ display:grid; gap:5px; margin:0; padding-left:18px; color:#5f6b67; font-size:11px; line-height:1.4; }}
+    .battery-product-table-wrap {{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }}
+    .battery-product-table {{ min-width:980px; table-layout:auto; }}
+    .battery-product-table th,.battery-product-table td {{ white-space:nowrap; }}
     .battery-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:14px 0; }}
     .battery-metrics div,.battery-diagnostics .config-grid div {{ padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
     .battery-metrics span,.battery-metrics strong,.battery-metrics small,.battery-diagnostics .config-grid span,.battery-diagnostics .config-grid strong,.battery-diagnostics .config-grid small {{ display:block; }}

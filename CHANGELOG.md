@@ -1,5 +1,27 @@
 # Changelog
 
+## BAT-007 - Battery Catalogue and Real-Product Matching
+
+- Added a source-controlled Australian battery product catalogue with stable
+  product IDs, source metadata, confidence labels, modular capacity data,
+  compatibility notes, optional indicative cost ranges, lifecycle status, and
+  checksums.
+- Added catalogue loading, validation, diagnostics, and CLI review tools:
+  `collector/validate_battery_catalogue.py` and
+  `collector/list_battery_catalogue.py`.
+- Added capacity-led product matching around the existing battery
+  recommendation without changing battery dispatch, seasonal modelling,
+  sizing, tariff calculations, or investment assumptions.
+- Added neutral Decisions-page product cards and a comparison disclosure for
+  nearby battery systems, with installer-confirmation language and
+  product-specific indicative payback ranges where catalogue costs exist.
+- Exposed safe `battery_catalogue` and `battery_product_matches` structures in
+  the dashboard API and catalogue diagnostics in Settings/System.
+- Added regression coverage for catalogue validation, modular/fixed matching,
+  SolarEdge context, non-SolarEdge alternatives, missing-price behaviour,
+  payback ranges, neutral presentation, API compatibility, diagnostics, and
+  CLI validation.
+
 ## FIN-006 - Historical Bill Comparison
 
 - Added a deterministic historical comparison resolver for previous billing

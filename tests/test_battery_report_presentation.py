@@ -183,6 +183,9 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Why this size?", markup)
         self.assertIn("Maximum savings", markup)
         self.assertIn("Best balance of purchase cost and savings for current usage", markup)
+        self.assertIn("Battery systems near your recommended size", markup)
+        self.assertIn("Product matching is based on published specifications", markup)
+        self.assertIn("Compare matched systems", markup)
         self.assertIn("Current billing-period evidence", markup)
         self.assertIn("Seasonal evidence", markup)
         self.assertIn("Methodology", markup)
@@ -468,6 +471,10 @@ class BatteryReportPresentationTests(unittest.TestCase):
         ):
             self.assertIn(field, analysis["battery_investment"])
         self.assertIn("battery_future_growth_note", analysis)
+        self.assertIn("battery_catalogue", analysis)
+        self.assertIn("battery_product_matches", analysis)
+        self.assertIn("matches", analysis["battery_product_matches"])
+        self.assertEqual(before_recommendation, analysis["battery_recommendation"])
 
     def test_battery_cards_keep_responsive_grid_rules(self):
         css = (PROJECT_ROOT / "collector" / "report.py").read_text()

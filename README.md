@@ -484,6 +484,44 @@ no EV charging, exported solar self-consumed, and a 10 kWh battery shifting
 Peak imports to solar. The API exposes these as `plan_comparison`,
 `scenario_analysis`, and `billing_scenarios`.
 
+## Battery Catalogue
+
+PowerMonitor keeps a source-controlled, provider-neutral battery product
+catalogue under `data/catalogues/batteries/`. The catalogue exists to add
+real-product context around the existing battery sizing and investment model:
+it does not change dispatch, seasonal weighting, tariff calculations, or the
+primary recommended usable capacity.
+
+Catalogue entries use stable `product_id` values, published specification
+metadata, source URLs, source review dates, data-confidence labels, supported
+system capacities, compatibility notes, and optional indicative installed-cost
+ranges. Unknown specification or pricing fields should stay `null`; do not
+guess inverter compatibility, backup behaviour, warranty conditions, or prices.
+Product matching is capacity-led and deliberately neutral: it highlights
+systems near the modelled usable capacity, warns when installer confirmation is
+needed, and avoids brand endorsements.
+
+Review or update catalogue data with:
+
+```sh
+python3 collector/validate_battery_catalogue.py
+python3 collector/list_battery_catalogue.py
+```
+
+`validate_battery_catalogue.py` loads every tracked catalogue JSON file,
+checks IDs, module boundaries, supported capacities, source metadata, cost
+ranges, percentages, lifecycle status, and checksums, and exits non-zero on
+catalogue errors. Normal report generation remains offline-capable and never
+scrapes manufacturer websites.
+
+The dashboard exposes safe catalogue metadata as `battery_catalogue` and
+matched products as `battery_product_matches` in `/api/summary`. Product
+matching is decision-support context only: final compatibility, installation
+design, warranty conditions, availability, rebates, and pricing must be
+confirmed by a qualified installer. The catalogue schema includes
+quote-comparison seed fields so future installer quotes can attach to stable
+product/configuration identifiers without changing the sizing model.
+
 Car fuel comparison is disabled by default. It only becomes available when
 `car_comparison_enabled` is true and distance plus EV efficiency data are
 provided. Without distance or charger-session data, the dashboard states:

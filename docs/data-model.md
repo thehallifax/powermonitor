@@ -131,6 +131,44 @@ PowerMonitor has enough declared facts and/or provider measurements to support
 it now. Capability records also carry unavailable reasons, supporting
 profile/provider sources, confidence, and data quality.
 
+## Battery Product Catalogue
+
+The Battery Product Catalogue is source-controlled decision-support data stored
+under `data/catalogues/batteries/`. It maps abstract battery sizing outputs
+such as `15 kWh usable` to real product configurations that are reasonably
+close to the modelled usable capacity.
+
+The catalogue is not runtime state and is not a connector. It must not contain
+credentials, customer identifiers, account numbers, quotes, cookies, tokens, or
+raw measurements. Each product record carries a stable `product_id`, source
+metadata, data-confidence label, capacity and module fields, optional power and
+warranty fields, compatibility notes, optional indicative cost ranges, lifecycle
+status, version, and checksum.
+
+Matching rules are intentionally conservative:
+
+1. Usable-capacity fit is dominant.
+2. Modular products are configured to the closest supported usable capacity.
+3. Under-sizing and over-sizing are shown explicitly.
+4. Optional power, phase, backup, and inverter fields improve context but do
+   not silently reject products when unpublished.
+5. `Compatible` and `Not compatible` should only be used when both catalogue
+   and household facts support that claim. Most products remain `Likely
+   compatible`, `Requires installer confirmation`, `Additional
+   inverter/controller required`, or `Unknown`.
+6. Indicative product payback uses existing simulated annual savings and
+   catalogue cost ranges. It does not rerun battery dispatch for products.
+
+Capacity-fit labels use fixed thresholds: `Excellent fit` is within 5% or
+0.75 kWh of the modelled capacity; `Close fit` is within 15% or 2.0 kWh;
+larger differences are labelled as smaller/larger than recommended unless the
+difference exceeds 40%, where the product is a `Poor capacity fit`.
+
+The API exposes safe catalogue summaries through `battery_catalogue` and
+product matches through `battery_product_matches`. Local paths and sensitive
+provider details are not exposed. Quote-comparison fields are present as stable
+seeds only; full installer quote entry is intentionally out of scope.
+
 ## Confidence Rules
 
 Confidence is attached to recommendations and scenario results.
