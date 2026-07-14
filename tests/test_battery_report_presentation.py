@@ -180,10 +180,18 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Extra period saving", markup)
         self.assertIn("Period bill", markup)
         self.assertIn("scheduled grid charging", markup)
-        self.assertIn("How was this calculated?", markup)
-        self.assertNotIn("<th>Peak avoided</th>", markup.split("How was this calculated?", 1)[0])
+        self.assertIn("Why this size?", markup)
+        self.assertIn("Larger option", markup)
+        self.assertIn("Current billing-period evidence", markup)
+        self.assertIn("Seasonal evidence", markup)
+        self.assertIn("Methodology", markup)
+        self.assertIn("<h4>Data used</h4>", markup)
+        self.assertIn("<h4>Tariffs used</h4>", markup)
+        self.assertIn("<h4>Battery dispatch assumptions</h4>", markup)
+        self.assertIn("<h4>Grid charging assumptions</h4>", markup)
+        self.assertIn("<h4>Limitations</h4>", markup)
         self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 July 2026.", markup)
-        self.assertIn("Battery investment", markup)
+        self.assertIn('id="battery-investment"', markup)
         self.assertIn("Estimated investment", markup)
         self.assertIn("Estimated annual saving", markup)
         self.assertIn("Simple payback", markup)
@@ -256,12 +264,57 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertEqual(analysis["battery_investment"]["seasonal_confidence"], "High")
         self.assertIn("Recommended battery", markup)
         self.assertIn("Annual history", markup)
-        self.assertIn("Estimated annual saving", markup)
+        self.assertIn("Estimated annual bill reduction", markup)
+        self.assertLess(markup.index("Recommended battery"), markup.index("Why this size?"))
+        self.assertIn("Why this size?", markup)
+        self.assertIn("Smaller option", markup)
+        self.assertIn("Larger option", markup)
         self.assertIn("Current billing-period result", markup)
         self.assertIn("Best for selected period", markup)
         self.assertIn("Annual values combine included seasons", markup)
         self.assertIn("Period solar only", markup)
+        self.assertIn("Annual bill reduction", markup)
+        self.assertIn("Extra benefit versus previous size", markup)
+        self.assertIn("Benefit versus recommended", markup)
+        annual_table = markup.split("battery-annual-table", 1)[1].split("</table>", 1)[0]
+        self.assertNotIn("Marginal gain", annual_table)
+        self.assertNotIn("Next-size gain", annual_table)
+        self.assertIn('<details class="battery-accordion">\n        <summary><span>Current billing-period evidence</span>', markup)
+        self.assertIn('<details class="battery-accordion">\n        <summary><span>Seasonal evidence</span>', markup)
+        current_section = markup.split("Current billing-period evidence", 1)[1].split("Seasonal evidence", 1)[0]
+        self.assertNotIn("battery-signal recommended", current_section)
+        self.assertIn("battery-table-wrap", markup)
+        self.assertIn("battery-seasonal-table-wrap", markup)
         self.assertNotIn("<th>Solar only</th>", markup)
+
+    def test_mixed_tariff_explanation_renders_in_battery_summary(self):
+        seasonal_rows = []
+        seasonal_rows.extend(seasonal_days(date(2026, 1, 1), 40))
+        seasonal_rows.extend(seasonal_days(date(2026, 4, 1), 40))
+        seasonal_rows.extend(seasonal_days(date(2026, 7, 1), 40))
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+            seasonal_battery_intervals=seasonal_rows,
+        )
+        periods = [
+            {"tariff_name": "Flat-rate tariff", "interval_count": 48},
+            {"tariff_name": "Synergy EV Add On", "interval_count": 72},
+        ]
+        analysis["battery_comparison"]["tariff_periods_used"] = periods
+        analysis["battery_comparison"]["tariff_history_warning"] = "This recommendation includes the flat-rate tariff through 30 April 2026 and the Synergy EV Add On from 1 May 2026."
+        analysis["battery_comparison"]["battery_recommendation"]["tariff_periods_used"] = periods
+
+        markup = report.battery_comparison_html(analysis["battery_comparison"])
+
+        self.assertIn("flat-rate tariff through 30 April 2026", markup)
+        self.assertIn("Historical tariff changes included", markup)
+        self.assertIn("Current and previous household tariff periods", markup)
+        self.assertIn("Cheap-grid battery charging is only modelled during periods where the active tariff includes a suitable cheap window.", markup)
 
     def test_annual_seasonal_mismatch_is_explained_in_homeowner_wording(self):
         seasonal_rows = []
