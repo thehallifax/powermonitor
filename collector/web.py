@@ -434,6 +434,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         period_kind=self.param(params, "period", "current_billing_period"),
                         start=self.param(params, "start"),
                         end=self.param(params, "end"),
+                        comparison_type=self.param(params, "comparison_type", "previous_billing_period"),
                     )
                 )
             elif path in {"/api/setup_progress", "/api/setup_tasks", "/api/setup_sections"}:
@@ -591,13 +592,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.param(params, "start_b"),
             self.param(params, "end_b"),
         )
-        return report.comparison_data(period_a, period_b, settings)
+        historical = report.historical_comparison_data(
+            period_a,
+            settings,
+            comparison_type=self.param(params, "comparison_type", "previous_equivalent_period"),
+            today=today,
+        )
+        legacy = report.comparison_data(period_a, period_b, settings)
+        return {**legacy, "historical_comparison": historical}
 
     def setup_api_payload(self, path: str, params: dict) -> dict:
         data = report.dashboard_data(
             period_kind=self.param(params, "period", "current_billing_period"),
             start=self.param(params, "start"),
             end=self.param(params, "end"),
+            comparison_type=self.param(params, "comparison_type", "previous_billing_period"),
         )
         key = path.rsplit("/", 1)[-1]
         return {key: data[key]}
@@ -918,7 +927,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         raw_period = self.param(params, "period")
         start = self.param(params, "start")
         end = self.param(params, "end")
-        requested = any(value not in {None, ""} for value in (raw_period, start, end))
+        raw_comparison = self.param(params, "comparison_type")
+        requested = any(value not in {None, ""} for value in (raw_period, start, end, raw_comparison))
         if not requested:
             return False, "current_billing_period", None, None, None
         period_kind = raw_period or "current_billing_period"
@@ -1370,12 +1380,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         provider_flash = provider_flash_from_params(params)
         tariff_flash = tariff_update_flash_from_params(params)
         historical_backfill_flash = historical_backfill_flash_from_params(params)
+        comparison_type = self.param(params, "comparison_type", "previous_billing_period")
         requested_period, period_kind, start, end, period_flash = self.requested_dashboard_period(params)
         if provider_flash or tariff_flash or historical_backfill_flash or requested_period:
             content = report.build_live_html(
                 period_kind,
                 start,
                 end,
+                comparison_type=comparison_type,
                 provider_flash=provider_flash,
                 tariff_update_flash=tariff_flash,
                 historical_backfill_flash=historical_backfill_flash,

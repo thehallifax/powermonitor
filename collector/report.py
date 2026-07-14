@@ -62,6 +62,11 @@ from engine.historical_backfill import (
     seasonal_history_summary,
     solaredge_capability_audit,
 )
+from engine.historical_comparison import (
+    COMPARISON_LABELS,
+    build_historical_comparison,
+    resolve_historical_comparison,
+)
 from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
 from engine.household_timeline import (
     DEFAULT_HOUSEHOLD_TIMELINE_PATH,
@@ -806,18 +811,34 @@ def dashboard_data(
     period_kind: str = "current_billing_period",
     start: Optional[str] = None,
     end: Optional[str] = None,
+    comparison_type: str = "previous_billing_period",
 ) -> dict:
     current_day = today or local_today()
     settings = load_settings()
     selected = resolve_period(period_kind, settings, current_day, start, end)
     if current_context() is None:
         with performance_context(period_payload(selected)):
-            return dashboard_data(current_day, period_kind, start, end)
+            return dashboard_data(current_day, period_kind, start, end, comparison_type)
     billing = resolve_period("current_billing_period", settings, current_day)
-    compared = (
-        resolve_period("previous_billing_period", settings, current_day)
-        if selected.kind == "current_billing_period"
-        else previous_equivalent(selected)
+    comparison_resolution = resolve_historical_comparison(
+        comparison_type,
+        selected,
+        today=current_day,
+        settings=settings,
+    )
+    primary_info = comparison_resolution["primary_period"]
+    primary_for_comparison = Period(
+        primary_info["kind"],
+        primary_info["label"],
+        date.fromisoformat(primary_info["start"]),
+        date.fromisoformat(primary_info["end"]),
+    )
+    compared_info = comparison_resolution["comparison_period"]
+    compared = Period(
+        compared_info["kind"],
+        compared_info["label"],
+        date.fromisoformat(compared_info["start"]),
+        date.fromisoformat(compared_info["end"]),
     )
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
@@ -859,6 +880,16 @@ def dashboard_data(
             ev_sources=actual_ev_sources(settings),
         )
         comparison = compare_summaries(selected, period_summary, compared, compared_summary)
+        historical_primary_summary = (
+            period_summary
+            if primary_for_comparison.start == selected.start and primary_for_comparison.end == selected.end
+            else load_summary(conn, primary_for_comparison.start, primary_for_comparison.end, settings)
+        )
+        historical_comparison = build_historical_comparison(
+            comparison_resolution,
+            historical_primary_summary,
+            compared_summary,
+        )
         overnight_baseload_watts = context_engine.get_overnight_baseload_watts(selected.start, selected.end)
         with perf_stage("provider/health diagnostics"):
             provider_observations = context_engine.get_provider_observation_summary()
@@ -1190,6 +1221,7 @@ def dashboard_data(
         "battery_investment": scenarios["battery_investment"],
         "timeline": display_timeline.as_dict(),
         "comparison": comparison,
+        "historical_comparison": historical_comparison,
         "advisors": advisors.as_dict(),
         "advisor_explanations": advisor_explanations.as_dict(),
         "daily_briefing": briefing.as_dict(),
@@ -2443,6 +2475,57 @@ def comparison_data(period_a: Period, period_b: Period, settings: Settings) -> d
         )
 
 
+def historical_comparison_data(
+    primary_period: Period,
+    settings: Settings,
+    *,
+    comparison_type: str = "previous_billing_period",
+    today: Optional[date] = None,
+) -> dict[str, Any]:
+    current_day = today or local_today()
+    resolved = resolve_historical_comparison(
+        comparison_type,
+        primary_period,
+        today=current_day,
+        settings=settings,
+    )
+    primary = resolved["primary_period"]
+    comparison = resolved["comparison_period"]
+    with sqlite3.connect(DB_PATH) as conn:
+        validate_database(conn)
+        primary_summary = load_summary(
+            conn,
+            date.fromisoformat(primary["start"]),
+            date.fromisoformat(primary["end"]),
+            settings,
+        )
+        comparison_summary = load_summary(
+            conn,
+            date.fromisoformat(comparison["start"]),
+            date.fromisoformat(comparison["end"]),
+            settings,
+        )
+    return build_historical_comparison(resolved, primary_summary, comparison_summary)
+
+
+def historical_comparison_for_summaries(
+    primary_period: Period,
+    primary_summary: Summary,
+    comparison_summary: Summary,
+    settings: Settings,
+    *,
+    comparison_type: str = "previous_billing_period",
+    today: Optional[date] = None,
+) -> dict[str, Any]:
+    resolved = resolve_historical_comparison(
+        comparison_type,
+        primary_period,
+        today=today or local_today(),
+        settings=settings,
+    )
+    return build_historical_comparison(resolved, primary_summary, comparison_summary)
+
+
 def load_daily_trends(
     conn: sqlite3.Connection, start: date, end: date, settings: Settings
 ) -> list[DailyTrend]:
@@ -3531,7 +3614,7 @@ def authentication_alert_html(health: dict) -> str:
     """
 
 
-def period_controls_html(selected: Period, period_flash: Optional[dict] = None) -> str:
+def period_controls_html(selected: Period, period_flash: Optional[dict] = None, comparison_type: str = "previous_billing_period") -> str:
     choices = (
         ("today", "Today"),
         ("yesterday", "Yesterday"),
@@ -3549,12 +3632,17 @@ def period_controls_html(selected: Period, period_flash: Optional[dict] = None) 
         f'<option value="{kind}"{" selected" if selected.kind == kind else ""}>{label}</option>'
         for kind, label in choices
     )
+    comparison_options = "".join(
+        f'<option value="{html.escape(kind)}"{" selected" if comparison_type == kind else ""}>{html.escape(label)}</option>'
+        for kind, label in COMPARISON_LABELS.items()
+    )
     flash_html = period_flash_html(period_flash)
     return f"""
     <section class="period-controls">
       {flash_html}
       <form method="get" action="/">
         <label><span>Dashboard period</span><select name="period">{options}</select></label>
+        <label><span>Compare with</span><select name="comparison_type">{comparison_options}</select></label>
         <label><span>Custom start</span><input type="date" name="start" value="{selected.start.isoformat()}"></label>
         <label><span>Custom end</span><input type="date" name="end" value="{selected.end.isoformat()}"></label>
         <button type="submit">Apply period</button>
@@ -7142,9 +7230,16 @@ def bills_page_html(
     actual_bill_comparison: Optional[dict],
     bill_change: Optional[dict],
     comparison: Optional[dict],
-    settings: Settings,
+    historical_comparison: Optional[dict] = None,
+    settings: Optional[Settings] = None,
 ) -> str:
+    if settings is None and historical_comparison is not None and not isinstance(historical_comparison, dict):
+        settings = historical_comparison
+        historical_comparison = None
+    if settings is None:
+        settings = load_settings()
     comparison_html_block = comparison_html(comparison) if comparison else ""
+    historical_comparison_block = historical_comparison_html(historical_comparison) if historical_comparison else ""
     actions_html = bills_actions_html(recommendations, plan)
     advanced_details_html = advanced_bill_details_html(summary, settings)
     tariff_context = tariff_context_statement_html(summary.tariff_resolution, "Bills")
@@ -7155,6 +7250,7 @@ def bills_page_html(
     {summary_html("Current billing period breakdown", summary, settings)}
     {bill_change_explanation_html(bill_change)}
     {bill_attribution_html(summary, plan, settings)}
+    {historical_comparison_block}
     {comparison_html_block}
     {actual_synergy_bill_html(actual_bill_comparison, settings)}
     <div class="bills-layout-grid bills-layout-grid--actions">
@@ -9358,6 +9454,116 @@ def imports_page_html(
     """
 
 
+def historical_comparison_html(comparison: Optional[dict]) -> str:
+    if not comparison:
+        return ""
+    primary = comparison.get("primary_period") or {}
+    compared = comparison.get("comparison_period") or {}
+    changes = comparison.get("changes") or {}
+    metrics = comparison.get("metrics") or {}
+    primary_metrics = metrics.get("primary_period") or {}
+    compared_metrics = metrics.get("comparison_period") or {}
+    net_delta = float((changes.get("net_estimated_cost") or {}).get("absolute") or 0.0)
+    average_delta = float((changes.get("average_daily_cost") or {}).get("absolute") or 0.0)
+    contributors = [
+        item for item in (comparison.get("attribution") or {}).get("components", [])
+        if abs(float(item.get("amount") or 0.0)) >= 0.01
+    ][:5]
+    contributor_rows = "".join(
+        f"""
+        <div class="comparison-summary-row {'bad' if float(item.get('amount') or 0.0) > 0 else 'good'}">
+          <span>{html.escape(str(item.get("label") or ""))}</span>
+          <strong>{signed_money(float(item.get("amount") or 0.0))}</strong>
+        </div>
+        """
+        for item in contributors
+    ) or '<p class="scenario-note">No material contributors were found.</p>'
+    table_rows = "".join(
+        historical_metric_row(label, key, primary_metrics, compared_metrics, changes, formatter)
+        for label, key, formatter in (
+            ("Net estimated cost", "net_estimated_cost", money),
+            ("Import cost", "import_cost", money),
+            ("Supply charge", "supply_charge", money),
+            ("Export credit", "export_credit", money),
+            ("Grid import", "grid_import_kwh", kwh),
+            ("Solar generation", "solar_generation_kwh", kwh),
+            ("Solar used directly", "solar_used_directly_kwh", kwh),
+            ("Solar export", "solar_export_kwh", kwh),
+            ("EV charging energy", "ev_charging_energy_kwh", kwh),
+            ("EV charging cost", "ev_charging_cost", money),
+            ("Peak usage", "peak_usage_kwh", kwh),
+            ("Off-peak usage", "off_peak_usage_kwh", kwh),
+            ("Super off-peak usage", "super_off_peak_usage_kwh", kwh),
+            ("Average daily cost", "average_daily_cost", money),
+            ("Average daily import", "average_daily_import_kwh", kwh),
+            ("Average daily solar", "average_daily_solar_kwh", kwh),
+            ("Covered days", "covered_days", lambda value: f"{value:.0f} days"),
+        )
+    )
+    tariff_html = historical_tariffs_used_html(comparison.get("tariffs_used") or {})
+    confidence = comparison.get("confidence") or {}
+    warnings = "".join(f"<li>{html.escape(str(item))}</li>" for item in comparison.get("warnings") or [])
+    warnings_html = f"<ul>{warnings}</ul>" if warnings else "<p>No comparison warnings.</p>"
+    attribution = comparison.get("attribution") or {}
+    return f"""
+    <section class="report-section compact-section historical-comparison-section bills-detail-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Historical comparison</span><h2>Why did this bill change?</h2></div>
+        <p>{html.escape(str(comparison.get("label") or "Selected comparison"))}</p>
+      </div>
+      <div class="bills-plan-grid historical-comparison-summary">
+        <div class="bills-plan-hero"><span>Primary period</span><strong>{money(float(primary_metrics.get("net_estimated_cost") or 0.0))}</strong><small>{html.escape(str(primary.get("start")))} to {html.escape(str(primary.get("end")))}</small></div>
+        <div class="bills-plan-hero secondary"><span>Comparison period</span><strong>{money(float(compared_metrics.get("net_estimated_cost") or 0.0))}</strong><small>{html.escape(str(compared.get("start")))} to {html.escape(str(compared.get("end")))}</small></div>
+        <div class="bills-plan-outcome"><span>Difference</span><strong>{signed_money(net_delta)}</strong><p>Average daily difference: {signed_money(average_delta)}</p></div>
+      </div>
+      <p class="battery-conclusion">{html.escape(str(comparison.get("outcome") or ""))}</p>
+      <div class="comparison-summary-list">{contributor_rows}</div>
+      <div class="historical-comparison-table-wrap">
+        <table class="responsive-table historical-comparison-table">
+          <thead><tr><th>Metric</th><th>Current period</th><th>Comparison period</th><th>Change</th></tr></thead>
+          <tbody>{table_rows}</tbody>
+        </table>
+      </div>
+      {tariff_html}
+      <p class="scenario-note">Data confidence: {html.escape(str(confidence.get("level") or "Unknown"))}. {html.escape(str(confidence.get("completeness") or "").title())} comparison.</p>
+      <details class="battery-calculation-details">
+        <summary>Technical reconciliation</summary>
+        <p>{html.escape(str(attribution.get("method") or ""))}</p>
+        <p>Attribution total {money(float(attribution.get("reconciled_total") or 0.0))}; bill difference {money(float(attribution.get("total_difference") or 0.0))}; reconciliation gap {money(float(attribution.get("reconciliation_difference") or 0.0))}.</p>
+        {warnings_html}
+      </details>
+    </section>
+    """
+
+
+def historical_metric_row(label: str, key: str, primary: dict, compared: dict, changes: dict, formatter) -> str:
+    change = changes.get(key) or {}
+    absolute = float(change.get("absolute") or 0.0)
+    pct = change.get("percent")
+    pct_text = "" if pct is None or abs(float(compared.get(key) or 0.0)) < 1e-9 else f" ({float(pct):+.0f}%)"
+    return f"""
+    <tr>
+      <td>{html.escape(label)}</td>
+      <td class="number-cell">{html.escape(formatter(float(primary.get(key) or 0.0)))}</td>
+      <td class="number-cell">{html.escape(formatter(float(compared.get(key) or 0.0)))}</td>
+      <td class="number-cell">{html.escape(formatter(absolute) if absolute >= 0 else '-' + formatter(abs(absolute)))}{html.escape(pct_text)}</td>
+    </tr>
+    """
+
+
+def historical_tariffs_used_html(tariffs: dict) -> str:
+    groups = []
+    for label, payload in (("Primary period", tariffs.get("primary_period") or {}), ("Comparison period", tariffs.get("comparison_period") or {})):
+        items = payload.get("tariffs_used") or []
+        rows = "".join(
+            f"<li>{html.escape(str((item.get('tariff') or {}).get('tariff_name') or 'Unknown tariff'))} · {int(item.get('interval_count') or 0)} intervals · {html.escape(str(item.get('source') or 'unknown'))}</li>"
+            for item in items
+        ) or "<li>No tariff coverage found.</li>"
+        note = "Tariff change inside period" if payload.get("tariff_changes") else "Single tariff"
+        groups.append(f"<div><span>{html.escape(label)}</span><strong>{html.escape(note)}</strong><ul>{rows}</ul></div>")
+    return f"<div class=\"provider-guidance-grid historical-tariff-grid\">{''.join(groups)}</div>"
+
+
 def comparison_html(comparison: dict) -> str:
     deltas = comparison["deltas"]
     label = (
@@ -10376,6 +10582,8 @@ def write_html(
     period_flash: Optional[dict] = None,
     runtime_check: Optional[dict] = None,
     energy_timeline: Optional[EnergyTimeline] = None,
+    comparison_type: str = "previous_billing_period",
+    historical_comparison: Optional[dict] = None,
 ) -> str:
     selected_period = selected_period or Period(
         "current_billing_period", "Current billing period", period_summary.start, period_summary.end
@@ -10404,6 +10612,8 @@ def write_html(
                 period_flash=period_flash,
                 runtime_check=runtime_check,
                 energy_timeline=energy_timeline,
+                comparison_type=comparison_type,
+                historical_comparison=historical_comparison,
             )
     plan = plan_comparison(period_summary, settings)
     try:
@@ -10483,6 +10693,18 @@ def write_html(
         actual_bill_comparison = data_engine().compare_projected_to_latest_synergy_bill(glance_projected)
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
         actual_bill_comparison = None
+    if historical_comparison is None and comparison_previous_summary is not None:
+        try:
+            historical_comparison = historical_comparison_for_summaries(
+                selected_period,
+                period_summary,
+                comparison_previous_summary,
+                settings,
+                comparison_type=comparison_type,
+                today=local_today(),
+            )
+        except (TypeError, ValueError):
+            historical_comparison = None
     generated_dt = datetime.now().astimezone()
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
     if energy_timeline is None:
@@ -10735,7 +10957,7 @@ def write_html(
     chrome_html = "" if glance_only else f"""
   {hero_html(period_summary, generated_at, health, recommendations, selected_period.label)}
   {authentication_alert_html(health)}
-  {period_controls_html(selected_period, period_flash)}
+  {period_controls_html(selected_period, period_flash, comparison_type)}
   {nav_html()}
 """
     pages_html = (
@@ -10751,7 +10973,7 @@ def write_html(
     {home_page_html(briefing, goals, setup_checklist, glance, bill_change, household_insights, household_trends, health, energy_timeline, recommendation_presentations, display_timeline, billing_summary, historical_trends, glance_end)}
   </section>
   <section id="bills" class="page">
-    {bills_page_html(period_summary, glance_projected, plan, recommendation_presentations, actual_bill_comparison, bill_change, comparison, settings)}
+    {bills_page_html(period_summary, glance_projected, plan, recommendation_presentations, actual_bill_comparison, bill_change, comparison, historical_comparison, settings)}
   </section>
   <section id="solar" class="page">
     {page_heading_html("How well is my solar performing?", "Generation, self-consumption, exports, and lost opportunity.")}
@@ -11626,6 +11848,12 @@ def write_html(
     .bills-actions-section .action-grid {{ grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
     .bills-actions-section .action-card {{ display:grid; align-content:start; min-height:0; }}
     .bills-advanced-section details + details {{ margin-top:12px; }}
+    .historical-comparison-summary {{ margin-bottom:14px; }}
+    .historical-comparison-table-wrap {{ margin-top:14px; overflow-x:auto; -webkit-overflow-scrolling:touch; }}
+    .historical-comparison-table {{ min-width:760px; }}
+    .historical-comparison-table th:not(:first-child),.historical-comparison-table td.number-cell {{ text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }}
+    .historical-tariff-grid {{ margin-top:14px; }}
+    .historical-tariff-grid ul {{ margin:8px 0 0; padding-left:18px; color:var(--muted); font-size:12px; }}
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_home_plan"]:checked) .tariff-preview-card[data-plan="synergy_home_plan"],
     .setup-config-form:has(select[name="current_plan"] option[value="synergy_ev_add_on"]:checked) .tariff-preview-card[data-plan="synergy_ev_add_on"],
     .setup-config-form:has(select[name="current_plan"] option[value="previous_flat_or_home_plan"]:checked) .tariff-preview-card[data-plan="previous_flat_or_home_plan"] {{ display:block; }}
@@ -11727,6 +11955,7 @@ def build_live_html(
     period_kind: str = "current_billing_period",
     start: Optional[str] = None,
     end: Optional[str] = None,
+    comparison_type: str = "previous_billing_period",
     glance_only: bool = False,
     provider_flash: Optional[dict] = None,
     tariff_update_flash: Optional[dict] = None,
@@ -11743,6 +11972,7 @@ def build_live_html(
                 period_kind,
                 start=start,
                 end=end,
+                comparison_type=comparison_type,
                 glance_only=glance_only,
                 provider_flash=provider_flash,
                 tariff_update_flash=tariff_update_flash,
@@ -11755,6 +11985,7 @@ def build_live_html(
     cache_key = json.dumps(
         {
             "period": period_payload(selected),
+            "comparison_type": comparison_type,
             "glance_only": bool(glance_only),
             "signature": report_cache_signature(settings),
         },
@@ -11768,10 +11999,25 @@ def build_live_html(
             return cached
         perf_increment("html_cache_misses")
     billing = resolve_period("current_billing_period", settings, current_day)
-    compared = (
-        resolve_period("previous_billing_period", settings, current_day)
-        if selected.kind == "current_billing_period"
-        else previous_equivalent(selected)
+    comparison_resolution = resolve_historical_comparison(
+        comparison_type,
+        selected,
+        today=current_day,
+        settings=settings,
+    )
+    primary_info = comparison_resolution["primary_period"]
+    primary_for_comparison = Period(
+        primary_info["kind"],
+        primary_info["label"],
+        date.fromisoformat(primary_info["start"]),
+        date.fromisoformat(primary_info["end"]),
+    )
+    compared_info = comparison_resolution["comparison_period"]
+    compared = Period(
+        compared_info["kind"],
+        compared_info["label"],
+        date.fromisoformat(compared_info["start"]),
+        date.fromisoformat(compared_info["end"]),
     )
     with perf_stage("database connection/setup"):
         conn_context = sqlite3.connect(DB_PATH)
@@ -11794,6 +12040,16 @@ def build_live_html(
         hidden = hidden_recommendations(all_recommendations)
         recommendation_lifecycle_counts = data_engine(conn).get_recommendation_lifecycle_counts()
         comparison = compare_summaries(selected, selected_summary, compared, compared_summary)
+        historical_primary_summary = (
+            selected_summary
+            if primary_for_comparison.start == selected.start and primary_for_comparison.end == selected.end
+            else load_summary(conn, primary_for_comparison.start, primary_for_comparison.end, settings)
+        )
+        historical_comparison = build_historical_comparison(
+            comparison_resolution,
+            historical_primary_summary,
+            compared_summary,
+        )
         timeline_candidates = build_decision_timeline(
             selected_summary,
             recommendations,
@@ -11825,6 +12081,8 @@ def build_live_html(
         period_flash=period_flash,
         runtime_check=runtime_check,
         energy_timeline=energy_timeline,
+        comparison_type=comparison_type,
+        historical_comparison=historical_comparison,
     )
     if cache_allowed:
         LIVE_HTML_CACHE.set(cache_key, html_document)

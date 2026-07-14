@@ -1,5 +1,22 @@
 # Changelog
 
+## FIN-006 - Historical Bill Comparison
+
+- Added a deterministic historical comparison resolver for previous billing
+  period, same month last year, previous year to date, previous rolling 12
+  months, previous equivalent period, and same period last year comparisons.
+- Added a historical comparison payload with period metrics, safe percentage
+  deltas, tariff coverage, attribution, confidence, and warnings for dashboard
+  API consumers.
+- Added a Bills-page historical comparison section with homeowner-friendly
+  summary cards, largest contributors, compact metric table, tariffs used, data
+  confidence, and collapsed technical reconciliation.
+- Added comparison selector controls that retain the selected comparison in the
+  dashboard URL without changing canonical report generation.
+- Added regression tests for period resolution, mixed tariffs, zero baselines,
+  missing data confidence, attribution reconciliation, presentation rendering,
+  selector retention, and existing bill comparison contract stability.
+
 ## HOME-009 - Simplified Household Timeline Editing
 
 - Reframed Settings timeline management as Home energy history, with read-only
