@@ -1,5 +1,22 @@
 (function () {
+  document.documentElement.classList.add("js");
   const TERMINAL = new Set(["complete", "completed", "cancelled", "failed"]);
+  const PAGE_IDS = new Set(["glance", "home", "bills", "solar", "ev", "whatif", "analytics", "system"]);
+  const DEEP_LINK_PAGES = {
+    recommendations: "whatif",
+    "battery-investment": "whatif",
+    "home-goals": "whatif",
+    timeline: "analytics",
+    setup: "system",
+    imports: "system",
+    "setup-billing": "system",
+    "setup-billing-cycle": "system",
+    "setup-tariff": "system",
+    "system-collector": "system",
+    "system-live-data": "system",
+    "system-data-quality": "system",
+    "energy-score-explanation": "home",
+  };
 
   function escapeHtml(value) {
     return String(value || "")
@@ -10,15 +27,38 @@
       .replace(/'/g, "&#39;");
   }
 
-  function revealHashTarget(options) {
-    const scrollBehavior = options && options.smooth ? "smooth" : "auto";
-    document.querySelectorAll(".deep-link-target").forEach((item) => item.classList.remove("deep-link-target"));
-    const id = decodeURIComponent((window.location.hash || "").slice(1));
-    if (!id) return;
-    const target = document.getElementById(id);
+  function pageForTarget(target) {
+    if (!target) return document.getElementById("home");
+    if (target.classList.contains("page")) return target;
+    if (DEEP_LINK_PAGES[target.id]) return document.getElementById(DEEP_LINK_PAGES[target.id]);
+    return target.closest(".page") || document.getElementById("home");
+  }
+
+  function updateActivePage(page) {
+    document.querySelectorAll(".page").forEach((item) => {
+      const active = item === page;
+      item.classList.toggle("is-active", active);
+      item.hidden = !active;
+      item.setAttribute("aria-hidden", active ? "false" : "true");
+    });
+  }
+
+  function updateActiveNav(page) {
+    const activeId = page && page.id === "analytics" ? "analytics" : page && page.id === "whatif" ? "whatif" : page && page.id;
+    document.querySelectorAll(".top-nav a, .mobile-shortcuts a").forEach((link) => {
+      const linkTarget = (link.getAttribute("href") || "").replace(/^#/, "");
+      const active = linkTarget === activeId || (activeId === "analytics" && linkTarget === "timeline");
+      link.classList.toggle("active", active);
+      if (active) {
+        link.setAttribute("aria-current", "page");
+      } else {
+        link.removeAttribute("aria-current");
+      }
+    });
+  }
+
+  function openDeepLinkContainers(target) {
     if (!target) return;
-    const page = target.closest(".page");
-    if (page) page.style.removeProperty("display");
     target.querySelectorAll("details.provider-config-details").forEach((details) => {
       details.open = true;
     });
@@ -27,10 +67,24 @@
       if (current.tagName === "DETAILS") current.open = true;
       current = current.parentElement;
     }
-    if (!target.classList.contains("page")) {
+  }
+
+  function navigateToHash(options) {
+    const scrollBehavior = options && options.smooth ? "smooth" : "auto";
+    document.querySelectorAll(".deep-link-target").forEach((item) => item.classList.remove("deep-link-target"));
+    const id = decodeURIComponent((window.location.hash || "").slice(1));
+    const target = document.getElementById(id) || document.getElementById("home");
+    const page = pageForTarget(target);
+    if (!page) return;
+    updateActivePage(page);
+    updateActiveNav(page);
+    openDeepLinkContainers(target);
+    if (target && !target.classList.contains("page")) {
       target.classList.add("deep-link-target");
     }
-    window.requestAnimationFrame(() => target.scrollIntoView({ behavior: scrollBehavior, block: "start", inline: "nearest" }));
+    window.requestAnimationFrame(() => {
+      (target || page).scrollIntoView({ behavior: scrollBehavior, block: "start", inline: "nearest" });
+    });
   }
 
   function handleSamePageAnchorClick(event) {
@@ -44,7 +98,7 @@
     if (window.location.hash !== rawHash) {
       window.history.pushState(null, "", rawHash);
     }
-    revealHashTarget({ smooth: true });
+    navigateToHash({ smooth: true });
   }
 
   function payloadFromForm(form) {
@@ -257,9 +311,10 @@
   }
 
   window.addEventListener("DOMContentLoaded", function () {
-    revealHashTarget();
-    window.addEventListener("hashchange", () => revealHashTarget({ smooth: true }));
-    window.addEventListener("load", revealHashTarget);
+    navigateToHash();
+    window.addEventListener("hashchange", () => navigateToHash({ smooth: true }));
+    window.addEventListener("popstate", () => navigateToHash({ smooth: true }));
+    window.addEventListener("load", navigateToHash);
     document.addEventListener("click", handleSamePageAnchorClick);
 
     document.querySelectorAll(".provider-config-form").forEach((form) => {

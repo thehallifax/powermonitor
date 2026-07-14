@@ -10761,9 +10761,11 @@ def write_html(
     .status-value.healthy::before {{ background:#64ddb0; }}
     .top-nav {{ position:sticky; top:10px; z-index:10; display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; padding:10px; background:rgba(255,255,255,.86); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}
     .top-nav a {{ padding:9px 12px; color:var(--deep-2); text-decoration:none; background:#f7faf9; border:1px solid var(--line); border-radius:999px; font-size:12px; font-weight:750; }}
-    .top-nav a:hover {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
+    .top-nav a:hover,.top-nav a.active {{ color:#fff; background:var(--deep-2); border-color:var(--deep-2); }}
     .mobile-shortcuts {{ display:none; }}
     .page {{ display:none; }} #home {{ display:block; }} .page:target {{ display:block; }}
+    html.js .page[hidden] {{ display:none !important; }}
+    html.js .page.is-active {{ display:block !important; }}
     body:has(.page:target) #home,
     body:has(#recommendations:target) #home,
     body:has(#timeline:target) #home,
@@ -11453,6 +11455,8 @@ def write_html(
     .top-nav a {{ padding:10px 14px; color:#5f6b67; background:transparent; border-color:transparent; transition:all .15s ease; white-space:nowrap; }}
     .top-nav a:focus-visible,.mobile-shortcuts a:focus-visible {{ outline:3px solid #80bfa3; outline-offset:3px; border-radius:999px; }}
     .top-nav a[href="#home"] {{ color:#fff; background:var(--deep); }}
+    html.js .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
+    html.js .top-nav a.active,.mobile-shortcuts a.active {{ color:#fff; background:var(--deep); border-color:var(--deep); }}
     body:has(.page:target) .top-nav a[href="#home"] {{ color:#5f6b67; background:transparent; }}
     body:has(#home:target) .top-nav a[href="#home"],
     body:has(#glance:target) .top-nav a[href="#home"],
