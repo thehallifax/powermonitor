@@ -1,5 +1,28 @@
 # Changelog
 
+## HOME-008 - Household Timeline and Historical Tariff Periods
+
+- Added a provider-neutral Household Timeline with local JSON persistence,
+  tariff-period validation, timeline gap reporting, and local audit records for
+  Settings changes.
+- Added household tariff-period resolution ahead of approved tariff versions and
+  current settings fallback, with explicit warnings when historical tariff
+  history is incomplete.
+- Updated report summary, daily trends, supply charges, export credits, plan
+  baselines, and battery interval preparation to resolve tariffs by historical
+  household period without modifying raw measurements.
+- Updated battery replay so cheap-grid charging is only considered when the
+  historical period actually contains a cheaper tariff window; flat-rate
+  history no longer receives EV Add On arbitrage assumptions.
+- Added Settings -> Household timeline UI for adding previous catalogue/manual
+  tariffs, adding household events, ending current tariff periods, disabling
+  events, deleting events, and viewing diagnostics.
+- Exposed `household_timeline`, `tariff_resolution`, and battery tariff-history
+  metadata in the dashboard payload.
+- Added regression tests for timeline validation, mixed flat/EV tariffs,
+  before/after interval costs, supply/export handling, battery arbitrage,
+  persistence audit records, Settings presentation, and API serialization.
+
 ## UX-006 - Decisions and Battery Experience Polish
 
 - Reworked the Decisions battery section around the primary purchase question:

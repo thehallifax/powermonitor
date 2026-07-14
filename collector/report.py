@@ -50,6 +50,18 @@ from engine.historical_backfill import (
     solaredge_capability_audit,
 )
 from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
+from engine.household_timeline import (
+    DEFAULT_HOUSEHOLD_TIMELINE_PATH,
+    HouseholdTimeline,
+    HouseholdTimelineError,
+    HouseholdTimelineEvent,
+    HouseholdTimelineStore,
+    household_tariff_resolver,
+    load_household_timeline,
+    tariff_version_for_plan,
+    tariff_version_from_catalog_or_manual,
+    timeline_summary_sentence,
+)
 from engine.household_state_engine import HouseholdStateEngine
 from engine.insights_engine import HouseholdInsight, HouseholdInsightsEngine
 from engine.measurement_framework import MeasurementType, measurement_totals
@@ -115,7 +127,9 @@ DB_PATH = PROJECT_ROOT / "data" / "power.sqlite"
 REPORT_PATH = PROJECT_ROOT / "reports" / "index.html"
 LOG_PATH = PROJECT_ROOT / "logs" / "report.log"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
+DEFAULT_SETTINGS_PATH = SETTINGS_PATH
 HOME_PROFILE_PATH = DEFAULT_HOME_PROFILE_PATH
+HOUSEHOLD_TIMELINE_PATH = DEFAULT_HOUSEHOLD_TIMELINE_PATH
 COLLECT_LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
 DEMO_MODE = False
 DEMO_WEATHER_PATH: Optional[Path] = None
@@ -147,6 +161,8 @@ def data_engine(conn: Optional[sqlite3.Connection] = None) -> DataEngine:
 
 
 def tariff_updates_path() -> Path:
+    if SETTINGS_PATH != DEFAULT_SETTINGS_PATH:
+        return SETTINGS_PATH.parent / "tariff_updates.json"
     return PROJECT_ROOT / "data" / "runtime" / "tariff_updates.json"
 
 
@@ -181,7 +197,7 @@ def historical_coverage_data(today: Optional[date] = None) -> dict[str, Any]:
 def activate_demo_mode(today: Optional[date] = None):
     """Switch report paths to deterministic fictional demo data."""
 
-    global DB_PATH, REPORT_PATH, SETTINGS_PATH, HOME_PROFILE_PATH, COLLECT_LOG_PATH
+    global DB_PATH, REPORT_PATH, SETTINGS_PATH, HOME_PROFILE_PATH, HOUSEHOLD_TIMELINE_PATH, COLLECT_LOG_PATH
     global DEMO_MODE, DEMO_WEATHER_PATH, DEMO_RECOMMENDATIONS_PATH
 
     from demo_mode import ensure_demo_environment
@@ -192,6 +208,7 @@ def activate_demo_mode(today: Optional[date] = None):
     REPORT_PATH = env.report_path
     SETTINGS_PATH = env.settings_path
     HOME_PROFILE_PATH = env.home_profile_path
+    HOUSEHOLD_TIMELINE_PATH = env.settings_path.parent / "household_timeline.json"
     COLLECT_LOG_PATH = env.collect_log_path
     collector_health.STATE_PATH = env.collector_health_path
     collector_health.SETTINGS_PATH = env.settings_path
@@ -224,8 +241,24 @@ def financial_engine(household_context: Optional[HouseholdContext] = None) -> Fi
     return FinancialEngine(household_context=household_context)
 
 
+def household_timeline_path() -> Path:
+    if HOUSEHOLD_TIMELINE_PATH == DEFAULT_HOUSEHOLD_TIMELINE_PATH and SETTINGS_PATH != DEFAULT_SETTINGS_PATH:
+        return SETTINGS_PATH.parent / DEFAULT_HOUSEHOLD_TIMELINE_PATH.name
+    return HOUSEHOLD_TIMELINE_PATH
+
+
+def household_timeline(settings: Optional[Any] = None) -> HouseholdTimeline:
+    return load_household_timeline(household_timeline_path(), settings or load_settings())
+
+
+def household_timeline_store() -> HouseholdTimelineStore:
+    path = household_timeline_path()
+    audit_path = path.with_name("household_timeline_audit.jsonl")
+    return HouseholdTimelineStore(path, audit_path)
+
+
 def tariff_resolver(settings: Any) -> TariffResolver:
-    return resolver_for_settings(settings)
+    return household_tariff_resolver(settings, household_timeline(settings))
 
 
 def tariff_for_date(settings: Any, when: date) -> TariffVersion:
@@ -483,6 +516,7 @@ class Summary:
     average_daily_solar_generation_kwh: float
     average_daily_net_cost: float
     buckets: dict
+    tariff_resolution: Optional[dict] = None
 
 
 @dataclass
@@ -945,6 +979,7 @@ def dashboard_data(
     notification_history_summary = snapshot_engine.get_notification_history_summary()
     display_timeline = timeline_with_state_changes(timeline, recent_state_changes)
     tariff_updates = tariff_update_overview(settings, billing_summary)
+    household_timeline_payload = household_timeline(settings).public_dict(today=current_day)
     historical_data = historical_coverage_data(current_day)
     glance_recommendation = next(
         (item for item in recommendation_presentations if item.category.value == "ev"),
@@ -1001,6 +1036,8 @@ def dashboard_data(
         "plan_comparison": plan,
         "current_tariff": tariff_metadata(settings, selected.end),
         "tariff_updates": tariff_updates,
+        "household_timeline": household_timeline_payload,
+        "tariff_resolution": period_summary.tariff_resolution or {},
         "historical_coverage": historical_data["historical_coverage"],
         "seasonal_history": historical_data["seasonal_history"],
         "historical_backfill_jobs": historical_data["historical_backfill_jobs"],
@@ -1438,19 +1475,51 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
     estimated_ev_charging = 0.0
     finances = financial_engine()
     export_credit = 0.0
+    tariff_periods_used: dict[str, dict[str, Any]] = {}
+    unresolved_intervals = 0
+    fallback_intervals = 0
     for measurement in measurements:
         measurement_day = date.fromisoformat(measurement.timestamp[:10])
-        tariff = resolver.resolve(measurement_day)
+        resolution = (
+            resolver.resolve_with_context(measurement_day)
+            if hasattr(resolver, "resolve_with_context")
+            else None
+        )
+        tariff = resolution.tariff if resolution is not None else resolver.resolve(measurement_day)
         if measurement.measurement_type == MeasurementType.GRID_EXPORT:
             export_credit += finances.calculate_export_credit(float(measurement.value or 0.0), tariff.primary_export_rate)
             continue
         if measurement.measurement_type != MeasurementType.GRID_IMPORT:
             continue
+        resolution_key = (
+            resolution.event_id or tariff.version_id
+            if resolution is not None
+            else tariff.version_id
+        )
+        period_entry = tariff_periods_used.setdefault(
+            resolution_key,
+            {
+                "tariff": tariff.public_metadata(),
+                "source": resolution.source if resolution is not None else "tariff_version",
+                "event_id": resolution.event_id if resolution is not None else None,
+                "interval_count": 0,
+                "import_cost": 0.0,
+                "export_credit": 0.0,
+                "supply_cost": 0.0,
+            },
+        )
+        period_entry["interval_count"] += 1
+        if resolution is not None and resolution.warning:
+            unresolved_intervals += 1
+        if resolution is not None and resolution.source != "household_timeline":
+            fallback_intervals += 1
         bucket = str(measurement.attributes.get("tariff_bucket") or "")
         kwh = float(measurement.value or 0.0)
         buckets.setdefault(bucket, {"kwh": 0.0, "cost": 0.0})
         buckets[bucket]["kwh"] += kwh
-        buckets[bucket]["cost"] += kwh * tariff.usage_rate(bucket)
+        interval_cost = kwh * tariff.usage_rate(bucket)
+        buckets[bucket]["cost"] += interval_cost
+        period_entry["import_cost"] += interval_cost
         if bucket == "overnight":
             power_w = float(measurement.attributes.get("power_w") or 0.0)
             interval_minutes = float(measurement.attributes.get("interval_minutes") or 15)
@@ -1489,10 +1558,35 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         actual_ev_charging = None
         actual_ev_cost = None
     supply_days = (end - start).days + 1
-    supply_cost = sum(
-        resolver.resolve(start + timedelta(days=offset)).supply_charge_per_day
-        for offset in range(supply_days)
-    )
+    supply_cost = 0.0
+    for offset in range(supply_days):
+        day = start + timedelta(days=offset)
+        resolution = resolver.resolve_with_context(day) if hasattr(resolver, "resolve_with_context") else None
+        tariff = resolution.tariff if resolution is not None else resolver.resolve(day)
+        supply_cost += tariff.supply_charge_per_day
+        key = resolution.event_id or tariff.version_id if resolution is not None else tariff.version_id
+        entry = tariff_periods_used.setdefault(
+            key,
+            {
+                "tariff": tariff.public_metadata(),
+                "source": resolution.source if resolution is not None else "tariff_version",
+                "event_id": resolution.event_id if resolution is not None else None,
+                "interval_count": 0,
+                "import_cost": 0.0,
+                "export_credit": 0.0,
+                "supply_cost": 0.0,
+            },
+        )
+        entry["supply_cost"] += tariff.supply_charge_per_day
+    for measurement in measurements:
+        if measurement.measurement_type != MeasurementType.GRID_EXPORT:
+            continue
+        measurement_day = date.fromisoformat(measurement.timestamp[:10])
+        resolution = resolver.resolve_with_context(measurement_day) if hasattr(resolver, "resolve_with_context") else None
+        tariff = resolution.tariff if resolution is not None else resolver.resolve(measurement_day)
+        key = resolution.event_id or tariff.version_id if resolution is not None else tariff.version_id
+        if key in tariff_periods_used:
+            tariff_periods_used[key]["export_credit"] += finances.calculate_export_credit(float(measurement.value or 0.0), tariff.primary_export_rate)
     total_cost = float(import_cost) + supply_cost
     net_cost = finances.calculate_net_bill(float(import_cost), supply_cost, export_credit)
     self_consumption = used / generated * 100 if generated else 0.0
@@ -1540,6 +1634,14 @@ def load_summary(conn: sqlite3.Connection, start: date, end: date, settings: Set
         average_daily_solar_generation_kwh=float(generated) / observed_days,
         average_daily_net_cost=net_cost / supply_days,
         buckets=buckets,
+        tariff_resolution={
+            "periods_used": list(tariff_periods_used.values()),
+            "interval_counts": {key: value["interval_count"] for key, value in tariff_periods_used.items()},
+            "unresolved_intervals": unresolved_intervals,
+            "fallback_intervals": fallback_intervals,
+            "confidence": "high" if unresolved_intervals == 0 else "medium",
+            "warnings": household_timeline(settings).warnings(),
+        },
     )
 
 
@@ -1557,7 +1659,8 @@ def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, setti
     intervals = []
     for timestamp in timestamps:
         bucket = str(grid_rows.get(timestamp, {}).get("tariff_bucket") or "")
-        tariff = resolver.resolve(date.fromisoformat(timestamp[:10]))
+        resolution = resolver.resolve_with_context(date.fromisoformat(timestamp[:10])) if hasattr(resolver, "resolve_with_context") else None
+        tariff = resolution.tariff if resolution is not None else resolver.resolve(date.fromisoformat(timestamp[:10]))
         intervals.append(
             {
             "measurement_time": timestamp,
@@ -1568,6 +1671,8 @@ def battery_dispatch_intervals(engine: DataEngine, start: date, end: date, setti
             "tariff_version_id": tariff.version_id,
             "tariff_effective_from": tariff.effective_from.isoformat(),
             "tariff_name": tariff.tariff_name,
+            "tariff_source": resolution.source if resolution is not None else "tariff_version",
+            "tariff_warning": resolution.warning if resolution is not None else None,
         }
         )
     return intervals
@@ -1581,7 +1686,8 @@ def battery_historical_dispatch_intervals(engine: DataEngine, start: date, end: 
         if not timestamp:
             continue
         bucket = str(row.get("tariff_bucket") or "")
-        tariff = resolver.resolve(date.fromisoformat(timestamp[:10]))
+        resolution = resolver.resolve_with_context(date.fromisoformat(timestamp[:10])) if hasattr(resolver, "resolve_with_context") else None
+        tariff = resolution.tariff if resolution is not None else resolver.resolve(date.fromisoformat(timestamp[:10]))
         intervals.append(
             {
                 **row,
@@ -1593,6 +1699,8 @@ def battery_historical_dispatch_intervals(engine: DataEngine, start: date, end: 
                 "tariff_version_id": tariff.version_id,
                 "tariff_effective_from": tariff.effective_from.isoformat(),
                 "tariff_name": tariff.tariff_name,
+                "tariff_source": resolution.source if resolution is not None else "tariff_version",
+                "tariff_warning": resolution.warning if resolution is not None else None,
             }
         )
     return intervals
@@ -4061,7 +4169,8 @@ def timeline_grouped_entries(entries: list[TimelineEntry]) -> list[tuple[str, li
 
 
 def timeline_html(timeline: DecisionTimeline) -> str:
-    if not timeline.entries:
+    household_events = household_timeline_history_events_html()
+    if not timeline.entries and not household_events:
         return """
         <section class="report-section timeline-section">
           <div class="section-title"><div><span class="eyebrow">Household timeline</span><h2>No important changes recorded yet.</h2></div></div>
@@ -4103,7 +4212,60 @@ def timeline_html(timeline: DecisionTimeline) -> str:
         <p>{len(timeline.entries)} events</p>
       </div>
       <p class="scenario-note">Start here to see the household events and recommendations PowerMonitor considered worth remembering.</p>
+      {household_events}
       <div class="timeline-list">{''.join(rows)}</div>
+    </section>
+    """
+
+
+def household_timeline_history_events_html() -> str:
+    try:
+        timeline = household_timeline()
+    except (HouseholdTimelineError, ValueError, OSError):
+        return ""
+    events = [event for event in timeline.events if event.active]
+    if not events:
+        return ""
+    rows = "".join(household_timeline_event_readonly_html(event) for event in sorted(events, key=lambda item: item.effective_from, reverse=True))
+    return f'<div class="timeline-list household-history-list">{rows}</div>'
+
+
+def household_timeline_event_readonly_html(event: HouseholdTimelineEvent) -> str:
+    summary = (
+        "Current household tariff"
+        if event.event_type == "tariff_period" and event.effective_to is None
+        else "Historical household tariff"
+        if event.event_type == "tariff_period"
+        else event.event_type.replace("_", " ").title()
+    )
+    date_text = f"From {display_date(event.effective_from)}" if event.effective_to is None else f"{display_date(event.effective_from)} to {display_date(event.effective_to)}"
+    return f"""
+    <article class="timeline-entry compact">
+      <div class="timeline-stamp"><span aria-hidden="true">T</span><time>{html.escape(date_text)}</time></div>
+      <div>
+        <span>{html.escape(event.confidence)} confidence</span>
+        <h3>{html.escape(event.title)}</h3>
+        <p>{html.escape(summary)}{(' · ' + html.escape(event.notes)) if event.notes else ''}</p>
+        <div class="timeline-meta"><small>Source: {html.escape(event.source.replace('_', ' '))}</small></div>
+      </div>
+    </article>
+    """
+
+
+def tariff_context_statement_html(tariff_resolution: Optional[dict], label: str = "Tariff history") -> str:
+    if not tariff_resolution:
+        return ""
+    periods = tariff_resolution.get("periods_used") or []
+    warnings = tariff_resolution.get("warnings") or []
+    if len(periods) <= 1 and not warnings:
+        return ""
+    sentence = timeline_summary_sentence(tariff_resolution) or "Tariff history is incomplete for this period."
+    warning = " ".join(str(item) for item in warnings[:2])
+    warning_html = f"<p class='scenario-note'>{html.escape(warning)}</p>" if warning else ""
+    return f"""
+    <section class="report-section compact-section tariff-context-note">
+      <div class="section-title"><div><span class="eyebrow">{html.escape(label)}</span><h2>{html.escape(sentence)}</h2></div><p>{html.escape(str(tariff_resolution.get("confidence") or "medium").title())} confidence</p></div>
+      {warning_html}
     </section>
     """
 
@@ -5118,9 +5280,10 @@ def setup_page_html(
     {conflict_notice}
     {notification_notice}
     {first_time_intro_html(setup)}
-    {billing_cycle_setup_html(settings)}
-    {tariff_updates_html(tariff_updates, tariff_update_flash)}
-    {first_time_finish_html(setup, settings)}
+      {billing_cycle_setup_html(settings)}
+      {tariff_updates_html(tariff_updates, tariff_update_flash)}
+      {household_timeline_html(settings)}
+      {first_time_finish_html(setup, settings)}
     {setup_integrations_html(provider_management)}
     <section class="report-section compact-section">
       <div class="section-title">
@@ -5131,6 +5294,152 @@ def setup_page_html(
     </section>
     {sections}
     """
+
+
+def household_timeline_html(settings: Optional[Settings]) -> str:
+    if not settings:
+        return ""
+    try:
+        timeline = household_timeline(settings)
+    except (HouseholdTimelineError, ValueError, OSError):
+        return ""
+    events = sorted([event for event in timeline.events if event.active], key=lambda item: item.effective_from, reverse=True)
+    rows = "".join(household_timeline_event_html(event, timeline) for event in events) or '<p class="notice">No household timeline events have been added yet.</p>'
+    gaps = timeline.tariff_gaps()
+    gap_notice = ""
+    if gaps:
+        gap_rows = "".join(
+            f"<li>{html.escape(household_timeline_gap_label(start, end))}</li>"
+            for start, end in gaps
+        )
+        gap_notice = f"""
+        <div class="provider-action-result warning visible">
+          <span>Timeline gap</span>
+          <strong>Some historical tariff dates are unknown.</strong>
+          <small>PowerMonitor will use fallback rates for affected analysis and lower confidence.</small>
+          <ul>{gap_rows}</ul>
+        </div>
+        """
+    plan_options = "".join(
+        f'<option value="{html.escape(plan_id)}">{html.escape(plan.label)}</option>'
+        for plan_id, plan in SUPPORTED_PLANS.items()
+    )
+    return f"""
+    <section id="household-timeline" class="report-section setup-section household-timeline-section">
+      <div class="section-title">
+        <div><span class="eyebrow">Settings</span><h2>Household timeline</h2></div>
+        <p>Tell PowerMonitor when important household conditions changed so historical analysis uses the right context.</p>
+      </div>
+      {gap_notice}
+      <div class="household-timeline-list">{rows}</div>
+      <details class="battery-calculation-details household-timeline-editor" open>
+        <summary>Add previous tariff</summary>
+        <form class="setup-config-form household-timeline-form" method="post" action="/household-timeline/add-tariff">
+          <label><span>Provider</span><input name="provider" value="{html.escape(str(settings.retailer or 'Synergy'))}"></label>
+          <label><span>Tariff plan</span><select name="plan_id">{plan_options}<option value="{MANUAL_TARIFF_ID}">Manual historical tariff</option></select></label>
+          <label><span>Effective from</span><input type="date" name="effective_from" required></label>
+          <label><span>Effective to</span><input type="date" name="effective_to"></label>
+          <label><span>Manual tariff name</span><input name="manual_tariff_name" placeholder="Only for manual tariffs"></label>
+          <label><span>Daily supply charge</span><input type="number" step="0.000001" min="0" name="supply_charge_per_day" value="{settings.supply_charge_per_day:.6f}"></label>
+          <label><span>Export credit</span><input type="number" step="0.000001" min="0" name="export_credit_rate" value="{settings.export_credit_rate:.6f}"></label>
+          <label><span>Flat/import rate</span><input type="number" step="0.000001" min="0" name="flat_import_rate" value="{settings.import_rates.get('peak', 0.0):.6f}"></label>
+          <label class="timeline-notes"><span>Notes</span><input name="notes" placeholder="Optional"></label>
+          <button type="submit">Add previous tariff</button>
+        </form>
+      </details>
+      <details class="battery-calculation-details">
+        <summary>Add household event</summary>
+        <form class="setup-config-form household-timeline-form" method="post" action="/household-timeline/add-event">
+          <label><span>Event type</span><select name="event_type">
+            <option value="solar_installation">Solar installation</option>
+            <option value="battery_installation">Battery installation</option>
+            <option value="ev_added">EV added</option>
+            <option value="ev_removed">EV removed</option>
+            <option value="ev_charger_installed">EV charger installed</option>
+            <option value="major_appliance_change">Major appliance change</option>
+            <option value="occupancy_change">Occupancy change</option>
+            <option value="custom_note">Custom note</option>
+          </select></label>
+          <label><span>Title</span><input name="title" required></label>
+          <label><span>Effective from</span><input type="date" name="effective_from" required></label>
+          <label><span>Effective to</span><input type="date" name="effective_to"></label>
+          <label class="timeline-notes"><span>Notes</span><input name="notes"></label>
+          <button type="submit">Add household event</button>
+        </form>
+      </details>
+      <details class="battery-calculation-details">
+        <summary>View diagnostics</summary>
+        <pre>{html.escape(json.dumps(timeline.public_dict(today=local_today()), indent=2, sort_keys=True))}</pre>
+      </details>
+    </section>
+    """
+
+
+def household_timeline_event_html(event: HouseholdTimelineEvent, timeline: HouseholdTimeline) -> str:
+    current = event.event_type == "tariff_period" and event.effective_to is None
+    status = "Current" if current else "Previous" if event.event_type == "tariff_period" else event.event_type.replace("_", " ").title()
+    date_text = (
+        f"From {display_date(event.effective_from)}"
+        if event.effective_to is None
+        else f"{display_date(event.effective_from)} to {display_date(event.effective_to)}"
+    )
+    metadata = event.metadata.get("tariff") if isinstance(event.metadata, dict) else {}
+    rates = ""
+    if isinstance(metadata, dict):
+        rates = f"<small>{html.escape(str(metadata.get('provider') or ''))} · {html.escape(str(metadata.get('version') or ''))}</small>"
+    disabled_confirm = "Disable this household timeline event? Historical calculations will stop using it."
+    delete_confirm = "Delete this household timeline event? This changes financial history and should only be done to correct an error."
+    end_form = ""
+    if current:
+        end_form = f"""
+        <form method="post" action="/household-timeline/end-current">
+          <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
+          <input type="date" name="effective_to" required>
+          <button type="submit" data-confirm="End this current tariff period?">End current period</button>
+        </form>
+        """
+    return f"""
+    <article class="timeline-entry compact household-timeline-event">
+      <div class="timeline-stamp"><span>{html.escape(status[:1])}</span><time>{html.escape(status)}</time></div>
+      <div>
+        <span>{html.escape(event.source.replace('_', ' '))}</span>
+        <h3>{html.escape(event.title)}</h3>
+        <p>{html.escape(date_text)}{(' · ' + html.escape(event.notes)) if event.notes else ''}</p>
+        {rates}
+        <div class="provider-action-row household-timeline-actions">
+          <form method="post" action="/household-timeline/edit">
+            <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
+            <input type="date" name="effective_from" value="{event.effective_from.isoformat()}" required>
+            <input type="date" name="effective_to" value="{event.effective_to.isoformat() if event.effective_to else ''}">
+            <button type="submit" data-confirm="Update this household timeline event? Existing historical periods will be validated before saving.">Edit event</button>
+          </form>
+          {end_form}
+          <form method="post" action="/household-timeline/disable">
+            <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
+            <button type="submit" data-confirm="{html.escape(disabled_confirm)}">Disable event</button>
+          </form>
+          <form method="post" action="/household-timeline/delete">
+            <input type="hidden" name="event_id" value="{html.escape(event.event_id)}">
+            <button type="submit" data-confirm="{html.escape(delete_confirm)}">Delete event</button>
+          </form>
+        </div>
+      </div>
+    </article>
+    """
+
+
+def household_timeline_gap_label(start: date, end: Optional[date]) -> str:
+    if start == date.min:
+        return f"Before {display_date(end)}"
+    if end is None:
+        return f"From {display_date(start)}"
+    return f"{display_date(start)} to {display_date(end)}"
+
+
+def display_date(value: Optional[date]) -> str:
+    if value is None:
+        return "current"
+    return value.strftime("%-d %B %Y") if hasattr(value, "strftime") else str(value)
 
 
 def first_time_intro_html(setup: SetupChecklist) -> str:
@@ -6464,8 +6773,10 @@ def bills_page_html(
     comparison_html_block = comparison_html(comparison) if comparison else ""
     actions_html = bills_actions_html(recommendations, plan)
     advanced_details_html = advanced_bill_details_html(summary, settings)
+    tariff_context = tariff_context_statement_html(summary.tariff_resolution, "Bills")
     return f"""
     {page_heading_html("Where did my money go?", "Bill attribution, tariff exposure, export credits, and plan comparison.")}
+    {tariff_context}
     {financial_highlights_html(summary, projected_bill_value, plan, recommendations)}
     {summary_html("Current billing period breakdown", summary, settings)}
     {bill_change_explanation_html(bill_change)}
@@ -8863,10 +9174,12 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
         grid_explanation = (
             "Cheap-grid charging was modelled, but this period does not show a material extra benefit beyond the solar-only battery case."
         )
+    tariff_history_note = battery_tariff_history_note_html(comparison)
 
     return f"""
     <div class="scenario-insights battery-comparison">
       <div class="chart-heading"><h3>Home battery sizing</h3><span>What battery should I buy?</span></div>
+      {tariff_history_note}
       {battery_primary_recommendation_html(comparison, tariff_name)}
       {battery_annual_sizing_table_html(comparison)}
       {battery_accordion_html("Current billing period analysis", "Selected-period evidence", battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source))}
@@ -8874,6 +9187,16 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
       {battery_accordion_html("Methodology", "Assumptions and calculation notes", f'<p class="scenario-note">{html.escape(grid_explanation)}</p><p class="scenario-note">{html.escape(tariff_note)}</p><p class="scenario-note">Current-period battery modelling assumes scheduled grid charging, excludes equipment cost and degradation, and annualises the selected period pattern. Seasonal modelling replays only interval-grade historical import/export rows. Actual inverter and battery charge limits may reduce savings. Round-trip efficiency is modelled at {efficiency:.0f}% for grid-charged energy.</p>{battery_calculation_details_html(comparison)}')}
     </div>
     """
+
+
+def battery_tariff_history_note_html(comparison: dict) -> str:
+    periods = comparison.get("tariff_periods_used") or []
+    warning = str(comparison.get("tariff_history_warning") or "")
+    if len(periods) <= 1 and not warning:
+        return ""
+    names = ", ".join(str(item.get("tariff_name") or "tariff") for item in periods[:3])
+    text = warning or f"Annual battery modelling includes historical {names} pricing."
+    return f'<p class="scenario-note tariff-context-inline">{html.escape(text)}</p>'
 
 
 def battery_accordion_html(title: str, summary: str, body: str) -> str:
@@ -10144,6 +10467,14 @@ def write_html(
     .timeline-entry p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.45; }}
     .timeline-meta {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
     .timeline-meta small {{ padding:6px 8px; color:var(--muted); background:#f8fbf9; border:1px solid var(--line); border-radius:9px; font-size:10px; }}
+    .household-timeline-list,.household-history-list {{ display:grid; gap:12px; margin-bottom:14px; }}
+    .household-timeline-event small {{ display:block; margin-top:7px; color:var(--muted); font-size:11px; }}
+    .household-timeline-actions {{ margin-top:12px; }}
+    .household-timeline-actions form {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .household-timeline-actions input[type="date"] {{ min-height:38px; padding:8px 10px; border:1px solid var(--line); border-radius:9px; font:inherit; }}
+    .household-timeline-form .timeline-notes {{ grid-column:span 2; }}
+    .tariff-context-note {{ background:#f8fbf9; }}
+    .tariff-context-inline {{ margin:0 0 12px; padding:10px 12px; background:#f8fbf9; border:1px solid var(--line); border-radius:12px; }}
     .decision-grid,.system-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
     .decision-grid div,.system-card {{ padding:18px; background:#fff; border:1px solid var(--line); border-radius:17px; }}
     .decision-grid span,.decision-grid strong,.config-grid span,.config-grid strong {{ display:block; }}
@@ -10474,7 +10805,7 @@ def write_html(
     .ev-caveat div {{ min-width:220px; }} .ev-caveat span,.ev-caveat strong {{ display:block; }} .ev-caveat span {{ font-size:9px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }} .ev-caveat strong {{ margin-top:3px; font-size:13px; }}
     .ev-caveat p {{ margin:0; color:#53798a; font-size:11px; }}
     footer {{ padding:24px 0 0; color:var(--muted); text-align:center; font-size:10px; }}
-    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics,.tariff-update-hero,.tariff-decision-actions {{ grid-template-columns:1fr; }} .tariff-update-hero > strong {{ white-space:normal; }} .tariff-comparison-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
+    @media (max-width:900px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .charts,.trend-grid,.recommendation-grid,.scenario-grid,.plan-detail-grid,.bill-change-grid,.action-grid,.briefing-grid,.briefing-grid.two-up,.home-status-grid,.energy-score-card,.energy-score-factors,.energy-score-breakdown,.decision-explanation-grid,.decision-grid,.system-grid,.system-overview-grid,.config-grid,.import-form,.setup-task,.setup-config-form,.setup-form-row,.manual-tariff-fields,.tariff-preview-card dl,.onboarding-steps,.provider-status-grid,.provider-guidance-grid,.provider-account-summary,.home-page-link-grid,.home-forecast-grid,.home-forecast-summary,.home-historical-trend-grid,.home-glance-card,.home-timeline-row,.bills-layout-grid,.bills-overview-grid,.comparison-summary-list,.bills-plan-grid,.battery-metrics,.tariff-update-hero,.tariff-decision-actions {{ grid-template-columns:1fr; }} .household-timeline-form .timeline-notes {{ grid-column:auto; }} .tariff-update-hero > strong {{ white-space:normal; }} .tariff-comparison-row {{ grid-template-columns:1fr; }} .trend-card:last-child {{ grid-column:auto; }} .period-controls form {{ grid-template-columns:1fr 1fr; }} .top-nav {{ justify-content:flex-start; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; }} }}
     @media (max-width:620px) {{
       body {{ font-size:14px; }} main {{ width:min(100% - 16px,1180px); margin:8px auto 36px; padding-bottom:60px; }} .hero,.report-section {{ padding:18px; border-radius:18px; }}
       .mobile-shortcuts {{ position:sticky; top:0; z-index:20; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px; padding:7px; background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); backdrop-filter:blur(14px); }}

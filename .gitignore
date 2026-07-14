@@ -25,6 +25,8 @@ reports/
 config/secrets.json
 config/demo/
 config/home_profile.json
+config/household_timeline.json
+config/household_timeline_audit.jsonl
 config/provider_mappings.json
 config/provider_state.json
 collector/solaredge_cookie.txt

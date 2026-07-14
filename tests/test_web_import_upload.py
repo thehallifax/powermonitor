@@ -233,8 +233,8 @@ class WebImportUploadTests(unittest.TestCase):
 
         self.assertIn("Showing <strong>Last 7 days</strong>", html)
         self.assertIn('option value="last_7_days" selected', html)
-        self.assertIn('name="start" value="2026-07-07"', html)
-        self.assertIn('name="end" value="2026-07-13"', html)
+        self.assertIn('name="start" value="2026-07-08"', html)
+        self.assertIn('name="end" value="2026-07-14"', html)
         self.assertNotEqual(html, canonical)
         self.assertEqual(self.report_path.read_text(encoding="utf-8"), canonical)
 
@@ -249,8 +249,8 @@ class WebImportUploadTests(unittest.TestCase):
 
         self.assertIn("Showing <strong>Last 30 days</strong>", html)
         self.assertIn('option value="last_30_days" selected', html)
-        self.assertIn('name="start" value="2026-06-14"', html)
-        self.assertIn('name="end" value="2026-07-13"', html)
+        self.assertIn('name="start" value="2026-06-15"', html)
+        self.assertIn('name="end" value="2026-07-14"', html)
 
     def test_previous_billing_period_query_renders_requested_period(self):
         self.write_settings()

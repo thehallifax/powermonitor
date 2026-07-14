@@ -61,6 +61,27 @@ python3 collector/setup_home_profile.py
 The wizard stores declared home facts only. It does not configure live
 providers or change dashboard behaviour.
 
+## Household Timeline
+
+PowerMonitor has a local Household Timeline at
+`config/household_timeline.json`. The timeline records when household facts
+changed without modifying imported measurements. Tariff periods are the first
+fully integrated event type: historical cost, supply charge, export credit,
+bill estimates, tariff buckets, plan baselines, and battery modelling resolve
+the tariff that was active for each interval or local day.
+
+If no timeline file exists, PowerMonitor infers one open current tariff period
+from the current settings and marks earlier tariff history as uncertain. Add a
+previous tariff from Settings -> Household timeline. Catalogue plans can be
+selected for known Synergy plans, while manual historical tariffs support plans
+that are no longer in the catalogue. Timeline changes are audited locally in
+`config/household_timeline_audit.jsonl`.
+
+Unknown tariff history is reported as a gap. Reports continue for known
+current periods, but historical financial modelling uses fallback tariff
+resolution with a visible warning and lower confidence until the missing period
+is filled.
+
 ## Demo Mode
 
 PowerMonitor can run with deterministic fictional demo data when no live

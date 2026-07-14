@@ -82,6 +82,40 @@ cookies, tokens, account numbers, NMI values, or raw measurements.
 
 See `docs/home-profile.md` for persistence details and compatibility rules.
 
+## Household Timeline
+
+The Household Timeline is the provider-neutral history of household conditions.
+It is stored locally in `config/household_timeline.json` and supports timeline
+events such as `tariff_period`, `solar_installation`, `battery_installation`,
+`ev_added`, `ev_removed`, `ev_charger_installed`, `major_appliance_change`,
+`occupancy_change`, and `custom_note`.
+
+Each event records an id, type, title, effective start/end dates, source,
+confidence, optional notes, creation/update timestamps, active state, metadata,
+and checksum/version information where useful. Changes written through Settings
+append an audit record with previous values, new values, timestamp, action, and
+optional reason.
+
+Only `tariff_period` affects calculations today. A tariff period stores a stable
+tariff snapshot or catalogue-derived `TariffVersion` reference with provider,
+tariff name, version, effective dates, supply charge, import rates, export
+credit, tariff windows, source, and notes. Historical measurements are not
+stamped with tariff prices; reports resolve the tariff dynamically on each run.
+
+Tariff resolution precedence is deterministic:
+
+1. Explicit household tariff timeline period.
+2. Approved historical `TariffVersion` effective for the timestamp.
+3. Current configured tariff fallback.
+4. Manual fallback with warning.
+
+Overlapping tariff periods are rejected, adjacent periods are allowed, gaps are
+reported, and open-ended current periods must be ended before another tariff can
+start. When a period spans multiple tariff periods, interval import/export costs
+and local-day supply charges use the active tariff for each timestamp. Battery
+replay receives the resolved interval rate, so flat-rate history does not gain
+cheap-grid arbitrage from a later EV time-of-use plan.
+
 ## Home Capabilities
 
 Home capability detection combines the provider-independent Home Profile with
