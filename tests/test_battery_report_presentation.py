@@ -181,7 +181,8 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Period bill", markup)
         self.assertIn("scheduled grid charging", markup)
         self.assertIn("Why this size?", markup)
-        self.assertIn("Larger option", markup)
+        self.assertIn("Larger battery", markup)
+        self.assertIn("Best overall value", markup)
         self.assertIn("Current billing-period evidence", markup)
         self.assertIn("Seasonal evidence", markup)
         self.assertIn("Methodology", markup)
@@ -289,8 +290,10 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("Estimated annual bill reduction", markup)
         self.assertLess(markup.index("Recommended battery"), markup.index("Why this size?"))
         self.assertIn("Why this size?", markup)
-        self.assertIn("Smaller option", markup)
-        self.assertIn("Larger option", markup)
+        self.assertIn("Smaller battery", markup)
+        self.assertIn("Recommended", markup)
+        self.assertIn("Larger battery", markup)
+        self.assertIn("This recommendation is based on your current household usage.", markup)
         self.assertIn("Current billing-period result", markup)
         self.assertIn("Best for selected period", markup)
         self.assertIn("Annual values combine included seasons", markup)
@@ -308,6 +311,120 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("battery-table-wrap", markup)
         self.assertIn("battery-seasonal-table-wrap", markup)
         self.assertNotIn("<th>Solar only</th>", markup)
+
+    def test_battery_purchase_decision_context_compares_neighbouring_sizes_and_upgrade_payback(self):
+        comparison = {
+            "available": True,
+            "recommended": {"capacity_kwh": 15.0},
+            "battery_recommendation": {"recommended_size_kwh": 15.0, "source": "current_period"},
+            "strategies": {
+                "solar_plus_grid_arbitrage": {
+                    "options": [
+                        {"capacity_kwh": 10.0, "label": "10 kWh usable", "annualised_savings": 1000.0},
+                        {"capacity_kwh": 15.0, "label": "15 kWh usable", "annualised_savings": 1188.0},
+                        {"capacity_kwh": 20.0, "label": "20 kWh usable", "annualised_savings": 1273.0},
+                    ]
+                }
+            },
+            "data_quality": {"days": 30},
+        }
+        custom_settings = SimpleNamespace(
+            battery_installed_costs={"10": 9500.0, "15": 12000.0, "20": 15500.0},
+            battery_round_trip_efficiency=0.90,
+            battery_life_years=15,
+            battery_annual_degradation_pct=2.0,
+            battery_electricity_inflation_pct=3.0,
+            battery_discount_rate_pct=0.0,
+            battery_government_rebate=0.0,
+        )
+        investment = report.battery_investment_analysis(comparison, custom_settings)
+
+        context = report.battery_purchase_decision_context(comparison, investment)
+        markup = report.battery_comparison_html(comparison, investment, show_future_usage_note=True)
+
+        self.assertEqual(context["smaller"]["capacity_kwh"], 10.0)
+        self.assertEqual(context["larger"]["capacity_kwh"], 20.0)
+        self.assertEqual(context["smaller_delta"], 188.0)
+        self.assertEqual(context["larger_delta"], 85.0)
+        self.assertEqual(context["smaller_energy_delta"], 5.0)
+        self.assertEqual(context["larger_energy_delta"], 5.0)
+        self.assertAlmostEqual(context["larger_percentage_improvement"], 85.0 / 1188.0 * 100)
+        self.assertEqual(context["diminishing_return"], 103.0)
+        self.assertEqual(context["upgrade_economics"]["additional_cost"], 3500.0)
+        self.assertEqual(context["upgrade_economics"]["additional_annual_saving"], 85.0)
+        self.assertAlmostEqual(context["upgrade_economics"]["additional_payback_years"], 3500.0 / 85.0)
+        self.assertIn("Around $188.00/year less saving", markup)
+        self.assertIn("Around $85.00/year additional saving", markup)
+        self.assertIn("Diminishing return: $103.00/year less than the previous size step", markup)
+        self.assertIn("Choosing 20 kWh instead of 15 kWh", markup)
+        self.assertIn("$3,500.00", markup)
+        self.assertIn("41.2 years", markup)
+        self.assertIn("Future EVs, electric heating/cooling or pool equipment may justify a larger battery.", markup)
+
+    def test_battery_purchase_decision_omits_upgrade_economics_without_pricing(self):
+        comparison = {
+            "available": True,
+            "recommended": {"capacity_kwh": 15.0},
+            "battery_recommendation": {"recommended_size_kwh": 15.0, "source": "current_period"},
+            "strategies": {
+                "solar_plus_grid_arbitrage": {
+                    "options": [
+                        {"capacity_kwh": 10.0, "label": "10 kWh usable", "annualised_savings": 1000.0},
+                        {"capacity_kwh": 15.0, "label": "15 kWh usable", "annualised_savings": 1188.0},
+                        {"capacity_kwh": 20.0, "label": "20 kWh usable", "annualised_savings": 1273.0},
+                    ]
+                }
+            },
+            "data_quality": {"days": 30},
+        }
+        no_pricing_settings = SimpleNamespace(
+            battery_installed_costs={},
+            battery_round_trip_efficiency=0.90,
+            battery_life_years=15,
+            battery_annual_degradation_pct=2.0,
+            battery_electricity_inflation_pct=3.0,
+            battery_discount_rate_pct=0.0,
+            battery_government_rebate=0.0,
+        )
+        investment = report.battery_investment_analysis(comparison, no_pricing_settings)
+
+        context = report.battery_purchase_decision_context(comparison, investment)
+        markup = report.battery_comparison_html(comparison, investment)
+
+        self.assertIsNone(context["upgrade_economics"])
+        self.assertIn("Larger battery", markup)
+        self.assertIn("Around $85.00/year additional saving", markup)
+        self.assertNotIn("Estimated upgrade economics", markup)
+
+    def test_battery_purchase_decision_rendering_does_not_change_sizing_or_api_shape(self):
+        analysis = report.scenario_analysis(
+            summary(),
+            settings(),
+            battery_intervals=[
+                {"measurement_time": "2026-07-01T12:00:00", "tariff_bucket": "super_off_peak", "solar_export_kwh": 5.0, "grid_import_kwh": 0.0},
+                {"measurement_time": "2026-07-01T18:00:00", "tariff_bucket": "peak", "solar_export_kwh": 0.0, "grid_import_kwh": 5.0},
+            ],
+        )
+        before_options = [dict(item) for item in analysis["battery_comparison"]["options"]]
+        before_recommendation = dict(analysis["battery_recommendation"])
+
+        report.scenario_analysis_html(analysis)
+
+        self.assertEqual(analysis["battery_comparison"]["options"], before_options)
+        self.assertEqual(analysis["battery_recommendation"], before_recommendation)
+        for field in (
+            "recommended_size",
+            "installed_cost",
+            "rebate",
+            "net_cost",
+            "annual_saving",
+            "simple_payback_years",
+            "ten_year_net",
+            "fifteen_year_net",
+            "confidence",
+            "assumptions",
+        ):
+            self.assertIn(field, analysis["battery_investment"])
 
     def test_mixed_tariff_explanation_renders_in_battery_summary(self):
         seasonal_rows = []

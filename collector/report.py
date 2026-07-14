@@ -9478,7 +9478,7 @@ def bills_actions_html(recommendations: list, plan: dict) -> str:
     """
 
 
-def battery_comparison_html(comparison: Optional[dict]) -> str:
+def battery_comparison_html(comparison: Optional[dict], investment: Optional[dict] = None, show_future_usage_note: bool = False) -> str:
     if not comparison:
         return ""
     baseline = comparison.get("baseline", {})
@@ -9543,7 +9543,7 @@ def battery_comparison_html(comparison: Optional[dict]) -> str:
       {tariff_history_note}
       {battery_primary_recommendation_html(comparison, tariff_name)}
       {battery_why_this_size_html(comparison)}
-      {battery_tradeoff_cards_html(comparison)}
+      {battery_purchase_decision_cards_html(comparison, investment, show_future_usage_note)}
       {battery_annual_sizing_table_html(comparison)}
       {battery_accordion_html("Current billing-period evidence", "Selected-period context", battery_current_period_result_html(rows, recommended, grid_recommended, grid_explanation, opportunity, primary_source, comparison))}
       {battery_accordion_html("Seasonal evidence", "Historical seasonal context", battery_seasonal_model_html(comparison.get("seasonal_model"), comparison) or '<p class="scenario-note">Seasonal battery modelling needs interval-grade historical import/export data.</p>')}
@@ -9641,6 +9641,8 @@ def battery_recommendation_context(comparison: dict) -> dict[str, Any]:
     recommended_saving = float(recommended.get("annualised_savings") or 0.0)
     smaller_saving = float((smaller or {}).get("annualised_savings") or 0.0)
     larger_saving = float((larger or {}).get("annualised_savings") or 0.0)
+    smaller_size = float((smaller or {}).get("capacity_kwh") or 0.0)
+    larger_size = float((larger or {}).get("capacity_kwh") or 0.0)
     return {
         "options": options,
         "recommended": recommended,
@@ -9650,7 +9652,40 @@ def battery_recommendation_context(comparison: dict) -> dict[str, Any]:
         "larger": larger,
         "smaller_delta": max(recommended_saving - smaller_saving, 0.0) if smaller else None,
         "larger_delta": max(larger_saving - recommended_saving, 0.0) if larger else None,
+        "smaller_energy_delta": max(recommended_size - smaller_size, 0.0) if smaller else None,
+        "larger_energy_delta": max(larger_size - recommended_size, 0.0) if larger else None,
+        "smaller_percentage_improvement": ((recommended_saving - smaller_saving) / smaller_saving * 100) if smaller and smaller_saving > 0 else None,
+        "larger_percentage_improvement": ((larger_saving - recommended_saving) / recommended_saving * 100) if larger and recommended_saving > 0 else None,
+        "diminishing_return": max((recommended_saving - smaller_saving) - (larger_saving - recommended_saving), 0.0) if smaller and larger else None,
     }
+
+
+def battery_purchase_decision_context(comparison: dict, investment: Optional[dict] = None) -> dict[str, Any]:
+    context = battery_recommendation_context(comparison)
+    investment_options = (investment or {}).get("options") or []
+    investment_by_capacity = {
+        float(option.get("capacity_kwh") or 0.0): option
+        for option in investment_options
+        if float(option.get("capacity_kwh") or 0.0) > 0
+    }
+    recommended_size = float(context.get("recommended_size") or 0.0)
+    larger = context.get("larger")
+    larger_size = float((larger or {}).get("capacity_kwh") or 0.0)
+    recommended_investment = investment_by_capacity.get(recommended_size)
+    larger_investment = investment_by_capacity.get(larger_size)
+    upgrade_economics = None
+    if recommended_investment and larger_investment and context.get("larger_delta") is not None:
+        additional_cost = float(larger_investment.get("net_cost") or 0.0) - float(recommended_investment.get("net_cost") or 0.0)
+        additional_saving = float(context.get("larger_delta") or 0.0)
+        if additional_cost > 0 and additional_saving > 0:
+            upgrade_economics = {
+                "from_size": recommended_size,
+                "to_size": larger_size,
+                "additional_cost": additional_cost,
+                "additional_annual_saving": additional_saving,
+                "additional_payback_years": additional_cost / additional_saving,
+            }
+    return {**context, "investment_by_capacity": investment_by_capacity, "upgrade_economics": upgrade_economics}
 
 
 def battery_why_this_size_html(comparison: dict) -> str:
@@ -9684,45 +9719,100 @@ def battery_why_this_size_html(comparison: dict) -> str:
     """
 
 
-def battery_tradeoff_cards_html(comparison: dict) -> str:
-    context = battery_recommendation_context(comparison)
+def battery_purchase_decision_cards_html(comparison: dict, investment: Optional[dict] = None, show_future_usage_note: bool = False) -> str:
+    context = battery_purchase_decision_context(comparison, investment)
     smaller = context["smaller"]
     larger = context["larger"]
-    if not smaller and not larger:
+    recommended = context["recommended"]
+    if not recommended:
         return ""
+    recommended_size = float(context.get("recommended_size") or 0.0)
+    recommended_saving = float(context.get("recommended_saving") or 0.0)
     smaller_html = (
-        battery_tradeoff_card_html(
-            "Smaller option",
+        battery_purchase_decision_card_html(
+            "Smaller battery",
             smaller,
-            f"Saves approximately {money(float(context['smaller_delta'] or 0.0))} less per year",
-            "Lower upfront cost. May suit a tighter budget.",
+            [
+                "Lower purchase cost",
+                f"Around {money(float(context['smaller_delta'] or 0.0))}/year less saving",
+                f"{kwh(float(context['smaller_energy_delta'] or 0.0))} less usable storage",
+                "May suit tighter budgets",
+            ],
         )
         if smaller
         else ""
     )
-    larger_signal = str((larger or {}).get("recommendation_signal") or "Limited extra value")
+    recommended_html = battery_purchase_decision_card_html(
+        "Recommended",
+        recommended,
+        [
+            "Best overall value",
+            f"Estimated annual bill reduction of {money(recommended_saving)}",
+            "Best balance of purchase cost and savings",
+        ],
+        recommended=True,
+    )
     larger_html = (
-        battery_tradeoff_card_html(
-            "Larger option",
+        battery_purchase_decision_card_html(
+            "Larger battery",
             larger,
-            f"Adds approximately {money(float(context['larger_delta'] or 0.0))} per year",
-            f"{homeowner_battery_signal(larger_signal)}. Longer payback likely.",
+            [
+                f"Around {money(float(context['larger_delta'] or 0.0))}/year additional saving",
+                f"{kwh(float(context['larger_energy_delta'] or 0.0))} more usable storage",
+                (
+                    f"Diminishing return: {money(float(context['diminishing_return']))}/year less than the previous size step"
+                    if context.get("diminishing_return")
+                    else ""
+                ),
+                "Likely longer payback",
+                "Consider only if future usage is expected to increase",
+            ],
         )
         if larger
         else ""
     )
-    return f'<div class="battery-tradeoff-grid">{smaller_html}{larger_html}</div>'
+    future_note = (
+        '<p class="scenario-note battery-future-usage-note">This recommendation is based on your current household usage. '
+        "Future EVs, electric heating/cooling or pool equipment may justify a larger battery.</p>"
+        if show_future_usage_note
+        else ""
+    )
+    return f"""
+      <div class="battery-decision-assistant">
+        <div class="battery-tradeoff-grid">{smaller_html}{recommended_html}{larger_html}</div>
+        {battery_upgrade_economics_html(context)}
+        {future_note}
+      </div>
+    """
 
 
-def battery_tradeoff_card_html(title: str, option: Optional[dict], headline: str, detail: str) -> str:
+def battery_purchase_decision_card_html(title: str, option: Optional[dict], points: list[str], recommended: bool = False) -> str:
     if not option:
         return ""
+    class_name = "battery-tradeoff-card recommended" if recommended else "battery-tradeoff-card"
     return f"""
-      <div class="battery-tradeoff-card">
+      <div class="{class_name}">
         <span>{html.escape(title)}</span>
         <strong>{float(option.get("capacity_kwh") or 0.0):g} kWh usable</strong>
-        <p>{html.escape(headline)}</p>
-        <small>{html.escape(detail)}</small>
+        <ul>{"".join(f"<li>{html.escape(point)}</li>" for point in points if point)}</ul>
+      </div>
+    """
+
+
+def battery_upgrade_economics_html(context: dict[str, Any]) -> str:
+    economics = context.get("upgrade_economics")
+    if not economics:
+        return ""
+    payback = float(economics["additional_payback_years"])
+    return f"""
+      <div class="battery-upgrade-economics">
+        <h4>Estimated upgrade economics</h4>
+        <p>Choosing {float(economics['to_size']):g} kWh instead of {float(economics['from_size']):g} kWh</p>
+        <div class="battery-metrics battery-investment-cards">
+          {battery_metric("Estimated additional cost", money(float(economics["additional_cost"])), "From configured battery cost assumptions")}
+          {battery_metric("Estimated additional saving", f"{money(float(economics['additional_annual_saving']))}/year", "From existing simulated annual savings")}
+          {battery_metric("Estimated additional payback", f"{payback:.1f} years", "Additional purchase cost divided by additional annual saving")}
+        </div>
       </div>
     """
 
@@ -10148,7 +10238,7 @@ def scenario_analysis_html(analysis: dict) -> str:
     <section class="report-section scenario-section">
       <div class="section-title"><div><span class="eyebrow">Decisions</span><h2>Scenario analysis</h2></div><p>Estimated bill compared with actual</p></div>
       <div class="scenario-grid">{''.join(cards)}</div>
-      {battery_comparison_html(analysis.get("battery_comparison"))}
+      {battery_comparison_html(analysis.get("battery_comparison"), analysis.get("battery_investment"), show_future_usage_note=bool(analysis.get("battery_investment", {}).get("available")))}
       {battery_investment_html(analysis.get("battery_investment"))}
       {insights_html}
     </section>
@@ -11016,7 +11106,7 @@ def write_html(
     .scenario-insights ul {{ margin:0; padding-left:18px; color:#74571a; font-size:12px; }} .scenario-insights li + li {{ margin-top:6px; }}
     .battery-comparison {{ display:grid; gap:14px; }}
     .battery-conclusion {{ max-width:920px; color:#4c3f1f; font-size:14px; line-height:1.55; }}
-    .battery-primary-summary,.battery-why-size,.battery-tradeoff-card {{ padding:16px; background:#fff; border:1px solid #eeddb0; border-radius:14px; }}
+    .battery-primary-summary,.battery-why-size,.battery-tradeoff-card,.battery-upgrade-economics {{ padding:16px; background:#fff; border:1px solid #eeddb0; border-radius:14px; }}
     .battery-primary-summary {{ display:grid; gap:12px; }}
     .battery-primary-summary .battery-metrics {{ margin:0; }}
     .battery-based-on {{ display:grid; gap:8px; padding:12px 14px; background:#fffaf0; border:1px solid #eeddb0; border-radius:12px; }}
@@ -11026,11 +11116,18 @@ def write_html(
     .battery-based-on a:focus-visible,.battery-accordion summary:focus-visible,.battery-calculation-details summary:focus-visible {{ outline:3px solid #80bfa3; outline-offset:3px; border-radius:10px; }}
     .battery-why-size {{ display:grid; gap:6px; }}
     .battery-why-size p {{ margin:0; color:#4c3f1f; font-size:14px; line-height:1.55; }}
-    .battery-tradeoff-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+    .battery-decision-assistant {{ display:grid; gap:10px; }}
+    .battery-tradeoff-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
     .battery-tradeoff-card {{ display:grid; gap:6px; align-content:start; }}
+    .battery-tradeoff-card.recommended {{ border-color:#b9dfcc; background:#f6fcf9; }}
     .battery-tradeoff-card span {{ color:#74571a; font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .battery-tradeoff-card strong {{ color:#1f2a26; font-size:18px; line-height:1.2; letter-spacing:-.025em; }}
     .battery-tradeoff-card p,.battery-tradeoff-card small {{ margin:0; color:#5f6b67; font-size:12px; line-height:1.4; }}
+    .battery-tradeoff-card ul {{ display:grid; gap:5px; margin:0; padding-left:18px; color:#5f6b67; font-size:12px; line-height:1.4; }}
+    .battery-upgrade-economics {{ display:grid; gap:8px; }}
+    .battery-upgrade-economics h4,.battery-upgrade-economics p {{ margin:0; }}
+    .battery-upgrade-economics h4 {{ color:#302611; font-size:13px; letter-spacing:-.01em; }}
+    .battery-upgrade-economics p {{ color:#5f6b67; font-size:12px; line-height:1.45; }}
     .battery-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:14px 0; }}
     .battery-metrics div,.battery-diagnostics .config-grid div {{ padding:12px; background:#fff; border:1px solid #eeddb0; border-radius:12px; }}
     .battery-metrics span,.battery-metrics strong,.battery-metrics small,.battery-diagnostics .config-grid span,.battery-diagnostics .config-grid strong,.battery-diagnostics .config-grid small {{ display:block; }}
