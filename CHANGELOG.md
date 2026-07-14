@@ -1,5 +1,34 @@
 # Changelog
 
+## UX-018 - Decisions and Provider Experience
+
+- Reworked Decisions so the page now leads with "What this means", then
+  homeowner actions, major purchase decisions, supporting analysis, and an
+  optional diagnostics handoff instead of mixing goals, background checks, and
+  raw recommendation internals into one flow.
+- Added deterministic recommendation filtering so only actionable,
+  evidence-backed items with sufficient confidence appear under "What should I
+  do next?", while low-confidence items move into "Things PowerMonitor is
+  still learning" and setup/data-quality items route to diagnostics.
+- Simplified recommendation cards to action, reason, expected benefit when
+  available, confidence, homeowner wording, and a compact "Why?" disclosure,
+  removing priority scores, raw evidence blocks, enum labels, and "Unable to
+  estimate" filler from the main Decisions action flow.
+- Tightened the battery sizing summary by replacing the stretched "Based on"
+  box with one concise methodology sentence while keeping the existing sizing,
+  coverage, tariff, economics, product match, and quote-comparison content.
+- Made provider state explicit in Provider Management and the provider API via
+  a `provider_state` payload, separating not configured, configured,
+  connected, warning, disabled, manual, and imported states without inferring
+  connections from unrelated household history.
+- Updated provider cards and actions so homeowners see clearer connection
+  wording, last successful/attempted update context, and state-appropriate
+  actions without exposing provider-version or runtime jargon in the primary
+  card.
+- Added regression coverage for Decisions filtering/learning behaviour,
+  homeowner recommendation wording, provider-state serialization, and updated
+  provider action presentation.
+
 ## BAT-007 - Battery Catalogue and Real-Product Matching
 
 - Added a source-controlled Australian battery product catalogue with stable

@@ -81,7 +81,7 @@ class ProviderManagerTests(unittest.TestCase):
 
         self.assertEqual(provider.lifecycle_state, ProviderConnectionStatus.NOT_CONFIGURED)
         self.assertIn("Configure", provider.actions)
-        self.assertIn("Test Connection", provider.actions)
+        self.assertIn("Setup Help", provider.actions)
 
     def test_credential_updates_are_redacted(self):
         with TemporaryDirectory() as directory:
@@ -386,7 +386,7 @@ class ProviderManagerTests(unittest.TestCase):
     def test_provider_removal_and_reconnect_flow_actions_are_model_driven(self):
         manager = ProviderManager(registry())
 
-        self.assertEqual(manager.transition("solaredge", "Reconnect").provider_id, "solaredge")
+        self.assertEqual(manager.transition("solaredge", "Fix Connection").provider_id, "solaredge")
         self.assertEqual(manager.transition("solaredge", "Remove").provider_id, "solaredge")
         with self.assertRaises(ValueError):
             manager.transition("solaredge", "Rotate The Moon")

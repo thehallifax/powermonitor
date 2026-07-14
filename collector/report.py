@@ -1118,6 +1118,11 @@ def dashboard_data(
         behaviour=household_behaviour,
     )
     recommendation_presentations = decision_pipeline.recommendations
+    decision_diagnostics_notice = (
+        "Some recommendations are temporarily limited because live data, setup, or confidence checks still need attention."
+        if advisor_explanations.active() or recommendation_sections(recommendation_presentations)["diagnostics"]
+        else ""
+    )
     household_insights = HouseholdInsightsEngine().build(
         trends=trends,
         current_summary=period_summary,
@@ -3891,10 +3896,10 @@ def customer_label(value: Any) -> str:
         "collector": "live data",
         "SolarEdge session expired": "We can't verify live conditions right now",
         "session expired": "live data sign-in needs attention",
-        "Investigate anomaly": "Potential issue detected",
-        "Investigate unusual household behaviour": "Potential issue detected",
-        "Investigate unusual behaviour": "Potential issue detected",
-        "active anomaly": "potential issue",
+        "Investigate anomaly": "Overnight usage appears higher than normal",
+        "Investigate unusual household behaviour": "Overnight usage appears higher than normal",
+        "Investigate unusual behaviour": "Overnight usage appears higher than normal",
+        "active anomaly": "unusual pattern",
         "Evidence quality": "Confidence",
         "evidence quality": "confidence",
         "Not quantified": "Unable to estimate",
@@ -4320,6 +4325,140 @@ def recommendation_sort_key(decision) -> tuple[int, str]:
     return (-recommendation_priority_score(decision), recommendation_title(decision))
 
 
+def recommendation_decision_type(decision) -> str:
+    if is_recommendation_presentation(decision):
+        payload = recommendation_presentation_value(decision, "decision") or {}
+        if isinstance(payload, dict):
+            return str(payload.get("decision_type") or payload.get("type") or "")
+    return str(getattr(decision, "action_type", "") or "")
+
+
+def recommendation_confidence_bucket(decision) -> str:
+    value = recommendation_confidence(decision).strip().lower().replace("_", " ")
+    if value in {"very high", "high"}:
+        return "high"
+    if value == "medium":
+        return "medium"
+    if value == "low":
+        return "low"
+    return "unknown"
+
+
+def recommendation_has_verified_evidence(decision) -> bool:
+    evidence = recommendation_presentation_value(decision, "evidence") if is_recommendation_presentation(decision) else getattr(decision, "evidence", None)
+    if isinstance(evidence, dict):
+        return any(value not in {None, "", "UNKNOWN"} for value in evidence.values())
+    if not isinstance(evidence, list):
+        return False
+    for item in evidence:
+        if isinstance(item, dict):
+            quality = str(item.get("quality") or "").upper()
+            value = item.get("value")
+        else:
+            quality = str(getattr(item, "quality", "") or "").upper()
+            value = getattr(item, "value", None)
+        if quality not in {"", "UNKNOWN"} and value not in {None, "", "UNKNOWN"}:
+            return True
+    return False
+
+
+def recommendation_is_actionable(decision) -> bool:
+    action = recommendation_action(decision).strip()
+    if not action:
+        return False
+    lowered = action.lower()
+    if "unable to estimate" in lowered:
+        return False
+    decision_type = recommendation_decision_type(decision)
+    if decision_type in {
+        "CHARGE_NOW",
+        "WAIT_FOR_CHEAPER_WINDOW",
+        "WAIT_FOR_SOLAR",
+        "REVIEW_BILLING",
+        "INVESTIGATE_ANOMALY",
+    }:
+        return True
+    category = recommendation_category(decision).strip().lower()
+    return category in {"tariff", "tariffs", "bills", "billing", "solar", "ev", "ev charging", "behaviour"}
+
+
+def recommendation_is_diagnostic(decision) -> bool:
+    decision_type = recommendation_decision_type(decision)
+    if decision_type in {
+        "REVIEW_PROVIDER",
+        "REVIEW_SETUP",
+        "DATA_INSUFFICIENT",
+        "MONITOR_USAGE",
+    }:
+        return True
+    category = recommendation_category(decision).strip().lower()
+    return category in {"monitoring", "data quality", "setup"}
+
+
+def recommendation_sections(recommendations: list[Decision]) -> dict[str, list[Decision]]:
+    sections: dict[str, list[Decision]] = {
+        "actions": [],
+        "learning": [],
+        "diagnostics": [],
+    }
+    for decision in sorted(recommendations, key=recommendation_sort_key):
+        confidence = recommendation_confidence_bucket(decision)
+        actionable = recommendation_is_actionable(decision)
+        verified = recommendation_has_verified_evidence(decision)
+        diagnostic = recommendation_is_diagnostic(decision)
+        if diagnostic or confidence == "unknown" or not verified or not actionable:
+            sections["diagnostics"].append(decision)
+        elif confidence == "low":
+            sections["learning"].append(decision)
+        else:
+            sections["actions"].append(decision)
+    return sections
+
+
+def recommendation_card_html(
+    decision,
+    *,
+    household_decisions: Optional[list[dict]] = None,
+    hidden: bool = False,
+    learning: bool = False,
+) -> str:
+    impact = recommendation_impact(decision)
+    impact_html = (
+        f'<p class="recommendation-benefit"><strong>Expected benefit</strong>{html.escape(impact)}</p>'
+        if impact != unable_to_estimate()
+        else ""
+    )
+    confidence_label = recommendation_confidence(decision)
+    why_text = recommendation_why_we_think_this(decision)
+    body_copy = (
+        "PowerMonitor is still learning this pattern. It will become more specific as more verified data arrives."
+        if learning
+        else recommendation_why(decision)
+    )
+    action_copy = "View decisions" if learning else recommendation_action(decision)
+    controls = recommendation_controls_html(decision, hidden=hidden) if not learning else ""
+    return f"""
+      <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(decision))}">
+        <div class="recommendation-centre-heading">
+          <span class="recommendation-level">{html.escape(confidence_label)} confidence</span>
+        </div>
+        <h3>{html.escape(recommendation_title(decision))}</h3>
+        <div class="decision-lines simplified">
+          <p class="primary-action"><strong>Action</strong>{html.escape(action_copy)}</p>
+          <p><strong>Why</strong>{html.escape(body_copy)}</p>
+          {impact_html}
+          {"" if learning else f"<p><strong>Confidence</strong>{html.escape(recommendation_confidence_note(decision))}</p>"}
+          {recommendation_decision_provenance_html(decision, household_decisions) if not learning else ""}
+        </div>
+        <details class="evidence-trail">
+          <summary>Why?</summary>
+          <p>{html.escape(why_text)}</p>
+        </details>
+        {controls}
+      </article>
+    """
+
+
 def recommendation_centre_html(
     recommendations: list[Decision],
     lifecycle_counts: Optional[dict[str, int]] = None,
@@ -4341,68 +4480,19 @@ def recommendation_centre_html(
         if inactive_count
         else ""
     )
-    cards = []
-    for decision in ranked:
-        why = recommendation_why(decision)
-        confidence_note = recommendation_confidence_note(decision)
-        goal_links = recommendation_goal_links_html(decision, goals)
-        cards.append(
-            f"""
-            <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(decision))}">
-              <div class="recommendation-centre-heading">
-                <span class="recommendation-level">{html.escape(recommendation_confidence(decision))} confidence</span>
-                <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
-              </div>
-              <h3>{html.escape(recommendation_title(decision))}</h3>
-              <div class="recommendation-centre-meta">
-                <span>{html.escape(recommendation_category(decision).title())}</span>
-                <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
-              </div>
-              <div class="recommendation-metrics">
-                <span><small>Period impact</small><strong>{html.escape(recommendation_impact(decision))}</strong></span>
-                <span><small>Monthly impact</small><strong>{html.escape(recommendation_monthly_impact(decision))}</strong></span>
-              </div>
-              <div class="decision-lines">
-                <p><strong>What happened?</strong>{html.escape(recommendation_what_happened(decision))}</p>
-                <p><strong>Why? Why do we think this?</strong>{html.escape(recommendation_why_we_think_this(decision))}</p>
-                <p class="primary-action"><strong>What should I check?</strong>{html.escape(recommendation_what_to_check(decision))}</p>
-                <p><strong>What happens if I ignore it?</strong>{html.escape(recommendation_if_ignored(decision))}</p>
-                <p><strong>Confidence</strong>{html.escape(confidence_note)}</p>
-                {recommendation_decision_provenance_html(decision, household_decisions)}
-                {goal_links}
-              </div>
-              <div class="recommendation-centre-evidence">
-                <strong>Supporting evidence</strong>
-                {recommendation_evidence_html(decision)}
-              </div>
-              {recommendation_controls_html(decision)}
-            </article>
-            """
-        )
+    sections = recommendation_sections(ranked)
+    cards = [
+        recommendation_card_html(decision, household_decisions=household_decisions)
+        for decision in sections["actions"]
+    ]
+    learning_cards = [
+        recommendation_card_html(decision, household_decisions=household_decisions, learning=True)
+        for decision in sections["learning"]
+    ]
     hidden_cards = []
     for decision in hidden:
-        state = recommendation_lifecycle_state(decision).replace("_", " ")
-        evidence = recommendation_presentation_value(decision, "evidence") if is_recommendation_presentation(decision) else decision.evidence
-        snoozed_until = evidence.get("lifecycle_snoozed_until") if isinstance(evidence, dict) else None
-        state_text = f"{state}: {snoozed_until}" if snoozed_until else state
         hidden_cards.append(
-            f"""
-            <article class="recommendation-card recommendation-centre-card {html.escape(recommendation_severity(decision))}">
-              <div class="recommendation-centre-heading">
-                <span class="recommendation-level">{html.escape(state_text.title())}</span>
-                <div><small>Priority score</small><strong>{recommendation_priority_score(decision)}</strong></div>
-              </div>
-              <h3>{html.escape(recommendation_title(decision))}</h3>
-              <div class="recommendation-centre-meta">
-                <span>{html.escape(recommendation_category(decision).title())}</span>
-                <span>{html.escape(recommendation_difficulty(decision))} difficulty</span>
-              </div>
-              <div class="decision-lines">
-                <p class="primary-action"><strong>Recommended action</strong>{html.escape(recommendation_action(decision))}</p>
-              </div>
-              {recommendation_controls_html(decision, hidden=True)}
-            </article>
-            """
+            recommendation_card_html(decision, household_decisions=household_decisions, hidden=True)
         )
     hidden_section = (
         f"""
@@ -4417,6 +4507,24 @@ def recommendation_centre_html(
         if hidden_cards
         else ""
     )
+    learning_section = (
+        f"""
+        <div class="recommendation-learning">
+          <div class="section-title">
+            <div><span class="eyebrow">Still learning</span><h2>Things PowerMonitor is still learning</h2></div>
+            <p>{len(learning_cards)} pattern{'s' if len(learning_cards) != 1 else ''}</p>
+          </div>
+          <div class="recommendation-grid">{''.join(learning_cards)}</div>
+        </div>
+        """
+        if learning_cards
+        else ""
+    )
+    diagnostic_notice = (
+        '<p class="scenario-note">Some recommendations are temporarily limited because live data, setup, or confidence checks still need attention. View diagnostics in Settings.</p>'
+        if sections["diagnostics"] or advisors
+        else ""
+    )
     active_notice = (
         '<p class="notice">Nothing needs a decision right now. PowerMonitor will surface a recommendation here when the data points to a useful action.</p>'
         if not cards
@@ -4426,11 +4534,13 @@ def recommendation_centre_html(
     <section class="report-section recommendation-centre-section">
       <div class="section-title">
         <div><span class="eyebrow">Recommendation centre</span><h2>What should I do next?</h2></div>
-        <p>{len(ranked)} active</p>
+        <p>{len(sections["actions"])} action{'s' if len(sections["actions"]) != 1 else ''}</p>
       </div>
       {lifecycle_note}
+      {diagnostic_notice}
       {active_notice}
       <div class="recommendation-grid">{''.join(cards)}</div>
+      {learning_section}
     </section>
     {hidden_section}
     """
@@ -7655,22 +7765,24 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
 def _provider_onboarding_fallback(data: dict) -> dict:
     lifecycle = str(data.get("lifecycle_state") or "NOT_CONFIGURED")
     diagnostics = data.get("diagnostics", {}) or {}
-    capabilities = data.get("capability_summary", {}) or {}
-    healthy = lifecycle in {"CONNECTED", "SYNCING", "CONFIGURED"}
+    provider_state = data.get("provider_state") or {}
+    status = str(provider_state.get("status") or lifecycle).lower()
+    connected = status == "connected"
+    healthy = status in {"connected", "configured", "manual", "imported"}
     return {
         "state": lifecycle,
         "state_label": friendly_label(lifecycle),
-        "connected": healthy,
+        "connected": connected,
         "healthy": healthy,
-        "data_available": bool(capabilities.get("detected") or diagnostics.get("observation_count") or diagnostics.get("last_successful_sync")),
+        "data_available": bool(provider_state.get("data_available") or diagnostics.get("observation_count") or diagnostics.get("last_successful_sync")),
         "last_successful_sync": diagnostics.get("last_successful_sync"),
         "next_scheduled_sync": "Next data refresh",
         "sync_frequency": "Refresh schedule",
         "required_information": ["Provider configuration details"],
         "why_required": "Provider details let PowerMonitor check access and explain which data is safe to use.",
-        "connection_status": "Connected and available for analysis." if healthy else "Waiting for setup.",
+        "connection_status": "Connected and available for analysis." if connected else "Waiting for setup.",
         "health_status": trust_wording(friendly_label((data.get("health") or {}).get("collector_status") or "unknown")),
-        "next_step": "No action needed right now." if healthy else "Reconnect live data when convenient. Until then PowerMonitor uses tariff timing and stored readings.",
+        "next_step": str(provider_state.get("action_needed") or ("No action needed right now." if healthy else "Reconnect live data when convenient. Until then PowerMonitor uses tariff timing and stored readings.")),
         "common_failures": ["Live data sign-in needs attention", "Provider service unavailable", "No recent data returned"],
         "recovery_steps": ["Check the required information", "Reconnect live data", "Run Test Connection"],
         "technical_details": {
@@ -7863,12 +7975,9 @@ def _provider_configuration_form_html(data: dict, actions: Optional[list[tuple[s
 
 
 def _provider_is_configured_or_available(data: dict, onboarding: dict) -> bool:
-    state = str(data.get("lifecycle_state") or "")
-    return bool(
-        onboarding.get("connected")
-        or onboarding.get("data_available")
-        or state in {"CONFIGURED", "CONNECTED", "SYNCING", "DEGRADED", "ERROR", "DISABLED"}
-    )
+    provider_state = data.get("provider_state") or {}
+    status = str(provider_state.get("status") or "").lower()
+    return status in {"configured", "connected", "warning", "disabled", "manual", "imported"} or bool(onboarding.get("connected"))
 
 
 def _is_future_optional_source(provider_id: str, data: dict, onboarding: dict) -> bool:
@@ -7961,33 +8070,43 @@ def _data_source_provides(provider_id: str, data: dict) -> list[str]:
 
 
 def _data_source_status(kind: str, data: dict, onboarding: dict) -> str:
-    state = str(data.get("lifecycle_state") or onboarding.get("state") or "")
+    provider_state = data.get("provider_state") or {}
+    state = str(provider_state.get("status") or data.get("lifecycle_state") or onboarding.get("state") or "").lower()
     health_status = str(onboarding.get("health_status") or (data.get("health") or {}).get("last_error") or "")
-    if kind == "configuration":
-        return "Connected" if state in {"CONFIGURED", "CONNECTED", "SYNCING"} else "Needs attention"
     if kind == "import":
-        return "Latest upload available" if onboarding.get("data_available") else "Not connected"
+        return "Imported" if onboarding.get("data_available") else "Not connected"
+    if kind == "configuration":
+        return "Manual" if state in {"manual", "configured", "connected"} or _provider_has_enough_configuration(data) else "Not connected"
+    if state == "connected":
+        return "Connected"
     if onboarding.get("connected"):
         return "Connected"
+    if state == "configured":
+        return "Configured"
+    if state == "manual":
+        return "Manual"
+    if state == "imported":
+        return "Imported"
+    if state == "disabled":
+        return "Disabled"
+    if state == "warning":
+        return "Needs attention"
     if "signed in" in health_status.lower() and "no recent solar data" in health_status.lower():
         return "Signed in, but no data received"
-    if onboarding.get("data_available") and state in {"CONFIGURED", "NOT_CONFIGURED"}:
-        return "Historical data only"
-    if state in {"ERROR", "DEGRADED"}:
-        return "Needs attention"
-    if state in {"CONFIGURED"}:
-        return "Waiting for setup"
     return "Not connected"
 
 
 def _provider_management_status(status: str, data: dict) -> str:
-    state = str(data.get("lifecycle_state") or "")
-    if status in {"Connected", "Latest upload available", "Historical data only"}:
+    provider_state = data.get("provider_state") or {}
+    state = str(provider_state.get("status") or data.get("lifecycle_state") or "").lower()
+    if status in {"Connected", "Imported"}:
         return "Connected"
-    if status in {"Needs attention", "Signed in, but no data received"}:
+    if status in {"Configured", "Manual"}:
+        return "Configured"
+    if status in {"Needs attention", "Signed in, but no data received"} or state == "warning":
         return "Warning"
-    if state in {"DEGRADED", "ERROR"}:
-        return "Warning"
+    if status == "Disabled":
+        return "Disabled"
     return "Disconnected"
 
 
@@ -7998,16 +8117,6 @@ def _provider_connection_type(kind: str, data: dict) -> str:
     if kind == "configuration" or provider_id == "synergy_tariff_config":
         return "Manual"
     return "Live API"
-
-
-def _provider_version_label(data: dict) -> str:
-    diagnostics = data.get("diagnostics") or {}
-    version = diagnostics.get("collector_version")
-    if version:
-        return str(version)
-    if str(data.get("lifecycle_state") or "") == "NOT_CONFIGURED":
-        return "Not installed"
-    return "Provider framework v1"
 
 
 def _provider_last_error_label(data: dict, onboarding: dict) -> str:
@@ -8023,9 +8132,9 @@ def _provider_last_error_label(data: dict, onboarding: dict) -> str:
 
 
 def _data_source_tone(status: str) -> str:
-    if status in {"Connected", "Latest upload available"}:
+    if status in {"Connected", "Imported"}:
         return "good"
-    if status in {"Needs attention", "Signed in, but no data received"}:
+    if status in {"Needs attention", "Signed in, but no data received", "Disabled"}:
         return "bad"
     return "neutral"
 
@@ -8048,7 +8157,7 @@ def _provider_data_available_label(provider_id: str, data: dict, onboarding: dic
         return f"Solar history available. Latest solar reading: {_format_source_timestamp(latest)}."
     if onboarding.get("data_available"):
         return "Household history available."
-    return "No usable live data received yet."
+    return "No usable data received yet."
 
 
 def _provider_next_refresh_label(kind: str, onboarding: dict) -> str:
@@ -8058,6 +8167,10 @@ def _provider_next_refresh_label(kind: str, onboarding: dict) -> str:
 
 
 def _provider_has_enough_configuration(data: dict) -> bool:
+    provider_state = data.get("provider_state") or {}
+    required_fields_complete = provider_state.get("required_fields_complete")
+    if required_fields_complete is not None:
+        return bool(required_fields_complete)
     credentials = ((data.get("configuration") or {}).get("credentials") or [])
     configured = {str(item.get("field")) for item in credentials if isinstance(item, dict) and item.get("configured")}
     provider_id = str(data.get("provider_id") or "")
@@ -8068,44 +8181,47 @@ def _provider_has_enough_configuration(data: dict) -> bool:
 
 def _data_source_actions_html(kind: str, data: dict, status: str) -> str:
     provider_id = str(data.get("provider_id") or "")
-    diagnostics_link = f'<a class="button-link muted" href="/api/providers/{html.escape(provider_id)}/diagnostics">View diagnostics</a>'
-    historical_link = (
-        '<a class="button-link" href="#historical-coverage">Historical data</a>'
-        if provider_id == "solaredge" else ""
-    )
+    provider_state = data.get("provider_state") or {}
+    state = str(provider_state.get("status") or status).lower().replace(" ", "_")
+    diagnostics_link = f'<a class="button-link muted" href="/api/providers/{html.escape(provider_id)}/diagnostics">Diagnostics</a>'
+    setup_help_link = f'<a class="button-link muted" href="#system-provider-{html.escape(provider_id)}">Setup help</a>'
+    if state == "imported":
+        return f"""
+          <div class="provider-action-row">
+            <a class="button-link" href="#imports">Import</a>
+            <a class="button-link" href="#imports">View imported data</a>
+            <a class="button-link muted" href="#imports">Remove</a>
+          </div>
+        """
     if kind == "import":
         return f"""
           <div class="provider-action-row">
-            <a class="button-link" href="#imports">Upload latest file</a>
-            <a class="button-link" href="#imports">Replace upload</a>
-            <a class="button-link muted" href="#imports">Remove imported history</a>
-            {diagnostics_link}
+            <a class="button-link" href="#imports">Import</a>
+            {setup_help_link}
           </div>
         """
-    if kind == "configuration":
+    if state == "manual" or kind == "configuration":
         return f"""
           <div class="provider-action-row">
             <a class="button-link" href="#setup-billing">Edit configuration</a>
-            {diagnostics_link}
+            <a class="button-link muted" href="#setup-billing">Remove</a>
           </div>
         """
-    if str(data.get("lifecycle_state") or "") == "DISABLED":
+    if state == "disabled":
         return _provider_configuration_form_html(
             data,
             [("Enable", "enable", "submit"), ("Remove", "remove", "submit")],
             hide_credentials=True,
-        ) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
-    if status == "Connected":
-        live_actions = [("Test connection", "test", "submit"), ("Reconnect", "reconnect", "submit"), ("Disable", "disable", "submit"), ("Remove", "remove", "submit")]
-        return _provider_configuration_form_html(data, live_actions, hide_credentials=True) + f'<div class="provider-action-row provider-diagnostics-row">{historical_link}{diagnostics_link}</div>'
-    live_actions = [("Add provider", "save", "submit")]
-    if _provider_has_enough_configuration(data):
-        live_actions.append(("Test connection", "test", "submit"))
-    if status in {"Needs attention", "Signed in, but no data received", "Historical data only", "Waiting for setup"}:
-        live_actions.append(("Reconnect", "reconnect", "submit"))
-        live_actions.append(("Disable", "disable", "submit"))
-    live_actions.append(("Remove", "remove", "submit"))
-    return _provider_configuration_form_html(data, live_actions) + f'<div class="provider-action-row provider-diagnostics-row">{historical_link}{diagnostics_link}</div>'
+        )
+    if state == "connected":
+        live_actions = [("Edit", "save", "submit"), ("Test connection", "test", "submit"), ("Disable", "disable", "submit"), ("Remove", "remove", "submit")]
+        return _provider_configuration_form_html(data, live_actions, hide_credentials=True) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
+    if state in {"warning", "needs_attention", "signed_in,_but_no_data_received"}:
+        live_actions = [("Fix connection", "reconnect", "submit"), ("Test connection", "test", "submit"), ("Remove", "remove", "submit")]
+        return _provider_configuration_form_html(data, live_actions, hide_credentials=bool(_provider_has_enough_configuration(data))) + f'<div class="provider-action-row provider-diagnostics-row">{diagnostics_link}</div>'
+    if state == "configured":
+        return _provider_configuration_form_html(data, [("Save", "save", "submit"), ("Test connection", "test", "submit"), ("Remove", "remove", "submit")]) + f'<div class="provider-action-row provider-diagnostics-row">{setup_help_link}</div>'
+    return _provider_configuration_form_html(data, [("Configure", "save", "submit")]) + f'<div class="provider-action-row provider-diagnostics-row">{setup_help_link}</div>'
 
 
 def _provider_flash_html(provider_id: str, provider_flash: Optional[dict]) -> str:
@@ -8128,20 +8244,21 @@ def _provider_flash_html(provider_id: str, provider_flash: Optional[dict]) -> st
 
 def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flash: Optional[dict] = None) -> str:
     provider_id = str(data.get("provider_id") or provider.provider_id)
+    provider_state = data.get("provider_state") or {}
     kind = _source_kind(provider_id, data)
     status = _data_source_status(kind, data, onboarding)
     provides = "".join(f"<li>{html.escape(item)}</li>" for item in _data_source_provides(provider_id, data))
     last_updated = _format_source_timestamp(onboarding.get("last_successful_sync"), "Not updated yet")
     if kind == "configuration":
-        last_updated = "Configured" if status == "Connected" else "Needs setup"
-    elif kind == "import" and status == "Latest upload available":
+        last_updated = "Configured" if status in {"Manual", "Connected"} else "Needs setup"
+    elif kind == "import" and status == "Imported":
         last_updated = _format_source_timestamp(onboarding.get("last_successful_sync"), "Uploaded previously")
     next_refresh = _provider_next_refresh_label(kind, onboarding)
     data_available = _provider_data_available_label(provider_id, data, onboarding)
     action_needed = str(onboarding.get("next_step") or "No action needed right now.")
+    last_attempt = _format_source_timestamp(provider_state.get("last_failure_at") or provider_state.get("last_success_at"), "Not attempted yet")
     management_status = _provider_management_status(status, data)
     connection_type = _provider_connection_type(kind, data)
-    provider_version = _provider_version_label(data)
     last_error = _provider_last_error_label(data, onboarding)
     setup_body = f"""
       <div class="provider-guidance-grid">
@@ -8173,11 +8290,10 @@ def _data_source_card_html(provider, data: dict, onboarding: dict, provider_flas
         <div><span>Status</span><strong>{html.escape(management_status)}</strong></div>
         <div><span>Connection type</span><strong>{html.escape(connection_type)}</strong></div>
         <div><span>Last successful refresh</span><strong>{html.escape(last_updated)}</strong></div>
-        <div><span>Next scheduled refresh</span><strong>{html.escape(next_refresh)}</strong></div>
-        <div><span>Last error</span><strong>{html.escape(last_error)}</strong></div>
-        <div><span>Provider version</span><strong>{html.escape(provider_version)}</strong></div>
+        <div><span>Last attempted update</span><strong>{html.escape(last_attempt)}</strong></div>
+        <div><span>What this source provides</span><strong>{html.escape(', '.join(_data_source_provides(provider_id, data)[:2]))}</strong></div>
+        <div><span>What needs attention</span><strong>{html.escape(last_error if last_error != "No recent error" else trust_wording(action_needed))}</strong></div>
         <div><span>Data available</span><strong>{html.escape(data_available)}</strong></div>
-        <div><span>Action needed</span><strong>{html.escape(trust_wording(action_needed))}</strong></div>
       </div>
       {_provider_flash_html(provider_id, provider_flash)}
       <div class="source-provides"><span>Provides</span><ul>{provides}</ul></div>
@@ -9241,6 +9357,7 @@ def system_page_html(
       {runtime_check_html(runtime_check)}
       {battery_catalogue_diagnostics_html(battery_catalogue)}
       {battery_dispatch_diagnostics_html(battery_comparison)}
+      {advisor_centre_html(advisor_explanations or [])}
       {provider_runtime_html(provider_runtime)}
       {provider_registry_html(provider_registry)}
       {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
@@ -9933,12 +10050,11 @@ def battery_primary_recommendation_html(comparison: dict, tariff_name: str) -> s
         if source == "annual_historical"
         else "Annual history is not yet strong enough, so this uses the selected period."
     )
-    based_items = [
-        f"{interval_days} interval days" if source == "annual_historical" else "Selected billing-period interval data",
-        season_basis,
-        tariff_basis,
-        "Current and previous household tariff periods" if len(periods) > 1 else f"Current tariff: {tariff_name}",
-    ]
+    based_sentence = (
+        f"Based on {interval_days} days of interval history across {season_basis.lower()} using your historical tariff timeline."
+        if source == "annual_historical"
+        else f"Based on the selected billing period using {tariff_name} tariff settings and currently available household interval history."
+    )
     return f"""
       <div class="battery-primary-summary">
         <div class="chart-heading"><h3>Recommended battery</h3><span>{html.escape('Annual history' if source == 'annual_historical' else 'Current period')}</span></div>
@@ -9949,11 +10065,7 @@ def battery_primary_recommendation_html(comparison: dict, tariff_name: str) -> s
           {battery_metric("Historical coverage", coverage, "Data behind the primary recommendation")}
           {battery_metric("Current tariff", tariff_name, "Tariff calculations are unchanged")}
         </div>
-        <div class="battery-based-on">
-          <strong>Based on</strong>
-          <ul>{"".join(f"<li>{html.escape(item)}</li>" for item in based_items if item)}</ul>
-          <a href="#battery-investment">See estimated cost and payback</a>
-        </div>
+        <p class="scenario-note battery-based-on-copy">{html.escape(based_sentence)}</p>
       </div>
     """
 
@@ -10909,7 +11021,7 @@ def whatif_page_html(
     analysis: dict,
     plan: dict,
     recommendations: list,
-    goals: Optional[list[GoalProgress]] = None,
+    diagnostics_notice: str = "",
 ) -> str:
     savings = plan["savings"]
     meaning = (
@@ -10928,7 +11040,6 @@ def whatif_page_html(
     )
     best_move = recommendation_action(shared_recommendation) if shared_recommendation else "No active recommendation for this scenario."
     return f"""
-    {scenario_analysis_html(analysis)}
     <section class="report-section compact-section">
       <div class="section-title"><div><span class="eyebrow">Decision assistant</span><h2>What this means</h2></div></div>
       <div class="decision-grid">
@@ -10936,7 +11047,16 @@ def whatif_page_html(
         <div><span>Best next move</span><strong>{html.escape(best_move)}</strong></div>
       </div>
     </section>
-    {goals_progress_html(goals or [])}
+    {scenario_analysis_html(analysis)}
+    <section class="report-section compact-section">
+      <div class="section-title"><div><span class="eyebrow">Supporting analysis</span><h2>What supports this?</h2></div></div>
+      <div class="decision-grid">
+        <div><span>Current plan</span><strong>{html.escape(str((plan.get("current_plan") or {}).get("display_name") or "Current plan"))}</strong></div>
+        <div><span>Comparison plan</span><strong>{html.escape(str((plan.get("comparison_plan") or {}).get("display_name") or "Comparison plan"))}</strong></div>
+      </div>
+      <p class="scenario-note">{html.escape(best_move)}</p>
+    </section>
+    {f'<section class="report-section compact-section"><div class="section-title"><div><span class="eyebrow">Diagnostics</span><h2>Optional diagnostics</h2></div></div><p class="scenario-note">{html.escape(diagnostics_notice)}</p></section>' if diagnostics_notice else ""}
     """
 
 
@@ -11263,6 +11383,11 @@ def write_html(
         behaviour=household_behaviour,
     )
     recommendation_presentations = decision_pipeline.recommendations
+    decision_diagnostics_notice = (
+        "Some recommendations are temporarily limited because live data, setup, or confidence checks still need attention."
+        if advisor_explanations.active() or recommendation_sections(recommendation_presentations)["diagnostics"]
+        else ""
+    )
     household_insights = HouseholdInsightsEngine().build(
         trends=trends,
         current_summary=period_summary,
@@ -11365,11 +11490,10 @@ def write_html(
   </section>
   <section id="whatif" class="page">
     {page_heading_html("Decisions", "Simple scenario cards for tariff, charging, solar, and battery choices.")}
-    {whatif_page_html(scenarios, plan, recommendation_presentations, goals)}
+    {whatif_page_html(scenarios, plan, recommendation_presentations, decision_diagnostics_notice)}
     <div id="recommendations">
       {page_heading_html("Recommendation Centre", "The most useful household actions, with plain-language reasons and confidence.", parent="Decisions")}
-      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], [], goals, household_decisions)}
-      {advisor_centre_html(advisor_explanations.active())}
+      {recommendation_centre_html(recommendation_presentations, recommendation_lifecycle_counts, [], advisor_explanations.active(), [], household_decisions)}
     </div>
   </section>
   <section id="analytics" class="page">

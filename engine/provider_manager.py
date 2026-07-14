@@ -296,6 +296,15 @@ class ManagedProvider:
     note: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
+        provider_state = _provider_state_payload(
+            self.provider_id,
+            self.provider_type,
+            self.lifecycle_state,
+            self.configuration,
+            self.diagnostics,
+            self.onboarding,
+            self.actions,
+        )
         return {
             "provider_id": self.provider_id,
             "name": self.name,
@@ -308,6 +317,7 @@ class ManagedProvider:
             "capability_summary": self.capability_summary.as_dict(),
             "onboarding": self.onboarding.as_dict(),
             "actions": list(self.actions),
+            "provider_state": provider_state,
             "source": self.source,
             "note": self.note,
         }
@@ -370,7 +380,7 @@ class ProviderManager:
             "providers": [provider.as_dict() for provider in providers],
             "status": {provider.provider_id: provider.lifecycle_state.value for provider in providers},
             "onboarding_states": [state.value for state in ProviderOnboardingState],
-            "actions": ["Configure", "Edit", "Reconnect", "Disconnect", "Test Connection", "Disable", "Enable", "Remove"],
+            "actions": ["Configure", "Edit", "Test Connection", "Fix Connection", "Disable", "Enable", "Remove", "Diagnostics", "Import", "View Imported Data", "Setup Help"],
         }
 
     def test_connection(self, provider_id: str) -> ProviderTestResult:
@@ -939,15 +949,121 @@ def _runtime_value(runtime: dict[str, Any], key: str) -> Any:
 
 def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
     if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
-        return ["Configure", "Test Connection"]
+        return ["Configure", "Setup Help"]
     if lifecycle == ProviderConnectionStatus.DISABLED:
         return ["Enable", "Remove"]
-    actions = ["Configure", "Edit", "Reconnect", "Disconnect", "Test Connection", "Disable", "Remove"]
     if lifecycle in {ProviderConnectionStatus.DEGRADED, ProviderConnectionStatus.ERROR}:
-        actions.append("Diagnostics")
-    else:
-        actions.append("Diagnostics")
-    return actions
+        return ["Fix Connection", "Test Connection", "Diagnostics", "Remove"]
+    return ["Edit", "Test Connection", "Disable", "Remove", "Diagnostics"]
+
+
+def _connection_mode_for_provider(provider_id: str, provider_type: ProviderType) -> str:
+    if provider_id == "ocular_export" or provider_type == ProviderType.GENERIC_IMPORT:
+        return "imported"
+    if provider_id == "synergy_tariff_config" or provider_type == ProviderType.RETAILER:
+        return "manual"
+    return "live"
+
+
+def _required_fields_complete(configuration: ProviderConfiguration) -> bool:
+    configured = {credential.field for credential in configuration.credentials if credential.configured}
+    if configuration.provider_id == "solaredge":
+        return _solaredge_configuration_ready(configured)
+    required = {credential.field for credential in configuration.credentials if credential.required}
+    if not required:
+        return configuration.lifecycle_state != ProviderConnectionStatus.NOT_CONFIGURED
+    return required.issubset(configured)
+
+
+def _provider_state_status(
+    provider_id: str,
+    connection_mode: str,
+    lifecycle: ProviderConnectionStatus,
+    configuration: ProviderConfiguration,
+    diagnostics: ProviderDiagnostics,
+    onboarding: ProviderOnboardingGuide,
+) -> str:
+    if lifecycle == ProviderConnectionStatus.DISABLED:
+        return "disabled"
+    if connection_mode == "manual":
+        return "manual" if _required_fields_complete(configuration) else "not_configured"
+    if connection_mode == "imported":
+        return "imported" if onboarding.data_available else "not_configured"
+    if lifecycle == ProviderConnectionStatus.CONNECTED:
+        return "connected"
+    if lifecycle in {ProviderConnectionStatus.ERROR, ProviderConnectionStatus.DEGRADED}:
+        return "warning"
+    if lifecycle == ProviderConnectionStatus.CONFIGURED or (
+        _required_fields_complete(configuration)
+        and not diagnostics.last_successful_sync
+        and provider_id != "ocular_export"
+    ):
+        return "configured"
+    return "not_configured"
+
+
+def _provider_state_actions(
+    status: str,
+    connection_mode: str,
+    lifecycle: ProviderConnectionStatus,
+    diagnostics: ProviderDiagnostics,
+) -> list[str]:
+    if connection_mode == "manual":
+        if status == "manual":
+            return ["Edit Configuration", "Remove"]
+        return ["Configure", "Setup Help"]
+    if connection_mode == "imported":
+        if status == "imported":
+            return ["Import", "View Imported Data", "Remove"]
+        return ["Import", "Setup Help"]
+    if status == "disabled":
+        return ["Enable", "Remove"]
+    if status == "warning":
+        actions = ["Fix Connection", "Test Connection", "Remove"]
+        if diagnostics.last_successful_sync:
+            actions.insert(2, "Diagnostics")
+        else:
+            actions.append("Diagnostics")
+        return actions
+    if status == "connected":
+        return ["Edit", "Test Connection", "Disable", "Remove", "Diagnostics"]
+    if status == "configured":
+        return ["Test Connection", "Save", "Remove"]
+    return ["Configure", "Setup Help"]
+
+
+def _provider_state_payload(
+    provider_id: str,
+    provider_type: ProviderType,
+    lifecycle: ProviderConnectionStatus,
+    configuration: ProviderConfiguration,
+    diagnostics: ProviderDiagnostics,
+    onboarding: ProviderOnboardingGuide,
+    actions: list[str],
+) -> dict[str, Any]:
+    connection_mode = _connection_mode_for_provider(provider_id, provider_type)
+    status = _provider_state_status(
+        provider_id,
+        connection_mode,
+        lifecycle,
+        configuration,
+        diagnostics,
+        onboarding,
+    )
+    available_actions = _provider_state_actions(status, connection_mode, lifecycle, diagnostics)
+    return {
+        "status": status,
+        "configured": lifecycle != ProviderConnectionStatus.NOT_CONFIGURED,
+        "enabled": configuration.enabled,
+        "connection_mode": connection_mode,
+        "required_fields_complete": _required_fields_complete(configuration),
+        "last_success_at": diagnostics.last_successful_sync,
+        "last_failure_at": diagnostics.last_failed_sync,
+        "last_error_summary": diagnostics.last_error,
+        "data_available": onboarding.data_available,
+        "action_needed": onboarding.next_step,
+        "available_actions": available_actions or list(actions),
+    }
 
 
 def _test_user_message(status: str, warnings: list[str]) -> str:

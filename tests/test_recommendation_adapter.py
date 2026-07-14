@@ -87,7 +87,7 @@ class RecommendationAdapterTests(unittest.TestCase):
 
         self.assertEqual(recommendation.category.label, "Bills")
         self.assertEqual(recommendation.icon, "receipt")
-        self.assertIn("Review current bill", recommendation.title)
+        self.assertEqual(recommendation.title, "Current bill is tracking above previous periods")
 
     def test_monitoring_recommendation_presentation(self):
         recommendation = RecommendationAdapter().adapt_one(
@@ -111,8 +111,8 @@ class RecommendationAdapterTests(unittest.TestCase):
         recommendation = RecommendationAdapter().adapt_one(decision)
 
         self.assertEqual(recommendation.category.label, "Monitoring")
-        self.assertEqual(recommendation.title, "Potential issue detected")
-        self.assertEqual(recommendation.recommended_action, "Review the supporting data before taking action.")
+        self.assertEqual(recommendation.title, "Overnight usage appears higher than normal")
+        self.assertEqual(recommendation.recommended_action, "Check overnight loads and look for anything running longer than usual.")
         self.assertEqual(recommendation.icon, "search")
         self.assertEqual(recommendation.evidence[0].source, "DecisionEngine")
 

@@ -185,6 +185,11 @@ class RecommendationAdapter:
         primary_reason = reasons[0].summary if reasons else ""
         outcome = _get(decision, "outcome") or {}
         action = _plain_wording(str(_get(outcome, "expected_effect") or _default_action(decision_type)))
+        if decision_type == "INVESTIGATE_ANOMALY" and action in {
+            "Investigate the active anomaly using its evidence trail.",
+            "Review the supporting data before taking action.",
+        }:
+            action = _default_action(decision_type)
         title = _title(decision_type)
         summary = _plain_wording(primary_reason or action)
         rationale = _plain_wording(" ".join(item.summary for item in reasons).strip() or summary)
@@ -291,23 +296,25 @@ def _title(decision_type: str) -> str:
     return {
         "CHARGE_NOW": "Charging window is favourable",
         "WAIT_FOR_CHEAPER_WINDOW": "Wait for a cheaper charging window",
-        "WAIT_FOR_SOLAR": "Wait for stronger solar evidence",
-        "REVIEW_BILLING": "Review current bill trajectory",
-        "MONITOR_USAGE": "Monitor household usage",
-        "INVESTIGATE_ANOMALY": "Potential issue detected",
-        "REVIEW_PROVIDER": "Review provider health",
-        "REVIEW_SETUP": "Finish required setup",
-        "DATA_INSUFFICIENT": "Improve data quality",
+        "WAIT_FOR_SOLAR": "Solar may cover this load soon",
+        "REVIEW_BILLING": "Current bill is tracking above previous periods",
+        "MONITOR_USAGE": "No action currently required",
+        "INVESTIGATE_ANOMALY": "Overnight usage appears higher than normal",
+        "REVIEW_PROVIDER": "A household data source needs attention",
+        "REVIEW_SETUP": "Finish connecting household data",
+        "DATA_INSUFFICIENT": "PowerMonitor is still learning this pattern",
         "NO_ACTION": "No immediate household action",
     }.get(decision_type, decision_type.replace("_", " ").title())
 
 
 def _default_action(decision_type: str) -> str:
     return {
-        "DATA_INSUFFICIENT": "We don't yet have enough information to make a recommendation.",
+        "DATA_INSUFFICIENT": "Keep collecting data so PowerMonitor can verify this pattern.",
         "NO_ACTION": "Continue monitoring current household state.",
-        "MONITOR_USAGE": "Keep monitoring this pattern before taking action.",
-        "INVESTIGATE_ANOMALY": "Review the supporting data before taking action.",
+        "MONITOR_USAGE": "Keep current habits going and watch for any change.",
+        "INVESTIGATE_ANOMALY": "Check overnight loads and look for anything running longer than usual.",
+        "REVIEW_PROVIDER": "Open Settings and fix the affected data source.",
+        "REVIEW_SETUP": "Open Settings and finish the missing setup steps.",
     }.get(decision_type, "Review this household decision.")
 
 

@@ -218,7 +218,7 @@ class BatteryReportPresentationTests(unittest.TestCase):
         report_source = (PROJECT_ROOT / "collector" / "report.py").read_text(encoding="utf-8")
         dashboard_js = (PROJECT_ROOT / "collector" / "assets" / "dashboard.js").read_text(encoding="utf-8")
 
-        self.assertIn('<a href="#battery-investment">See estimated cost and payback</a>', markup)
+        self.assertIn("Based on", markup)
         self.assertIn('id="battery-investment"', markup)
         self.assertNotIn('href="#home#battery-investment"', markup)
         self.assertNotIn('href="/#battery-investment"', markup)
@@ -508,8 +508,8 @@ class BatteryReportPresentationTests(unittest.TestCase):
         markup = report.battery_comparison_html(analysis["battery_comparison"])
 
         self.assertIn("flat-rate tariff through 30 April 2026", markup)
-        self.assertIn("Historical tariff changes included", markup)
-        self.assertIn("Current and previous household tariff periods", markup)
+        self.assertIn("using your historical tariff timeline", markup)
+        self.assertIn("Synergy EV Add On", markup)
         self.assertIn("Cheap-grid battery charging is only modelled during periods where the active tariff includes a suitable cheap window.", markup)
 
     def test_annual_seasonal_mismatch_is_explained_in_homeowner_wording(self):

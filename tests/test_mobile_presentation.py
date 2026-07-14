@@ -100,6 +100,19 @@ class MobilePresentationTests(unittest.TestCase):
                 "health": {"collector_status": "not_configured"},
                 "sync_state": "SYNCED",
                 "actions": ["configure"],
+                "provider_state": {
+                    "status": "imported",
+                    "configured": True,
+                    "enabled": True,
+                    "connection_mode": "imported",
+                    "required_fields_complete": True,
+                    "last_success_at": "2026-07-01T18:20:00+08:00",
+                    "last_failure_at": None,
+                    "last_error_summary": None,
+                    "data_available": True,
+                    "action_needed": "Import another file whenever you want to refresh this history.",
+                    "available_actions": ["Import", "View Imported Data", "Remove"],
+                },
                 "onboarding": {
                     "state": "READY_TO_CONNECT",
                     "state_label": "Historical Data Available",
@@ -130,16 +143,14 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Connected", html)
         self.assertIn("Connection type", html)
         self.assertIn("File Import", html)
-        self.assertIn("Next scheduled refresh", html)
-        self.assertIn("Last error", html)
-        self.assertIn("Provider version", html)
+        self.assertIn("Last attempted update", html)
+        self.assertIn("What needs attention", html)
         self.assertIn("Provides", html)
         self.assertIn("Charging energy", html)
         self.assertIn("Charging costs", html)
-        self.assertIn("Upload latest file", html)
-        self.assertIn("Replace upload", html)
-        self.assertIn("Remove imported history", html)
-        self.assertIn("View diagnostics", html)
+        self.assertIn(">Import<", html)
+        self.assertIn("View imported data", html)
+        self.assertIn(">Remove<", html)
         self.assertIn("Setup help", html)
         self.assertIn("Advanced Diagnostics", html)
         self.assertNotIn("Connected?", html)
@@ -161,6 +172,19 @@ class MobilePresentationTests(unittest.TestCase):
                 "health": {"collector_status": "ok"},
                 "sync_state": "SYNCED",
                 "actions": ["configure"],
+                "provider_state": {
+                    "status": "connected",
+                    "configured": True,
+                    "enabled": True,
+                    "connection_mode": "live",
+                    "required_fields_complete": True,
+                    "last_success_at": "2026-07-02T20:35:00+08:00",
+                    "last_failure_at": None,
+                    "last_error_summary": None,
+                    "data_available": True,
+                    "action_needed": "No action needed right now.",
+                    "available_actions": ["Edit", "Test Connection", "Disable", "Remove", "Diagnostics"],
+                },
                 "configuration": {
                     "credentials": [
                         {"field": "username", "label": "Username/Email", "required": True, "sensitive": True, "configured": True},
@@ -195,14 +219,11 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Daily production", html)
         self.assertNotIn(">Connect<", html)
         self.assertIn("Test connection", html)
-        self.assertIn("Reconnect", html)
-        self.assertIn("Edit credentials", html)
-        self.assertIn("Connected account", html)
-        self.assertIn("Credentials", html)
-        self.assertIn("Hidden for privacy", html)
+        self.assertNotIn("Reconnect", html)
+        self.assertIn(">Edit<", html)
         self.assertIn("Disable", html)
         self.assertIn("Remove", html)
-        self.assertIn("View diagnostics", html)
+        self.assertIn(">Diagnostics<", html)
         self.assertIn('class="provider-config-form" data-provider-id="solaredge" method="post" action="/api/providers/solaredge/save"', html)
         self.assertIn('name="provider_id" value="solaredge"', html)
         self.assertIn('name="username"', html)
@@ -212,13 +233,11 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertNotIn('action="/setup/billing-cycle"', html)
         self.assertIn("provider-config-form", html)
         self.assertIn("Last successful refresh", html)
-        self.assertIn("Next scheduled refresh", html)
+        self.assertIn("Last attempted update", html)
         self.assertIn("Connection type", html)
         self.assertIn("Live API", html)
-        self.assertIn("Last error", html)
-        self.assertIn("Provider version", html)
+        self.assertIn("What needs attention", html)
         self.assertIn("Data available", html)
-        self.assertIn("Action needed", html)
         self.assertNotIn("Upload latest file", html)
         self.assertNotIn("Replace upload", html)
         before_advanced = html.split("Advanced Diagnostics", 1)[0]
@@ -295,6 +314,19 @@ class MobilePresentationTests(unittest.TestCase):
                 "health": {"collector_status": "ok"},
                 "sync_state": "SYNCED",
                 "actions": [],
+                "provider_state": {
+                    "status": "connected",
+                    "configured": True,
+                    "enabled": True,
+                    "connection_mode": "live",
+                    "required_fields_complete": True,
+                    "last_success_at": "2026-07-02T20:35:00+08:00",
+                    "last_failure_at": None,
+                    "last_error_summary": None,
+                    "data_available": True,
+                    "action_needed": "No action needed right now.",
+                    "available_actions": ["Diagnostics"],
+                },
                 "onboarding": {"connected": True, "data_available": True},
             },
         )
@@ -304,7 +336,7 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Smart Meter Readings", html)
         self.assertIn("Connected", html)
         self.assertIn("Connection type", html)
-        self.assertIn("View diagnostics", html)
+        self.assertIn(">Diagnostics<", html)
 
     def test_provider_management_can_add_future_provider_without_json_editing(self):
         provider = SimpleNamespace(
@@ -319,6 +351,19 @@ class MobilePresentationTests(unittest.TestCase):
                 "health": {"collector_status": "unknown"},
                 "sync_state": "NEVER_SYNCED",
                 "actions": ["Configure", "Test Connection"],
+                "provider_state": {
+                    "status": "not_configured",
+                    "configured": False,
+                    "enabled": True,
+                    "connection_mode": "live",
+                    "required_fields_complete": False,
+                    "last_success_at": None,
+                    "last_failure_at": None,
+                    "last_error_summary": None,
+                    "data_available": False,
+                    "action_needed": "Select Tesla, review the required details, then configure it.",
+                    "available_actions": ["Configure", "Setup Help"],
+                },
                 "configuration": {
                     "credentials": [
                         {"field": "api_key", "label": "Api Key", "required": False, "sensitive": True, "configured": False},
@@ -348,10 +393,10 @@ class MobilePresentationTests(unittest.TestCase):
 
         self.assertIn("Tesla", html)
         self.assertIn("Disconnected", html)
-        self.assertIn("Add provider", html)
+        self.assertIn(">Configure<", html)
         self.assertIn("Connection type", html)
         self.assertIn("Live API", html)
-        self.assertIn("View diagnostics", html)
+        self.assertIn("Setup help", html)
 
     def test_setup_integrations_group_connected_and_optional_sources(self):
         connected = SimpleNamespace(
@@ -1147,7 +1192,7 @@ class MobilePresentationTests(unittest.TestCase):
         history_helper = inspect.getsource(report.history_page_html)
 
         self.assertEqual(source.count('page_heading_html("Recommendation Centre"'), 1)
-        self.assertEqual(source.count("advisor_centre_html(advisor_explanations.active())"), 1)
+        self.assertEqual(inspect.getsource(report.system_page_html).count("advisor_centre_html(advisor_explanations or [])"), 1)
         self.assertEqual(source.count("recommendation_centre_html("), 1)
         self.assertEqual(history_helper.count('page_heading_html("Household History"'), 1)
         self.assertEqual(history_helper.count("timeline_html(display_timeline)"), 1)
@@ -1161,9 +1206,9 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertNotIn('id="timeline"', home_block)
         self.assertNotIn("goals_progress_html", home_block)
         self.assertIn('id="recommendations"', decisions_block)
-        self.assertIn("advisor_centre_html(advisor_explanations.active())", decisions_block)
+        self.assertNotIn("advisor_centre_html(advisor_explanations.active())", decisions_block)
         self.assertIn("recommendation_centre_html", decisions_block)
-        self.assertIn("goals_progress_html(goals or [])", inspect.getsource(report.whatif_page_html))
+        self.assertNotIn("goals_progress_html(goals or [])", inspect.getsource(report.whatif_page_html))
         self.assertIn("history_page_html(", history_block)
         self.assertIn('id="timeline"', history_helper)
         self.assertIn("timeline_html(display_timeline)", history_helper)

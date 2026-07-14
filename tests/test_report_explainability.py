@@ -101,42 +101,24 @@ class ReportExplainabilityTests(unittest.TestCase):
             markup.index("Use more solar at home"),
         )
         self.assertIn("Recommendation centre", markup)
-        self.assertIn("Priority score", markup)
-        self.assertIn("<strong>88</strong>", markup)
-        self.assertIn("Tariff", markup)
-        self.assertIn("Easy difficulty", markup)
-        self.assertIn("$5.73", markup)
-        self.assertIn("Supporting evidence", markup)
-        self.assertIn("Recommended action", markup)
+        self.assertIn("$4.20", markup)
         self.assertIn("Why?", markup)
         self.assertIn("3 hidden: 1 dismissed, 2 snoozed.", markup)
         self.assertIn("Dismiss", markup)
         self.assertIn("Snooze 1 day", markup)
         self.assertIn("Next bill", markup)
         self.assertIn("Restore", markup)
+        self.assertNotIn("Priority score", markup)
+        self.assertNotIn("Unable to estimate", markup)
 
-    def test_recommendation_centre_shows_goal_contributions(self):
-        goal = GoalProgress(
-            goal=Goal(
-                goal_id="peak_reduction",
-                title="Peak Reduction",
-                outcome="Reduce Peak usage",
-                advisor_types=["COST"],
-                recommendation_categories=["tariff"],
-            ),
-            progress_pct=83,
-            status=GoalStatus("ON_TRACK", "On track", "Peak reduction is tracking well."),
-            confidence="High",
-            summary="Peak Reduction is tracking well.",
-            supporting_advisors=["Cost"],
-            supporting_evidence=["Cost advisor evidence"],
-            recommended_action="Keep Peak usage low.",
-        )
+    def test_recommendation_centre_surfaces_low_confidence_learning_items(self):
+        decision = explained_decision(category="tariff")
+        decision.confidence = "Low"
 
-        markup = report.recommendation_centre_html([explained_decision(category="tariff")], goals=[goal])
+        markup = report.recommendation_centre_html([decision])
 
-        self.assertIn("Contributes to goals", markup)
-        self.assertIn("Peak Reduction", markup)
+        self.assertIn("Things PowerMonitor is still learning", markup)
+        self.assertIn("PowerMonitor is still learning this pattern", markup)
 
     def test_serialized_decision_includes_explanation_for_api_outputs(self):
         payload = explained_decision().as_dict()
@@ -178,15 +160,14 @@ class ReportExplainabilityTests(unittest.TestCase):
             category="monitoring",
         )
 
-        self.assertEqual(report.recommendation_title(decision), "Potential issue detected")
+        self.assertEqual(report.recommendation_title(decision), "Overnight usage appears higher than normal")
 
     def test_recommendation_centre_answers_homeowner_rationale_questions(self):
         markup = report.recommendation_centre_html([explained_decision()])
 
-        self.assertIn("What happened?", markup)
-        self.assertIn("Why do we think this?", markup)
-        self.assertIn("What should I check?", markup)
-        self.assertIn("What happens if I ignore it?", markup)
+        self.assertIn("<strong>Action</strong>", markup)
+        self.assertIn("<strong>Why</strong>", markup)
+        self.assertIn("<summary>Why?</summary>", markup)
 
     def test_recommendation_centre_renders_presentation_rationale_fields(self):
         recommendation = RecommendationPresentation(
@@ -211,19 +192,18 @@ class ReportExplainabilityTests(unittest.TestCase):
                 )
             ],
             urgency=RecommendationPriority("medium", "Medium", 50),
-            category=RecommendationCategory("behaviour", "Behaviour", "*"),
+            category=RecommendationCategory("billing", "Bills", "*"),
             icon="*",
             display_priority=72,
             financial_impact=FinancialImpact(billing_period=4.2),
-            decision={"decision_id": "monitor_usage", "type": "MONITOR_USAGE"},
+            decision={"decision_id": "monitor_usage", "type": "REVIEW_BILLING"},
         )
 
         markup = report.recommendation_centre_html([recommendation])
 
-        self.assertIn("Your overnight electricity use was higher than usual.", markup)
+        self.assertIn("Check overnight loads.", markup)
+        self.assertIn("Overnight usage is higher than usual.", markup)
         self.assertIn("This is based on recent household readings.", markup)
-        self.assertIn("Check pool pumps, hot water, and appliances left running.", markup)
-        self.assertIn("The extra usage may continue into future bills.", markup)
 
 
 if __name__ == "__main__":
