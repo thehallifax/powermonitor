@@ -20,6 +20,11 @@ from engine.import_framework import (
     ImportSource,
     ImportValidationIssue,
 )
+from engine.ev_charging_inference import (
+    EVChargingInferenceConfig,
+    infer_active_charging_interval,
+    split_energy_by_tariff,
+)
 from engine.models import HouseholdContext
 from engine.data_engine import DataEngine
 from engine.provider_framework import (
@@ -114,24 +119,12 @@ def next_bucket_boundary(dt: datetime) -> datetime:
     return min(boundary for boundary in boundaries if boundary > dt)
 
 
-def split_tariff_cost(start: datetime, end: datetime, energy_kwh: float) -> tuple[float, dict]:
-    rates = import_rates()
-    breakdown = {bucket: {"kwh": 0.0, "cost": 0.0} for bucket in BUCKET_ORDER}
-    if end <= start or energy_kwh <= 0:
-        return 0.0, breakdown
-    total_seconds = (end - start).total_seconds()
-    cursor = start
-    while cursor < end:
-        boundary = min(next_bucket_boundary(cursor), end)
-        bucket = bucket_for_time(cursor)
-        share = (boundary - cursor).total_seconds() / total_seconds
-        bucket_kwh = energy_kwh * share
-        bucket_cost = bucket_kwh * rates[bucket]
-        breakdown[bucket]["kwh"] += bucket_kwh
-        breakdown[bucket]["cost"] += bucket_cost
-        cursor = boundary
-    total_cost = sum(values["cost"] for values in breakdown.values())
-    return total_cost, breakdown
+def inference_config() -> EVChargingInferenceConfig:
+    return EVChargingInferenceConfig.from_settings(settings_path=SETTINGS_PATH)
+
+
+def split_tariff_cost(start: Optional[datetime], end: Optional[datetime], energy_kwh: float) -> tuple[float, dict]:
+    return split_energy_by_tariff(start, end, energy_kwh, import_rates())
 
 
 def validate_breakdown_totals(transaction_id: str, energy_kwh: float, total_cost: float, breakdown: dict) -> None:
@@ -182,6 +175,7 @@ def ensure_ev_sessions(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    DataEngine._ensure_ev_sessions_nullable_end_time(conn)
     present = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
     columns = {
         "household_id": "ALTER TABLE ev_sessions ADD COLUMN household_id TEXT",
@@ -324,7 +318,7 @@ def parse_datetime_value(value) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone()
 
 
-def parse_duration_minutes(value, start: datetime, end: datetime) -> float:
+def parse_duration_minutes(value, start: datetime, end: Optional[datetime]) -> float:
     text = str(value or "").strip()
     if text:
         parts = text.split(":")
@@ -339,6 +333,8 @@ def parse_duration_minutes(value, start: datetime, end: datetime) -> float:
             return number
         except ValueError:
             pass
+    if end is None:
+        return 0.0
     return max((end - start).total_seconds() / 60, 0.0)
 
 
@@ -379,20 +375,37 @@ def import_record(
     transaction_id = str(record["record_number"]).strip()
     if not transaction_id:
         return False
-    start = parse_datetime_value(record["start_time"])
-    end = parse_datetime_value(record["end_time"])
-    if end < start:
+    connected_at = parse_datetime_value(record["start_time"])
+    disconnected_at = parse_optional_datetime(record.get("end_time"))
+    if disconnected_at and disconnected_at < connected_at:
         raise ValueError(f"Ocular record {transaction_id} stop time is before start time")
     energy_kwh = parse_float(record["energy_kwh"])
-    duration = parse_duration_minutes(record["duration"], start, end)
-    cost, breakdown = split_tariff_cost(start, end, energy_kwh)
+    connected_duration = parse_duration_minutes(record["duration"], connected_at, disconnected_at)
+    config = inference_config()
+    estimate = infer_active_charging_interval(
+        connected_at,
+        disconnected_at,
+        energy_kwh,
+        config,
+        connected_duration,
+    )
+    cost, breakdown = split_tariff_cost(estimate.active_start, estimate.active_finish, energy_kwh)
     cost = sum(float(values.get("cost") or 0) for values in breakdown.values())
-    validate_breakdown_totals(transaction_id, energy_kwh, cost, breakdown)
-    max_power_kw = energy_kwh / (duration / 60) if duration > 0 else None
+    if estimate.active_start and estimate.active_finish:
+        validate_breakdown_totals(transaction_id, energy_kwh, cost, breakdown)
+    max_power_kw = config.charger_power_kw if estimate.inferred else None
+    cost_partial = 0 if estimate.active_start and estimate.active_finish else 1
+    status = "Completed" if estimate.active_start and estimate.active_finish else "Incomplete"
     notes = {
         "record_number": transaction_id,
         "charger_number": str(record["charger_number"]).strip(),
+        "connected_at": connected_at.isoformat(timespec="seconds"),
+        "disconnected_at": disconnected_at.isoformat(timespec="seconds") if disconnected_at else None,
+        "connected_duration": str(record["duration"]).strip(),
+        "connected_duration_minutes": connected_duration,
+        # Compatibility for older report/debug consumers. This is a connected duration from Ocular.
         "charging_duration": str(record["duration"]).strip(),
+        **estimate.as_notes(),
     }
     tariff_columns = []
     tariff_placeholders = []
@@ -419,7 +432,7 @@ def import_record(
             max_power_kw, start_source, stop_source, notes_json,
             {", ".join(tariff_columns)}
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Completed', ?, ?, ?, ?, {", ".join(tariff_placeholders)})
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {", ".join(tariff_placeholders)})
         ON CONFLICT(household_id, transaction_id) WHERE transaction_id IS NOT NULL DO UPDATE SET
             start_time = excluded.start_time,
             end_time = excluded.end_time,
@@ -442,16 +455,18 @@ def import_record(
         (
             household_id,
             transaction_id,
-            start.isoformat(timespec="seconds"),
-            end.isoformat(timespec="seconds"),
-            end.isoformat(timespec="seconds"),
+            connected_at.isoformat(timespec="seconds"),
+            disconnected_at.isoformat(timespec="seconds") if disconnected_at else None,
+            (disconnected_at or connected_at).isoformat(timespec="seconds"),
             energy_kwh,
             SOURCE,
             cost,
             json.dumps(breakdown, sort_keys=True),
             0.0,
             energy_kwh,
-            duration,
+            connected_duration,
+            cost_partial,
+            status,
             max_power_kw,
             str(record["starting_user"]).strip(),
             str(record["stopping_user"]).strip(),
@@ -464,6 +479,15 @@ def import_record(
 
 def parse_file(path: Path) -> list[dict]:
     return row_dicts(read_xlsx(path))
+
+
+def parse_optional_datetime(value) -> Optional[datetime]:
+    if str(value or "").strip() == "":
+        return None
+    try:
+        return parse_datetime_value(value)
+    except ValueError:
+        return None
 
 
 def validate_records(records: list[dict]) -> list[ImportValidationIssue]:
@@ -479,15 +503,24 @@ def validate_records(records: list[dict]) -> list[ImportValidationIssue]:
         seen_ids.add(transaction_id)
         try:
             start = parse_datetime_value(record.get("start_time"))
-            end = parse_datetime_value(record.get("end_time"))
-            if end < start:
+            end = parse_optional_datetime(record.get("end_time"))
+            if end and end < start:
                 raise ValueError("Stop time is before start time")
             energy_kwh = parse_float(record.get("energy_kwh"))
             duration = parse_duration_minutes(record.get("duration"), start, end)
-            cost, breakdown = split_tariff_cost(start, end, energy_kwh)
-            validate_breakdown_totals(transaction_id, energy_kwh, cost, breakdown)
+            estimate = infer_active_charging_interval(start, end, energy_kwh, inference_config(), duration)
+            cost, breakdown = split_tariff_cost(estimate.active_start, estimate.active_finish, energy_kwh)
+            if estimate.active_start and estimate.active_finish:
+                validate_breakdown_totals(transaction_id, energy_kwh, cost, breakdown)
+            if end is None:
+                message = "Missing disconnection time; active interval cannot be completed"
+                if str(record.get("end_time") or "").strip():
+                    message = "Invalid disconnection time; active interval cannot be completed"
+                issues.append(ImportValidationIssue("warning", message, row=index, field="end_time"))
+            if energy_kwh <= 0:
+                issues.append(ImportValidationIssue("warning", "Charging amount is zero", row=index, field="energy_kwh"))
             if duration <= 0:
-                issues.append(ImportValidationIssue("warning", "Charging duration is zero", row=index, field="duration"))
+                issues.append(ImportValidationIssue("warning", "Connected duration is zero or unavailable", row=index, field="duration"))
         except (TypeError, ValueError) as exc:
             issues.append(ImportValidationIssue("error", f"Invalid Ocular row: {exc}", row=index))
     return issues
@@ -505,11 +538,12 @@ def preview_records(records: list[dict], issues: Optional[list[ImportValidationI
             continue
         try:
             start = parse_datetime_value(record.get("start_time"))
-            end = parse_datetime_value(record.get("end_time"))
+            end = parse_optional_datetime(record.get("end_time"))
         except (TypeError, ValueError):
             continue
         starts.append(start)
-        ends.append(end)
+        if end:
+            ends.append(end)
         energy = parse_float(record.get("energy_kwh"))
         total_energy += energy
         if len(samples) < 3:
@@ -517,6 +551,7 @@ def preview_records(records: list[dict], issues: Optional[list[ImportValidationI
                 {
                     "record_number": str(record.get("record_number") or "").strip(),
                     "start_time": start.isoformat(timespec="seconds"),
+                    "end_time": end.isoformat(timespec="seconds") if end else None,
                     "energy_kwh": round(energy, 3),
                 }
             )
@@ -628,13 +663,22 @@ def ocular_provider_observations(
     for record in records:
         transaction_id = str(record.get("record_number") or "").strip()
         try:
-            start = parse_datetime_value(record.get("start_time"))
-            end = parse_datetime_value(record.get("end_time"))
+            connected_at = parse_datetime_value(record.get("start_time"))
+            disconnected_at = parse_optional_datetime(record.get("end_time"))
             energy_kwh = parse_float(record.get("energy_kwh"))
-            duration = parse_duration_minutes(record.get("duration"), start, end)
-            cost, breakdown = split_tariff_cost(start, end, energy_kwh)
+            connected_duration = parse_duration_minutes(record.get("duration"), connected_at, disconnected_at)
+            config = inference_config()
+            estimate = infer_active_charging_interval(
+                connected_at,
+                disconnected_at,
+                energy_kwh,
+                config,
+                connected_duration,
+            )
+            cost, breakdown = split_tariff_cost(estimate.active_start, estimate.active_finish, energy_kwh)
         except (TypeError, ValueError):
             continue
+        observed_at = (disconnected_at or connected_at).isoformat(timespec="seconds")
         observations.append(
             ProviderObservation(
                 ProviderCapability.EV_SESSIONS,
@@ -643,7 +687,14 @@ def ocular_provider_observations(
                     "transaction_id": transaction_id,
                     "energy_kwh": round(energy_kwh, 4),
                     "cost_estimate": round(cost, 4),
-                    "duration_minutes": round(duration, 2),
+                    "duration_minutes": round(estimate.active_duration_minutes or 0.0, 2),
+                    "connected_at": connected_at.isoformat(timespec="seconds"),
+                    "disconnected_at": disconnected_at.isoformat(timespec="seconds") if disconnected_at else None,
+                    "connected_duration_minutes": round(connected_duration, 2),
+                    "estimated_active_start": estimate.active_start.isoformat(timespec="seconds") if estimate.active_start else None,
+                    "estimated_active_finish": estimate.active_finish.isoformat(timespec="seconds") if estimate.active_finish else None,
+                    "active_interval_inferred": estimate.inferred,
+                    "inference_diagnostics": estimate.diagnostics,
                     "tariff_breakdown": breakdown,
                 },
                 unit="session",
@@ -651,11 +702,11 @@ def ocular_provider_observations(
                 provider_type=ProviderType.EV_CHARGER,
                 household_id=household_id,
                 observation_type=ProviderObservationType.EV_SESSION,
-                observed_at=end.isoformat(timespec="seconds"),
+                observed_at=observed_at,
                 received_at=received_at,
                 freshness=ProviderFreshness(
                     state="fresh",
-                    observed_at=end.isoformat(timespec="seconds"),
+                    observed_at=observed_at,
                     note="Imported Ocular EV charging session.",
                 ),
                 quality=ProviderObservationQuality.HIGH,

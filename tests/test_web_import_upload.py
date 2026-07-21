@@ -7,6 +7,7 @@ import unittest
 import uuid
 import zipfile
 import json
+from datetime import timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -233,8 +234,9 @@ class WebImportUploadTests(unittest.TestCase):
 
         self.assertIn("Showing <strong>Last 7 days</strong>", html)
         self.assertIn('option value="last_7_days" selected', html)
-        self.assertIn('name="start" value="2026-07-08"', html)
-        self.assertIn('name="end" value="2026-07-14"', html)
+        today = report.local_today()
+        self.assertIn(f'name="start" value="{(today - timedelta(days=6)).isoformat()}"', html)
+        self.assertIn(f'name="end" value="{today.isoformat()}"', html)
         self.assertNotEqual(html, canonical)
         self.assertEqual(self.report_path.read_text(encoding="utf-8"), canonical)
 
@@ -249,8 +251,9 @@ class WebImportUploadTests(unittest.TestCase):
 
         self.assertIn("Showing <strong>Last 30 days</strong>", html)
         self.assertIn('option value="last_30_days" selected', html)
-        self.assertIn('name="start" value="2026-06-15"', html)
-        self.assertIn('name="end" value="2026-07-14"', html)
+        today = report.local_today()
+        self.assertIn(f'name="start" value="{(today - timedelta(days=29)).isoformat()}"', html)
+        self.assertIn(f'name="end" value="{today.isoformat()}"', html)
 
     def test_previous_billing_period_query_renders_requested_period(self):
         self.write_settings()

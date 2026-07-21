@@ -1,8 +1,10 @@
+import json
 import sqlite3
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import Optional
 
 from collector.import_ocular_export import OcularEVImporter
 from engine.data_engine import DataEngine
@@ -55,6 +57,47 @@ class ImportFrameworkTests(unittest.TestCase):
             self.assertEqual(observations[0]["provider_id"], "ocular_export")
             self.assertEqual(observations[0]["import_job_id"], "job_1")
 
+    def test_ocular_importer_preserves_connection_values_and_infers_active_interval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "ocular-example.xlsx"
+            db_path = Path(temp_dir) / "power.sqlite"
+            create_ocular_xlsx(
+                export_path,
+                rows=[
+                    ["oc-example", "charger-1", "30.53", "2026-07-13 16:31:41", "2026-07-14 08:56:07", "16:24:26", "driver", "driver"],
+                ],
+            )
+            importer = OcularEVImporter(db_path)
+            parsed = importer.parse(export_path)
+
+            first = importer.commit(parsed, household_context("household_a"), job_id="job_1")
+            second = importer.commit(parsed, household_context("household_a"), job_id="job_2")
+
+            self.assertTrue(first.success)
+            self.assertTrue(second.success)
+            self.assertEqual(first.inserted_records, 1)
+            self.assertEqual(second.inserted_records, 0)
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT start_time, end_time, energy_kwh, overnight_kwh, cost_estimate, notes_json
+                    FROM ev_sessions
+                    WHERE transaction_id = 'oc-example'
+                    """
+                ).fetchone()
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM ev_sessions WHERE transaction_id = 'oc-example'").fetchone()[0],
+                    1,
+                )
+            notes = json.loads(row[5])
+            self.assertEqual(row[0], "2026-07-13T16:31:41+08:00")
+            self.assertEqual(row[1], "2026-07-14T08:56:07+08:00")
+            self.assertAlmostEqual(row[2], 30.53)
+            self.assertAlmostEqual(row[3], 30.53)
+            self.assertEqual(notes["estimated_active_start"], "2026-07-13T23:00:00+08:00")
+            self.assertTrue(notes["estimated_active_finish"].startswith("2026-07-14T03:25:"))
+            self.assertTrue(notes["active_interval_inferred"])
+
     def test_data_engine_persists_import_history_by_household(self):
         with sqlite3.connect(":memory:") as conn:
             create_readings(conn)
@@ -96,7 +139,7 @@ def create_readings(conn: sqlite3.Connection) -> None:
     )
 
 
-def create_ocular_xlsx(path: Path) -> None:
+def create_ocular_xlsx(path: Path, rows: Optional[list[list[str]]] = None) -> None:
     headers = [
         "Record number",
         "Charger number",
@@ -107,11 +150,10 @@ def create_ocular_xlsx(path: Path) -> None:
         "Starting user",
         "Stopping user",
     ]
-    rows = [
-        headers,
+    rows = [headers, *(rows or [
         ["oc-1", "charger-1", "7.50", "2026-06-16 10:00:00", "2026-06-16 11:00:00", "60", "driver", "driver"],
         ["oc-2", "charger-1", "2.50", "2026-06-17 23:00:00", "2026-06-18 00:00:00", "60", "driver", "driver"],
-    ]
+    ])]
     with zipfile.ZipFile(path, "w") as workbook:
         workbook.writestr(
             "xl/workbook.xml",

@@ -18,6 +18,11 @@ from typing import Any, Callable, Optional
 from .import_framework import ImportJob, ImportPreview, ImportResult, ImportSource
 from .anomaly_engine import AnomalyEngine, HouseholdAnomaly
 from .behaviour_engine import BehaviourEngine, HouseholdBehaviour
+from .ev_charging_inference import (
+    EVChargingInferenceConfig,
+    infer_active_charging_interval,
+    split_energy_by_tariff,
+)
 from .bill_reconciliation_engine import BillReconciliation
 from .decision_engine import DecisionEngine
 from .models import (
@@ -63,6 +68,8 @@ from .promotion_engine import PromotionEngine, PromotionResult
 from .state_change_engine import StateChange, StateChangeEngine
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.json"
 DEFAULT_ACCOUNT_ID = "local_account"
 DEFAULT_HOUSEHOLD_ID = "default_household"
 DEFAULT_HOUSEHOLD_NAME = "Default household"
@@ -318,13 +325,14 @@ class DataEngine:
             """
             CREATE TABLE IF NOT EXISTS ev_sessions (
                 start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
+                end_time TEXT,
                 energy_kwh REAL NOT NULL,
                 source TEXT NOT NULL,
                 cost_estimate REAL
             )
             """
         )
+        DataEngine._ensure_ev_sessions_nullable_end_time(conn)
         present_ev_columns = {row[1] for row in conn.execute("PRAGMA table_info(ev_sessions)")}
         ev_column_sql = {
             "transaction_id": "ALTER TABLE ev_sessions ADD COLUMN transaction_id TEXT",
@@ -913,6 +921,42 @@ class DataEngine:
         )
 
     @staticmethod
+    def _ensure_ev_sessions_nullable_end_time(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(ev_sessions)").fetchall()
+        end_column = next((column for column in columns if column[1] == "end_time"), None)
+        if not end_column or not end_column[3]:
+            return
+        temp_table = "ev_sessions_nullable_end_time"
+
+        def quote_identifier(name: str) -> str:
+            return '"' + name.replace('"', '""') + '"'
+
+        definitions = []
+        names = []
+        for _, name, column_type, notnull, default_value, pk in columns:
+            names.append(name)
+            definition = f"{quote_identifier(name)} {column_type or 'TEXT'}"
+            if name != "end_time" and notnull:
+                definition += " NOT NULL"
+            if default_value is not None:
+                definition += f" DEFAULT {default_value}"
+            if pk:
+                definition += " PRIMARY KEY"
+            definitions.append(definition)
+        conn.execute(f"DROP TABLE IF EXISTS {quote_identifier(temp_table)}")
+        conn.execute(f"CREATE TABLE {quote_identifier(temp_table)} ({', '.join(definitions)})")
+        quoted_names = ", ".join(quote_identifier(name) for name in names)
+        conn.execute(
+            f"""
+            INSERT INTO {quote_identifier(temp_table)} ({quoted_names})
+            SELECT {quoted_names}
+            FROM ev_sessions
+            """
+        )
+        conn.execute("DROP TABLE ev_sessions")
+        conn.execute(f"ALTER TABLE {quote_identifier(temp_table)} RENAME TO ev_sessions")
+
+    @staticmethod
     def _ensure_household_column(conn: sqlite3.Connection, table: str) -> None:
         columns = DataEngine._table_columns(conn, table)
         if "household_id" not in columns:
@@ -1366,6 +1410,7 @@ class DataEngine:
         end: date,
         sources: Optional[list[str]] = None,
         prefer_source: Optional[str] = "ocular_export",
+        ev_inference_config: Optional[EVChargingInferenceConfig] = None,
     ) -> list[dict[str, Any]]:
         if not sources:
             return []
@@ -1408,12 +1453,15 @@ class DataEngine:
             ).fetchall()
             if rows and prefer_source and any(row[7] == prefer_source for row in rows):
                 rows = [row for row in rows if row[7] == prefer_source]
-            return [self._normalise_ev_session(row) for row in rows]
+            inference_config = ev_inference_config or EVChargingInferenceConfig.from_settings(
+                settings_path=DEFAULT_SETTINGS_PATH
+            )
+            return [self._normalise_ev_session(row, inference_config) for row in rows]
 
         return self._with_connection(query)
 
     @staticmethod
-    def _normalise_ev_session(row) -> dict[str, Any]:
+    def _normalise_ev_session(row, inference_config: Optional[EVChargingInferenceConfig] = None) -> dict[str, Any]:
         breakdown = {bucket: {"kwh": 0.0, "cost": 0.0} for bucket in BUCKET_ORDER}
         stored_total = 0.0
         column_offset = 11
@@ -1437,24 +1485,66 @@ class DataEngine:
                         }
 
         energy = float(row[4] or 0)
-        cost = sum(values["cost"] for values in breakdown.values())
-        if cost <= 0 and row[5] is not None:
-            cost = float(row[5] or 0)
-        start_dt = parse_iso_datetime(row[1])
-        end_dt = parse_iso_datetime(row[2]) or parse_iso_datetime(row[3])
-        duration = float(row[8]) if row[8] is not None else None
-        if duration is None and start_dt and end_dt:
-            duration = max((end_dt - start_dt).total_seconds() / 60, 0.0)
+        connected_dt = parse_iso_datetime(row[1])
+        disconnected_dt = parse_iso_datetime(row[2])
+        last_seen_dt = parse_iso_datetime(row[3])
+        end_dt = disconnected_dt or (last_seen_dt if row[7] != "ocular_export" else None)
+        connected_duration = float(row[8]) if row[8] is not None else None
+        if connected_duration is None and connected_dt and disconnected_dt:
+            connected_duration = max((disconnected_dt - connected_dt).total_seconds() / 60, 0.0)
+        active_start_dt = connected_dt
+        active_end_dt = end_dt
+        duration = connected_duration
+        inferred = False
+        inference_note = ""
+        inference_diagnostics: list[str] = []
+
+        if row[7] == "ocular_export":
+            inference_config = inference_config or EVChargingInferenceConfig.from_settings(
+                settings_path=DEFAULT_SETTINGS_PATH
+            )
+            estimate = infer_active_charging_interval(
+                connected_dt,
+                disconnected_dt,
+                energy,
+                inference_config,
+                connected_duration,
+            )
+            inferred = estimate.inferred
+            inference_diagnostics = list(estimate.diagnostics)
+            if estimate.active_start and estimate.active_finish:
+                active_start_dt = estimate.active_start
+                active_end_dt = estimate.active_finish
+                duration = estimate.active_duration_minutes
+                cost, breakdown = split_energy_by_tariff(
+                    estimate.active_start,
+                    estimate.active_finish,
+                    energy,
+                    inference_config.import_rates,
+                )
+                inference_note = (
+                    f"Estimated from configured {inference_config.charger_power_kw:g} kW charger rate "
+                    "and charging schedule."
+                )
+            else:
+                cost = 0.0
+        else:
+            cost = sum(values["cost"] for values in breakdown.values())
+            if cost <= 0 and row[5] is not None:
+                cost = float(row[5] or 0)
         max_power = float(row[9]) if row[9] is not None else None
         max_power_source = "provided" if row[9] is not None else "unavailable"
+        if row[7] == "ocular_export" and inferred:
+            max_power = inference_config.charger_power_kw if inference_config else max_power
+            max_power_source = "inferred"
         dominant = max(BUCKET_ORDER, key=lambda bucket: breakdown[bucket]["kwh"]) if energy > 0 else None
         return {
             "transaction_id": row[0],
-            "start_time": row[1],
-            "end_time": row[2],
-            "date": start_dt.date().isoformat() if start_dt else None,
-            "start_time_display": start_dt.strftime("%H:%M") if start_dt else "n/a",
-            "end_time_display": end_dt.strftime("%H:%M") if end_dt else "n/a",
+            "start_time": active_start_dt.isoformat(timespec="seconds") if active_start_dt else row[1],
+            "end_time": active_end_dt.isoformat(timespec="seconds") if active_end_dt else row[2],
+            "date": active_start_dt.date().isoformat() if active_start_dt else None,
+            "start_time_display": active_start_dt.strftime("%H:%M") if active_start_dt else "n/a",
+            "end_time_display": active_end_dt.strftime("%H:%M") if active_end_dt else "n/a",
             "duration_minutes": duration,
             "duration_display": format_duration(duration),
             "energy_kwh": energy,
@@ -1467,6 +1557,15 @@ class DataEngine:
             "dominant_tariff": dominant,
             "dominant_tariff_label": EV_BUCKET_LABELS.get(dominant, dominant or "n/a"),
             "tariff_breakdown": breakdown,
+            "connected_at": row[1],
+            "disconnected_at": row[2],
+            "connected_time_display": connected_dt.strftime("%d %b %H:%M") if connected_dt else "n/a",
+            "disconnected_time_display": disconnected_dt.strftime("%d %b %H:%M") if disconnected_dt else "n/a",
+            "connected_duration_minutes": connected_duration,
+            "connected_duration_display": format_duration(connected_duration),
+            "active_interval_inferred": inferred,
+            "inference_note": inference_note,
+            "inference_diagnostics": inference_diagnostics,
         }
 
     def get_overnight_baseload_watts(self, start: date, end: date) -> float:

@@ -283,6 +283,12 @@ produce high-confidence sessions. Snapshot sources such as Home Assistant OCPP
 may produce medium-confidence sessions if the beginning of the session was not
 observed.
 
+For Ocular spreadsheet imports, `start_time` and `end_time` preserve the raw
+connection and disconnection timestamps from the source export. PowerMonitor
+derives estimated active charging start/finish values at import and query time
+from energy, configured charger power, and the charging schedule, and stores
+those diagnostics in `notes_json` so historical rows remain compatible.
+
 Required fields:
 
 - `transaction_id`
@@ -311,6 +317,23 @@ Optional fields:
 - `start_source`
 - `stop_source`
 - `notes_json`
+
+Ocular `notes_json` may include:
+
+- `connected_at`
+- `disconnected_at`
+- `connected_duration`
+- `connected_duration_minutes`
+- `estimated_active_start`
+- `estimated_active_finish`
+- `estimated_active_duration_minutes`
+- `estimated_active_duration_hours`
+- `configured_charger_power_kw`
+- `configured_schedule_start`
+- `configured_schedule_end`
+- `active_interval_inferred`
+- `inference_note`
+- `inference_diagnostics`
 
 Source fields:
 

@@ -175,6 +175,12 @@ Review highest charging power, longest charging session, average duration,
 average finish time, average start time, plugged-in versus actual charging
 duration, zero-energy sessions, and invalid duration calculations.
 
+P1 - Spreadsheet EV active charging inference.
+Spreadsheet EV imports expose connection and disconnection timestamps rather
+than active charging timestamps. Infer active charging from the configured
+schedule and energy / configured charger power, preserve raw connection values,
+and use inferred active intervals for tariff costing and display.
+
 ## Known limitations to disclose
 
 - PowerMonitor is local-first and currently requires running Python commands on

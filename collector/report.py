@@ -57,6 +57,7 @@ from engine.decision_engine import (
 from engine.decision_pipeline import build_decision_pipeline_output
 from engine.efficiency_advisor import EfficiencyAdvisor
 from engine.energy_timeline import EnergyTimeline, EnergyTimelineEngine
+from engine.ev_charging_inference import EVChargingInferenceConfig
 from engine.financial_engine import FinancialEngine
 from engine.goals_engine import GoalsEngine
 from engine.historical_trends_engine import (
@@ -1576,7 +1577,16 @@ def load_actual_ev_sessions(
 
     def loader():
         with perf_stage("EV session/history loading"):
-            sessions = data_engine(conn).get_ev_sessions(start, end, sources=sources)
+            inference_config = EVChargingInferenceConfig.from_settings(
+                settings,
+                settings_path=SETTINGS_PATH,
+            )
+            sessions = data_engine(conn).get_ev_sessions(
+                start,
+                end,
+                sources=sources,
+                ev_inference_config=inference_config,
+            )
         perf_increment("ev_sessions_loaded", len(sessions))
         return sessions
 
@@ -3117,6 +3127,7 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
         """
 
     history_rows = []
+    has_inferred_sessions = any(session.get("active_interval_inferred") for session in sessions)
     for session in sessions:
         date_text = session.get("date") or "n/a"
         try:
@@ -3124,11 +3135,22 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
         except ValueError:
             pass
         dominant = session.get("dominant_tariff_label") or "n/a"
+        inference_note = str(session.get("inference_note") or "")
+        estimate_badge = (
+            f'<small class="estimate-note" title="{html.escape(inference_note)}">Estimated active charging</small>'
+            if session.get("active_interval_inferred") else ""
+        )
+        connection_detail = ""
+        if session.get("connected_at") or session.get("disconnected_at"):
+            connection_detail = (
+                f'<small class="connection-note">Connected {html.escape(str(session.get("connected_time_display") or "n/a"))}'
+                f' · Disconnected {html.escape(str(session.get("disconnected_time_display") or "n/a"))}</small>'
+            )
         history_rows.append(
             f"""
             <tr>
-              <td>{html.escape(date_text)}</td>
-              <td>{html.escape(str(session.get("start_time_display") or "n/a"))}</td>
+              <td>{html.escape(date_text)}{connection_detail}</td>
+              <td>{html.escape(str(session.get("start_time_display") or "n/a"))}{estimate_badge}</td>
               <td>{html.escape(str(session.get("end_time_display") or "n/a"))}</td>
               <td>{html.escape(str(session.get("duration_display") or "n/a"))}</td>
               <td>{kwh(float(session.get("energy_kwh") or 0))}</td>
@@ -3143,6 +3165,11 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
         f'<p class="notice">{html.escape(str(analytics.get("ignored_incomplete_message") or ""))}</p>'
         if analytics.get("ignored_incomplete_message") else ""
     )
+    inferred_notice = (
+        '<p class="notice">Ocular spreadsheet sessions show connection and disconnection times. '
+        'PowerMonitor estimates active charging from imported energy, charger power, and the charging schedule.</p>'
+        if has_inferred_sessions else ""
+    )
     return f"""
     <section class="report-section ev-session-section">
       <div class="section-title">
@@ -3153,7 +3180,7 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
       <div class="metrics ev-overview-metrics">{overview_cards}</div>
       <div class="ev-session-grid">
         <div class="ev-session-card">
-          <div class="chart-heading"><h3>Tariff usage</h3><span>Stored session allocation</span></div>
+          <div class="chart-heading"><h3>Tariff usage</h3><span>Estimated active allocation</span></div>
           <div class="ev-tariff-list">{''.join(tariff_rows)}</div>
         </div>
         <div class="ev-session-card">
@@ -3162,6 +3189,7 @@ def ev_session_analytics_html(summary: Summary, settings: Settings) -> str:
         </div>
       </div>
       {recommendation_html}
+      {inferred_notice}
       <div class="ev-session-history">
         <div class="chart-heading"><h3>Session history</h3><span>Latest first</span></div>
         <div class="ev-session-table-wrap">
@@ -11779,6 +11807,8 @@ def write_html(
     .ev-session-history th,.ev-session-history td {{ padding:10px 9px; border-bottom:1px solid var(--line); text-align:left; font-size:11px; font-variant-numeric:tabular-nums; }}
     .ev-session-history th {{ color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }}
     .ev-session-history td:nth-child(5),.ev-session-history td:nth-child(6),.ev-session-history td:nth-child(8) {{ text-align:right; }}
+    .ev-session-history small {{ display:block; margin-top:3px; color:var(--muted); font-size:9px; line-height:1.25; font-variant-numeric:normal; }}
+    .ev-session-history .estimate-note {{ color:var(--accent); font-weight:750; }}
     .insights {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px; }}
     .insight {{ padding:17px; border:1px solid var(--line); border-radius:16px; background:#f7faf9; }}
     .insight-kicker {{ display:block; margin-bottom:8px; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.11em; text-transform:uppercase; }}

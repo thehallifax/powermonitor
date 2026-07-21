@@ -1,10 +1,11 @@
 import sqlite3
 import unittest
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from engine.data_engine import DataEngine
 from engine.decision_engine import generate_decisions_from_data_engine
+from engine.ev_charging_inference import EVChargingInferenceConfig
 from engine.models import TimelineEntry
 from engine.provider_framework import (
     ProviderCapability,
@@ -149,12 +150,103 @@ class DataEngineTests(unittest.TestCase):
             date(2026, 6, 27),
             date(2026, 6, 27),
             sources=["ocular_export"],
+            ev_inference_config=EVChargingInferenceConfig(
+                charger_power_kw=6.9,
+                scheduled_start=time(9, 0),
+                scheduled_end=time(15, 0),
+                import_rates=Settings.import_rates,
+            ),
         )
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["transaction_id"], "abc123")
         self.assertEqual(sessions[0]["dominant_tariff"], "super_off_peak")
         self.assertAlmostEqual(sessions[0]["tariff_breakdown"]["super_off_peak"]["kwh"], 7.5)
+
+    def test_get_ev_sessions_infers_ocular_active_interval_from_existing_connection_row(self):
+        self.conn.execute("DELETE FROM ev_sessions")
+        self.conn.execute(
+            """
+            INSERT INTO ev_sessions (
+                start_time, end_time, energy_kwh, source, cost_estimate,
+                transaction_id, duration_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-07-13T16:31:41",
+                "2026-07-14T08:56:07",
+                30.53,
+                "ocular_export",
+                0.0,
+                "oc-example",
+                984.433,
+            ),
+        )
+
+        sessions = self.engine.get_ev_sessions(
+            date(2026, 7, 13),
+            date(2026, 7, 14),
+            sources=["ocular_export"],
+            ev_inference_config=EVChargingInferenceConfig(
+                charger_power_kw=6.9,
+                scheduled_start=time(23, 0),
+                scheduled_end=time(6, 0),
+                import_rates=Settings.import_rates,
+            ),
+        )
+
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(session["connected_at"], "2026-07-13T16:31:41")
+        self.assertEqual(session["disconnected_at"], "2026-07-14T08:56:07")
+        self.assertEqual(session["start_time_display"], "23:00")
+        self.assertEqual(session["end_time_display"], "03:25")
+        self.assertEqual(session["date"], "2026-07-13")
+        self.assertTrue(session["active_interval_inferred"])
+        self.assertAlmostEqual(session["duration_minutes"], 30.53 / 6.9 * 60)
+        self.assertAlmostEqual(
+            sum(bucket["kwh"] for bucket in session["tariff_breakdown"].values()),
+            30.53,
+        )
+        self.assertAlmostEqual(session["tariff_breakdown"]["overnight"]["kwh"], 30.53)
+
+    def test_get_ev_sessions_does_not_complete_ocular_row_without_disconnect(self):
+        self.conn.execute("DELETE FROM ev_sessions")
+        self.conn.execute(
+            """
+            INSERT INTO ev_sessions (
+                start_time, end_time, last_seen, energy_kwh, source, cost_estimate,
+                transaction_id, duration_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-07-13T23:00:00",
+                None,
+                "2026-07-13T23:00:00",
+                6.9,
+                "ocular_export",
+                0.0,
+                "oc-open",
+                None,
+            ),
+        )
+
+        sessions = self.engine.get_ev_sessions(
+            date(2026, 7, 13),
+            date(2026, 7, 13),
+            sources=["ocular_export"],
+            ev_inference_config=EVChargingInferenceConfig(
+                charger_power_kw=6.9,
+                scheduled_start=time(23, 0),
+                scheduled_end=time(6, 0),
+                import_rates=Settings.import_rates,
+            ),
+        )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertIsNone(sessions[0]["end_time"])
+        self.assertFalse(sessions[0]["active_interval_inferred"])
+        self.assertIn("missing_disconnection_timestamp", sessions[0]["inference_diagnostics"])
 
     def test_completeness_and_snapshot_use_shared_status_models(self):
         completeness = self.engine.get_data_completeness(

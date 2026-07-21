@@ -681,12 +681,20 @@ The importer reads these columns:
 existing records are updated and new records are inserted, so duplicate EV
 sessions are not created.
 
-Ocular session cost is calculated by splitting the session duration across the
-configured Synergy EV tariff windows and allocating the recorded kWh
-proportionally across those windows. The dashboard labels this as
-`Calculated session cost`. Home Assistant OCPP costs are labelled
-`Calculated charging cost`. The dashboard treats Ocular exports as the stable
-actual EV source and shows the tariff breakdown in the Actual EV charging card.
+Ocular `Charging start time` and `Charging stop time` are treated as connection
+and disconnection timestamps. PowerMonitor preserves those raw values, then
+estimates the active charging interval from imported kWh, configured charger
+power, and the configured charging schedule. If no charger power or schedule is
+configured, Ocular imports default to a 6.9 kW charger and a 23:00 scheduled
+start. The active interval is clamped inside the connection window and marked
+as an estimate in Session History.
+
+Ocular session cost is calculated by splitting the inferred active charging
+interval across the configured Synergy EV tariff windows and allocating the
+recorded kWh proportionally across those windows. The dashboard labels this as
+`Calculated session cost`. Home Assistant OCPP costs are labelled `Calculated
+charging cost`. The dashboard treats Ocular exports as the stable actual EV
+source and shows the tariff breakdown in the Actual EV charging card.
 
 PowerMonitor also stores explicit per-tariff kWh and cost columns for Ocular
 sessions, alongside `tariff_breakdown_json`. The importer validates that each
