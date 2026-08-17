@@ -144,6 +144,7 @@ class ProviderDiagnostics:
     collector_version: str = "PowerMonitor local collector"
     warnings: list[str] = field(default_factory=list)
     entity_mapping: Optional[dict[str, Any]] = None
+    last_attempted_sync: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -376,9 +377,13 @@ class ProviderManager:
 
     def as_dict(self) -> dict[str, Any]:
         providers = self.providers()
+        canonical_status = {
+            provider.provider_id: provider.as_dict()["provider_state"]["status"]
+            for provider in providers
+        }
         return {
             "providers": [provider.as_dict() for provider in providers],
-            "status": {provider.provider_id: provider.lifecycle_state.value for provider in providers},
+            "status": canonical_status,
             "onboarding_states": [state.value for state in ProviderOnboardingState],
             "actions": ["Configure", "Edit", "Test Connection", "Fix Connection", "Disable", "Enable", "Remove", "Diagnostics", "Import", "View Imported Data", "Setup Help"],
         }
@@ -790,6 +795,15 @@ class ProviderManager:
         observation_count = _observation_count(self.provider_observations, provider.provider_id)
         live_observation_types = _live_observation_types(self.provider_observations, provider.provider_id)
         promotion_count = _promotion_count(self.promotion_summary, provider.provider_id)
+        last_successful_sync = _provider_last_success_at(state_record)
+        last_failed_sync = _provider_last_failure_at(state_record)
+        last_attempted_sync = _provider_last_attempt_at(state_record)
+        failure_count = int(state_record.get("failure_count") or 0)
+        if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
+            last_successful_sync = None
+            last_failed_sync = None
+            last_attempted_sync = None
+            failure_count = 0
         last_error = None
         warnings = []
         if lifecycle in {ProviderConnectionStatus.DEGRADED, ProviderConnectionStatus.ERROR}:
@@ -799,9 +813,9 @@ class ProviderManager:
             warnings.append("Provider configuration is missing.")
         return ProviderDiagnostics(
             provider_id=provider.provider_id,
-            last_successful_sync=self.health.get("last_successful_collection") or self.health.get("latest_measurement_time"),
-            last_failed_sync=self.health.get("last_collection_failure"),
-            failure_count=int(self.health.get("failure_count") or 0),
+            last_successful_sync=last_successful_sync,
+            last_failed_sync=last_failed_sync,
+            failure_count=failure_count,
             last_error=last_error,
             freshness=freshness,
             observation_count=observation_count,
@@ -810,6 +824,7 @@ class ProviderManager:
             collector_version=str(self.health.get("collector_version") or "PowerMonitor local collector"),
             warnings=warnings,
             entity_mapping=self._entity_mapping_for_provider(provider.provider_id),
+            last_attempted_sync=last_attempted_sync,
         )
 
     def _entity_mapping_for_provider(self, provider_id: str) -> Optional[dict[str, Any]]:
@@ -889,8 +904,6 @@ def _lifecycle_from_provider(provider: Provider, health: dict[str, Any], state_r
         return ProviderConnectionStatus.CONNECTED
     if configured:
         return ProviderConnectionStatus.CONFIGURED
-    if str(health.get("status") or "").lower() not in {"", "ok"}:
-        return ProviderConnectionStatus.ERROR
     return ProviderConnectionStatus.NOT_CONFIGURED
 
 
@@ -919,7 +932,7 @@ def _sync_state(lifecycle: ProviderConnectionStatus, diagnostics: ProviderDiagno
         return ProviderSyncState.SYNCING
     if lifecycle in {ProviderConnectionStatus.ERROR, ProviderConnectionStatus.DEGRADED}:
         return ProviderSyncState.FAILED
-    if diagnostics.last_successful_sync:
+    if lifecycle != ProviderConnectionStatus.NOT_CONFIGURED and diagnostics.last_successful_sync:
         return ProviderSyncState.SYNCED
     if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
         return ProviderSyncState.NEVER_SYNCED
@@ -949,7 +962,7 @@ def _runtime_value(runtime: dict[str, Any], key: str) -> Any:
 
 def _actions_for(lifecycle: ProviderConnectionStatus) -> list[str]:
     if lifecycle == ProviderConnectionStatus.NOT_CONFIGURED:
-        return ["Configure", "Setup Help"]
+        return ["Configure", "Fix Connection", "Remove", "Setup Help"]
     if lifecycle == ProviderConnectionStatus.DISABLED:
         return ["Enable", "Remove"]
     if lifecycle in {ProviderConnectionStatus.DEGRADED, ProviderConnectionStatus.ERROR}:
@@ -1051,16 +1064,26 @@ def _provider_state_payload(
         onboarding,
     )
     available_actions = _provider_state_actions(status, connection_mode, lifecycle, diagnostics)
+    provider_specific_data_available = bool(diagnostics.last_successful_sync)
+    if connection_mode == "imported":
+        provider_specific_data_available = bool(onboarding.data_available)
+    elif connection_mode == "manual":
+        provider_specific_data_available = _required_fields_complete(configuration)
+    active = bool(configuration.enabled and status in {"connected", "manual", "imported"})
     return {
+        "provider_id": provider_id,
         "status": status,
-        "configured": lifecycle != ProviderConnectionStatus.NOT_CONFIGURED,
+        "configured": status not in {"not_configured"},
         "enabled": configuration.enabled,
         "connection_mode": connection_mode,
         "required_fields_complete": _required_fields_complete(configuration),
         "last_success_at": diagnostics.last_successful_sync,
         "last_failure_at": diagnostics.last_failed_sync,
+        "last_attempt_at": diagnostics.last_attempted_sync,
         "last_error_summary": diagnostics.last_error,
         "data_available": onboarding.data_available,
+        "provider_specific_data_available": provider_specific_data_available,
+        "active": active,
         "action_needed": onboarding.next_step,
         "available_actions": available_actions or list(actions),
     }
@@ -1093,6 +1116,30 @@ def _test_next_step(status: str) -> str:
     if status == "warning":
         return "Check the provider has recent data, then run Test Connection again."
     return "Update the saved username/password or refresh the provider session, then run Test Connection again."
+
+
+def _provider_last_success_at(state_record: dict[str, Any]) -> Optional[str]:
+    for key in ("last_successful_sync_at", "last_successful_data_at", "last_successful_test_at"):
+        value = state_record.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _provider_last_failure_at(state_record: dict[str, Any]) -> Optional[str]:
+    for key in ("last_failed_sync_at", "last_failed_test_at"):
+        value = state_record.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _provider_last_attempt_at(state_record: dict[str, Any]) -> Optional[str]:
+    for key in ("last_attempted_sync_at", "last_tested_at", "updated_at"):
+        value = state_record.get(key)
+        if value:
+            return str(value)
+    return _provider_last_failure_at(state_record) or _provider_last_success_at(state_record)
 
 
 def _duration_label(value: Any) -> str:
@@ -1184,7 +1231,7 @@ def _onboarding_guide(
         health_status=_health_status(state, health, diagnostics),
         next_step=_next_step(state, provider.name),
         common_failures=_common_failures(provider.provider_type),
-        recovery_steps=_recovery_steps(provider.provider_type),
+        recovery_steps=_recovery_steps(provider.provider_type, provider.provider_id),
         technical_details={
             "lifecycle_state": configuration.lifecycle_state.value,
             "sync_state": sync_state.value,
@@ -1333,13 +1380,23 @@ def _common_failures(provider_type: ProviderType) -> list[str]:
     return common
 
 
-def _recovery_steps(provider_type: ProviderType) -> list[str]:
+def _recovery_steps(provider_type: ProviderType, provider_id: Optional[str] = None) -> list[str]:
     if provider_type == ProviderType.GENERIC_IMPORT:
         return ["Export the file again from the provider", "Preview the upload before saving", "Check validation messages for missing columns or dates"]
     if provider_type == ProviderType.RETAILER:
         return ["Confirm tariff rates and billing dates", "Update changed plan details", "Run the report again after saving"]
-    if provider_type == ProviderType.SOLAR:
+    if provider_id == "solaredge":
         return ["Update the SolarEdge username/email and password", "Run Test Connection", "Use the manual cookie fallback only if automatic sign-in is unavailable", "Review technical diagnostics only if the simple steps do not resolve it"]
+    if provider_id == "fronius":
+        return ["Confirm the Fronius inverter host or IP address", "Check that the inverter is reachable on your local network", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
+    if provider_id == "enphase":
+        return ["Confirm the Enphase Envoy or IQ Gateway endpoint", "Update the local access token if your gateway requires one", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
+    if provider_id == "tesla":
+        return ["Confirm Tesla account or local endpoint details when this provider is enabled", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
+    if provider_id == "home_assistant":
+        return ["Confirm the Home Assistant URL", "Update the long-lived access token", "Check entity mappings", "Run Test Connection"]
+    if provider_type == ProviderType.SOLAR:
+        return ["Check the inverter endpoint or account details", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
     return ["Check the required information", "Reconnect or refresh the provider session", "Run Test Connection", "Review technical diagnostics only if the simple steps do not resolve it"]
 
 
@@ -1362,6 +1419,12 @@ def _next_sync_label(provider_type: ProviderType) -> str:
 def _editable_fields(provider_type: ProviderType, provider_id: Optional[str] = None) -> list[str]:
     if provider_id == "ocular_export":
         return []
+    if provider_id == "fronius":
+        return ["endpoint"]
+    if provider_id == "enphase":
+        return ["endpoint", "api_key"]
+    if provider_id == "tesla":
+        return ["endpoint", "api_key"]
     fields = {
         ProviderType.SOLAR: ["username", "password", "cookie", "endpoint"],
         ProviderType.EV_CHARGER: ["username", "password", "api_key", "endpoint"],

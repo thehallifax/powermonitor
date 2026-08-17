@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -22,12 +23,21 @@ def runtime_diagnostics(
     web_host: Optional[str] = None,
     web_port: Optional[int] = None,
     working_directory: Optional[Path] = None,
+    launch_agents_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
-    executable = Path(sys.executable).resolve()
+    executable_path = Path(sys.executable)
+    executable = executable_path.resolve()
     report_timestamp = _file_timestamp(report_path) if report_path else None
     venv_path = project_root / ".venv"
     in_venv = bool(getattr(sys, "base_prefix", sys.prefix) != sys.prefix)
-    in_project_venv = _is_relative_to(executable, venv_path)
+    launch_evidence = _launch_agent_python_evidence(project_root, venv_path, launch_agents_dir=launch_agents_dir)
+    prefix_in_project_venv = _is_relative_to(Path(sys.prefix), venv_path)
+    in_project_venv = (
+        _is_relative_to(executable_path, venv_path)
+        or _is_relative_to(executable, venv_path)
+        or prefix_in_project_venv
+        or bool(launch_evidence.get("uses_project_venv"))
+    )
     playwright_available = _module_available("playwright")
     pypdf_available = _module_available("pypdf")
     chromium = _playwright_chromium_status(playwright_available)
@@ -47,10 +57,14 @@ def runtime_diagnostics(
         "python_version": sys.version.split()[0],
         "python_version_full": sys.version,
         "executable": str(executable),
+        "launch_executable": launch_evidence.get("launch_executable"),
+        "launch_executables": launch_evidence.get("launch_executables", []),
+        "resolved_interpreter": str(executable),
         "prefix": sys.prefix,
         "base_prefix": getattr(sys, "base_prefix", sys.prefix),
         "running_in_venv": in_venv,
         "running_in_project_venv": in_project_venv,
+        "launch_agent_uses_project_venv": bool(launch_evidence.get("uses_project_venv")),
         "project_venv": str(venv_path),
         "playwright_available": playwright_available,
         "playwright_chromium_available": bool(chromium.get("available")),
@@ -95,10 +109,51 @@ def _playwright_chromium_status(playwright_available: bool) -> dict[str, Any]:
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
     try:
-        path.relative_to(parent.resolve())
+        path.absolute().relative_to(parent.absolute())
         return True
     except ValueError:
+        pass
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
         return False
+
+
+def _launch_agent_python_evidence(
+    project_root: Path,
+    venv_path: Path,
+    *,
+    launch_agents_dir: Optional[Path] = None,
+) -> dict[str, Any]:
+    launch_agents_dir = launch_agents_dir or Path.home() / "Library" / "LaunchAgents"
+    expected = {
+        "com.local.powermonitor.collector": project_root / "collector" / "collect_today.py",
+        "com.local.powermonitor.web": project_root / "collector" / "web.py",
+    }
+    launch_executables: list[str] = []
+    uses_project_venv = False
+    for label, script_path in expected.items():
+        plist_path = launch_agents_dir / f"{label}.plist"
+        if not plist_path.exists():
+            continue
+        try:
+            with plist_path.open("rb") as handle:
+                plist = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        args = [str(value) for value in plist.get("ProgramArguments", [])]
+        if not args or str(script_path) not in args:
+            continue
+        launch_executable = Path(args[0])
+        launch_executables.append(str(launch_executable))
+        if _is_relative_to(launch_executable, venv_path):
+            uses_project_venv = True
+    return {
+        "uses_project_venv": uses_project_venv,
+        "launch_executable": launch_executables[0] if launch_executables else None,
+        "launch_executables": launch_executables,
+    }
 
 
 def _file_timestamp(path: Optional[Path]) -> Optional[str]:

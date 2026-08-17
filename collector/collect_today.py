@@ -8,6 +8,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,7 @@ from engine.provider_framework import (
 from engine.provider_runtime import ProviderAuthentication, ProviderSchedule
 
 COOKIE_PATH = PROJECT_ROOT / "collector" / "solaredge_cookie.txt"
+PROVIDER_STATE_PATH = PROJECT_ROOT / "config" / "provider_state.json"
 OUTFILE = PROJECT_ROOT / "data" / "latest.json"
 TEMP_OUTFILE = OUTFILE.with_suffix(".json.tmp")
 LOG_PATH = PROJECT_ROOT / "logs" / "collect.log"
@@ -79,6 +81,63 @@ def log_solaredge_action(action: str, **details) -> None:
         if value is not None
     }
     logging.info("SolarEdge provider action=%s details=%s", action, safe_details)
+
+
+def record_solaredge_provider_success(measurements: int, *, message: Optional[str] = None) -> None:
+    record_provider_state(
+        "solaredge",
+        success=True,
+        measurements=measurements,
+        message=message,
+    )
+
+
+def record_solaredge_provider_failure(failure_type: str, message: str) -> None:
+    record_provider_state(
+        "solaredge",
+        success=False,
+        failure_type=failure_type,
+        message=message,
+    )
+
+
+def record_provider_state(
+    provider_id: str,
+    *,
+    success: bool,
+    measurements: int = 0,
+    failure_type: Optional[str] = None,
+    message: Optional[str] = None,
+) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        data = json.loads(PROVIDER_STATE_PATH.read_text(encoding="utf-8")) if PROVIDER_STATE_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    record = data.get(provider_id)
+    if not isinstance(record, dict):
+        record = {}
+    record["last_attempted_sync_at"] = timestamp
+    if success:
+        record["last_successful_sync_at"] = timestamp
+        if measurements > 0:
+            record["last_successful_data_at"] = timestamp
+        record["last_sync_measurements"] = int(measurements)
+        record["failure_count"] = 0
+        record.pop("last_connection_error", None)
+        record.pop("last_sync_failure_type", None)
+    else:
+        record["last_failed_sync_at"] = timestamp
+        record["last_sync_failure_type"] = failure_type
+        record["last_connection_error"] = redact_sensitive(message or failure_type or "Provider refresh failed")
+        record["failure_count"] = int(record.get("failure_count") or 0) + 1
+    data[provider_id] = record
+    PROVIDER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PROVIDER_STATE_PATH.with_suffix(PROVIDER_STATE_PATH.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(PROVIDER_STATE_PATH)
 
 
 SECRET_PATTERNS = (
@@ -787,6 +846,7 @@ def collect_recent(action: str = "scheduled_collection") -> dict:
     if failed:
         message = f"Partial collection: {failed}/{backfill_days} days failed; {succeeded}/{backfill_days} days imported"
     record_success(total_measurements, message)
+    record_solaredge_provider_success(total_measurements, message=message)
     print(
         f"Collection complete: requested {start_day} to {current_day}; "
         f"fetched {succeeded}/{backfill_days} days; "
@@ -845,6 +905,7 @@ def main() -> None:
 def handle_failure(failure_type: str, message: str) -> None:
     safe_message = redact_sensitive(message)
     state = record_failure(failure_type, safe_message)
+    record_solaredge_provider_failure(failure_type, safe_message)
     logging.error("Collection failed [%s]: %s", failure_type, safe_message)
     try:
         if maybe_send_failure_notification(state):

@@ -1214,7 +1214,7 @@ def dashboard_data(
         "household_membership": household_context.membership.as_dict(),
         "capability_summary": capability_summary.as_dict(),
         "provider_registry": provider_registry.as_dict(),
-        "provider_status": provider_registry.status_by_provider(),
+        "provider_status": provider_management.as_dict()["status"],
         "provider_management": provider_management.as_dict(),
         "providers": provider_management.as_dict(),
         "provider_runtime": provider_runtime.as_dict(),
@@ -1333,10 +1333,9 @@ def provider_management_data() -> ProviderManager:
         capability_summary=capability_summary,
         import_sources=setup_import_sources(),
     )
-    solaredge_adapter = SolarEdgeAdapter()
     home_assistant_record = load_provider_mapping_record("home_assistant")
     home_assistant_adapter = HomeAssistantAdapter(entity_mappings=home_assistant_record.get("selected_mappings") if isinstance(home_assistant_record, dict) else None)
-    runtime = ProviderRuntime([solaredge_adapter, home_assistant_adapter])
+    runtime = provider_runtime_data()
     return build_provider_management(
         provider_registry=provider_registry,
         health=health,
@@ -1344,11 +1343,11 @@ def provider_management_data() -> ProviderManager:
         promotion_summary=promotion_summary,
         runtime_status=runtime.as_dict(),
         connection_testers={
-            "solaredge": solaredge_adapter.test_connection,
+            "solaredge": SolarEdgeAdapter().test_connection,
             "home_assistant": home_assistant_adapter.test_connection,
         },
         reconnect_handlers={
-            "solaredge": solaredge_adapter.reconnect,
+            "solaredge": SolarEdgeAdapter().reconnect,
         },
         provider_entity_mappings={"home_assistant": home_assistant_record},
         settings=settings,
@@ -1360,10 +1359,49 @@ def provider_runtime_data(data_engine_instance=None) -> ProviderRuntime:
     from home_assistant_provider import HomeAssistantAdapter
 
     home_assistant_record = load_provider_mapping_record("home_assistant")
-    return ProviderRuntime(
-        [SolarEdgeAdapter(), HomeAssistantAdapter(entity_mappings=home_assistant_record.get("selected_mappings") if isinstance(home_assistant_record, dict) else None)],
-        data_engine=data_engine_instance,
-    )
+    adapters = []
+    if _solaredge_runtime_configured():
+        adapters.append(SolarEdgeAdapter())
+    if _home_assistant_runtime_configured(home_assistant_record):
+        adapters.append(HomeAssistantAdapter(entity_mappings=home_assistant_record.get("selected_mappings") if isinstance(home_assistant_record, dict) else None))
+    return ProviderRuntime(adapters, data_engine=data_engine_instance)
+
+
+def _provider_state_record(provider_id: str) -> dict:
+    path = PROJECT_ROOT / "config" / "provider_state.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    record = raw.get(provider_id) if isinstance(raw, dict) else {}
+    return record if isinstance(record, dict) else {}
+
+
+def _solaredge_runtime_configured() -> bool:
+    record = _provider_state_record("solaredge")
+    configured = set(record.get("configured_fields") or [])
+    if {"username", "password"}.issubset(configured) or "cookie" in configured:
+        return True
+    secrets = {}
+    secrets_path = PROJECT_ROOT / "config" / "secrets.json"
+    try:
+        secrets = json.loads(secrets_path.read_text(encoding="utf-8")) if secrets_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        secrets = {}
+    if isinstance(secrets, dict) and secrets.get("solaredge_username") and secrets.get("solaredge_password"):
+        return True
+    return (PROJECT_ROOT / "collector" / "solaredge_cookie.txt").exists()
+
+
+def _home_assistant_runtime_configured(home_assistant_record: Optional[dict] = None) -> bool:
+    record = _provider_state_record("home_assistant")
+    configured = set(record.get("configured_fields") or [])
+    if not {"endpoint", "api_key"}.issubset(configured):
+        return False
+    selected = (home_assistant_record or {}).get("selected_mappings") if isinstance(home_assistant_record, dict) else None
+    return bool(selected)
 
 
 def setup_logging() -> None:
@@ -7787,7 +7825,7 @@ def capability_summary_html(capability_summary) -> str:
     """
 
 
-def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str:
+def provider_registry_html(provider_registry: Optional[ProviderRegistry], provider_management: Optional[ProviderManager] = None) -> str:
     if not provider_registry:
         return """
     <div class="system-card">
@@ -7796,13 +7834,23 @@ def provider_registry_html(provider_registry: Optional[ProviderRegistry]) -> str
     </div>
     """
     rows = []
+    canonical = {}
+    if provider_management:
+        canonical = {
+            item["provider_id"]: item.get("provider_state") or {}
+            for item in provider_management.as_dict().get("providers", [])
+            if isinstance(item, dict)
+        }
     for provider in provider_registry.providers:
         capabilities = ", ".join(capability.value.replace("_", " ") for capability in provider.capabilities)
+        provider_state = canonical.get(provider.provider_id) or {}
+        status = str(provider_state.get("status") or provider.status.value).replace("_", " ").title()
+        available = bool(provider_state.get("active") or provider_state.get("configured"))
         rows.append(
             f"""
-            <div id="system-provider-registry-{html.escape(provider.provider_id)}" class="completeness-row {'good' if provider.available else 'bad'}">
+            <div id="system-provider-registry-{html.escape(provider.provider_id)}" class="completeness-row {'good' if available else 'bad'}">
               <span>{html.escape(provider.name)}</span>
-              <strong>{html.escape(provider.status.value.title())}</strong>
+              <strong>{html.escape(status)}</strong>
               <small>{html.escape(provider.provider_type.value.replace("_", " ").title())}: {html.escape(capabilities or "No capabilities")}</small>
             </div>
             """
@@ -8152,9 +8200,13 @@ def _data_source_status(kind: str, data: dict, onboarding: dict) -> str:
 def _provider_management_status(status: str, data: dict) -> str:
     provider_state = data.get("provider_state") or {}
     state = str(provider_state.get("status") or data.get("lifecycle_state") or "").lower()
-    if status in {"Connected", "Imported"}:
+    if status == "Connected":
         return "Connected"
-    if status in {"Configured", "Manual"}:
+    if status == "Imported":
+        return "Imported data"
+    if status == "Manual":
+        return "Manual"
+    if status == "Configured":
         return "Configured"
     if status in {"Needs attention", "Signed in, but no data received"} or state == "warning":
         return "Warning"
@@ -8185,7 +8237,7 @@ def _provider_last_error_label(data: dict, onboarding: dict) -> str:
 
 
 def _data_source_tone(status: str) -> str:
-    if status in {"Connected", "Imported"}:
+    if status in {"Connected", "Imported", "Manual"}:
         return "good"
     if status in {"Needs attention", "Signed in, but no data received", "Disabled"}:
         return "bad"
@@ -8651,28 +8703,43 @@ def historical_backfill_flash_html(flash: Optional[dict]) -> str:
     """
 
 
-def provider_runtime_html(provider_runtime: Optional[ProviderRuntime]) -> str:
+def provider_runtime_html(provider_runtime: Optional[ProviderRuntime], provider_management: Optional[ProviderManager] = None) -> str:
     if not provider_runtime:
         return ""
     data = provider_runtime.as_dict()
+    canonical = {}
+    if provider_management:
+        canonical = {
+            item["provider_id"]: item.get("provider_state") or {}
+            for item in provider_management.as_dict().get("providers", [])
+            if isinstance(item, dict)
+        }
     rows = []
     for provider in data.get("providers", []):
         health = provider.get("health", {})
+        provider_id = str(provider.get("provider_id") or "provider")
+        provider_state = canonical.get(provider_id) or {}
+        if provider_state and not (provider_state.get("active") and provider_state.get("connection_mode") == "live"):
+            continue
         rows.append(
             f"""
             <div class="completeness-row {'good' if health.get('state') in {'IDLE', 'SUCCESS'} else 'bad'}">
-              <span>{html.escape(str(provider.get("provider_id") or "provider"))}</span>
+              <span>{html.escape(provider_id)}</span>
               <strong>{html.escape(str(health.get("state") or "UNKNOWN").replace("_", " ").title())}</strong>
               <small>Schedule: {html.escape(str(provider.get("schedule") or "manual"))}. Last refresh: {html.escape(str(health.get("last_run") or "Never"))}. Next: {html.escape(str(health.get("next_run_at") or "Manual"))}.</small>
             </div>
             """
         )
+    active_count = sum(
+        1 for state in canonical.values()
+        if state.get("active") and state.get("connection_mode") == "live"
+    ) if canonical else len(data.get("active_providers", []))
     return f"""
     <div class="system-card">
       <div class="chart-heading"><h3>Data connection status</h3><span>{html.escape(str(data.get("scheduler_status") or "idle").title())}</span></div>
       <div class="config-grid">
         <div><span>Connection health</span><strong>{html.escape(str(data.get("runtime_health") or "unknown").title())}</strong></div>
-        <div><span>Active providers</span><strong>{len(data.get("active_providers", []))}</strong></div>
+        <div><span>Active providers</span><strong>{active_count}</strong></div>
       </div>
       <div class="completeness-grid">{''.join(rows) or '<p class="notice">No data connections are registered.</p>'}</div>
     </div>
@@ -8802,13 +8869,13 @@ def system_trust_summary_html(provider_management: Optional[ProviderManager], su
             if _should_show_data_source(provider_id, data, onboarding):
                 label = _source_display_name(provider_id, data)
                 detail = "Configured" if kind == "configuration" else _format_source_timestamp(onboarding.get("last_successful_sync"), "Available")
-                prefix = "✓" if status in {"Connected", "Latest upload available"} else "!"
+                prefix = "✓" if status in {"Connected", "Imported", "Manual"} else "!"
                 checklist.append((prefix, label, detail, status))
             elif _is_future_optional_source(provider_id, data, onboarding):
                 checklist.append(("○", _source_display_name(provider_id, data), "Not connected (optional)", "Optional"))
             if kind == "import" and _should_show_data_source(provider_id, data, onboarding) and not onboarding.get("connected"):
                 limitations.append(f"{_source_display_name(provider_id, data)} is historical upload data, not a live service.")
-            elif not _is_future_optional_source(provider_id, data, onboarding) and data.get("lifecycle_state") in {"NOT_CONFIGURED", "ERROR", "DEGRADED"}:
+            elif not _is_future_optional_source(provider_id, data, onboarding) and data.get("lifecycle_state") in {"ERROR", "DEGRADED"}:
                 limitations.append(f"{_source_display_name(provider_id, data)} needs attention.")
     if not checklist and int(getattr(summary, "intervals", 0) or 0) > 0:
         checklist.append(("✓", "Recent household information", "Available", "Connected"))
@@ -9314,6 +9381,8 @@ def runtime_check_html(runtime_check: Optional[dict]) -> str:
         ("Git commit", runtime_check.get("git_commit")),
         ("Python version", runtime_check.get("python_version")),
         ("Python executable", runtime_check.get("executable")),
+        ("Launch executable", runtime_check.get("launch_executable")),
+        ("Resolved interpreter", runtime_check.get("resolved_interpreter")),
         ("Working directory", runtime_check.get("working_directory")),
         ("Project .venv", "Yes" if runtime_check.get("running_in_project_venv") else "No"),
         ("Playwright", "Available" if runtime_check.get("playwright_available") else "Missing"),
@@ -9419,8 +9488,8 @@ def system_page_html(
       {battery_catalogue_diagnostics_html(battery_catalogue)}
       {battery_dispatch_diagnostics_html(battery_comparison)}
       {advisor_centre_html(advisor_explanations or [])}
-      {provider_runtime_html(provider_runtime)}
-      {provider_registry_html(provider_registry)}
+      {provider_runtime_html(provider_runtime, provider_management)}
+      {provider_registry_html(provider_registry, provider_management)}
       {household_state_html(household_state, latest_household_state_snapshot, recent_household_state_snapshots)}
       {household_behaviour_html(household_behaviour)}
       {household_anomalies_html(household_anomalies)}

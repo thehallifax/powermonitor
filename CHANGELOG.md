@@ -1,5 +1,14 @@
 # Changelog
 
+## OPS-025 - Provider state and runtime diagnostics cleanup
+
+- Made Provider Management expose one canonical provider-state payload for card, status-map, API, registry, runtime, and diagnostics consumers.
+- Stopped unconfigured providers from inheriting generic collector timestamps; provider success, failure, and attempt times now come from provider-specific state.
+- Corrected Home Assistant and future-provider states so missing required configuration is not shown as configured, synced, connected, or active.
+- Kept imported and manual sources distinct from live connected providers, including Ocular imported data and Synergy manual tariff configuration.
+- Added provider-specific recovery guidance for Fronius, Enphase, Tesla, Home Assistant, and SolarEdge.
+- Updated runtime diagnostics to distinguish LaunchAgent venv executables from resolved interpreters so normal `.venv` symlink resolution is not reported as unhealthy.
+
 ## OPS-024 - Production runtime audit and cleanup
 
 - Verified report, web, comparison, projection, and Data Engine billing paths use the canonical rollover resolver and added a production-style report regression.
