@@ -140,7 +140,7 @@ class MobilePresentationTests(unittest.TestCase):
         self.assertIn("Provider Management", html)
         self.assertIn("EV charging history", html)
         self.assertIn("Status", html)
-        self.assertIn("Connected", html)
+        self.assertIn("Imported data", html)
         self.assertIn("Connection type", html)
         self.assertIn("File Import", html)
         self.assertIn("Last attempted update", html)

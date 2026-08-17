@@ -965,7 +965,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def runtime_provider_payload(self, path: str) -> dict:
         provider_id = path.rsplit("/", 1)[-1]
         runtime = report.provider_runtime_data()
-        return {"provider": runtime.provider_status(provider_id)}
+        try:
+            return {"provider": runtime.provider_status(provider_id)}
+        except ValueError:
+            manager = report.provider_management_data()
+            provider = manager.get(provider_id)
+            if provider is None:
+                return {"error": "provider not found"}
+            return {"provider": provider.as_dict()["provider_state"]}
 
     def update_provider(self, path: str) -> None:
         parts = [part for part in path.split("/") if part]

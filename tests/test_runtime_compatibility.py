@@ -74,6 +74,64 @@ class RuntimeCompatibilityTests(unittest.TestCase):
         self.assertIn("Playwright is not installed", " ".join(data["warnings"]))
         self.assertIn("pypdf is not installed", " ".join(data["warnings"]))
 
+    def test_runtime_diagnostics_accepts_launch_agent_project_venv_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PowerMonitor"
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+            python_path = root / ".venv" / "bin" / "python"
+            script_path = root / "collector" / "web.py"
+            python_path.parent.mkdir(parents=True)
+            script_path.parent.mkdir(parents=True)
+            python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            script_path.write_text("", encoding="utf-8")
+            with (launch_dir / "com.local.powermonitor.web.plist").open("wb") as handle:
+                plistlib.dump(
+                    {
+                        "Label": "com.local.powermonitor.web",
+                        "ProgramArguments": [str(python_path), str(script_path)],
+                        "WorkingDirectory": str(root),
+                    },
+                    handle,
+                )
+
+            with patch("engine.runtime_diagnostics._module_available", return_value=True), \
+                 patch("engine.runtime_diagnostics._playwright_chromium_status", return_value={"available": True, "path": "/tmp/chromium", "error": None}), \
+                 patch("engine.runtime_diagnostics.sys.executable", "/usr/local/Cellar/python@3.14/bin/python3.14"), \
+                 patch("engine.runtime_diagnostics.sys.prefix", "/usr/local/Cellar/python@3.14/Frameworks/Python.framework/Versions/3.14"), \
+                 patch("engine.runtime_diagnostics.sys.base_prefix", "/usr/local/Cellar/python@3.14/Frameworks/Python.framework/Versions/3.14"):
+                data = runtime_diagnostics(
+                    project_root=root,
+                    database_path=root / "data" / "power.sqlite",
+                    launch_agents_dir=launch_dir,
+                )
+
+        self.assertTrue(data["launch_agent_uses_project_venv"])
+        self.assertTrue(data["running_in_project_venv"])
+        self.assertEqual(data["launch_executable"], str(python_path))
+        self.assertNotIn("project .venv Python", " ".join(data["warnings"]))
+
+    def test_runtime_diagnostics_flags_true_system_python_without_project_venv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PowerMonitor"
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+
+            with patch("engine.runtime_diagnostics._module_available", return_value=True), \
+                 patch("engine.runtime_diagnostics._playwright_chromium_status", return_value={"available": True, "path": "/tmp/chromium", "error": None}), \
+                 patch("engine.runtime_diagnostics.sys.executable", "/usr/bin/python3"), \
+                 patch("engine.runtime_diagnostics.sys.prefix", "/usr"), \
+                 patch("engine.runtime_diagnostics.sys.base_prefix", "/usr"):
+                data = runtime_diagnostics(
+                    project_root=root,
+                    database_path=root / "data" / "power.sqlite",
+                    launch_agents_dir=launch_dir,
+                )
+
+        self.assertFalse(data["launch_agent_uses_project_venv"])
+        self.assertFalse(data["running_in_project_venv"])
+        self.assertIn("project .venv Python", " ".join(data["warnings"]))
+
     def test_launch_agent_generator_uses_project_venv_python(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "PowerMonitor"

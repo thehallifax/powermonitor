@@ -185,8 +185,9 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("Run Test Connection", provider["onboarding"]["recovery_steps"])
 
     def test_connection_testing_reports_success_and_warnings(self):
-        connected = ProviderManager(registry()).test_connection("solaredge").as_dict()
-        missing = ProviderManager(registry(status=ProviderStatus.MISSING)).test_connection("solaredge").as_dict()
+        with TemporaryDirectory() as directory:
+            connected = ProviderManager(registry(), **manager_paths(directory)).test_connection("solaredge").as_dict()
+            missing = ProviderManager(registry(status=ProviderStatus.MISSING), **manager_paths(directory)).test_connection("solaredge").as_dict()
 
         self.assertFalse(connected["success"])
         self.assertEqual(connected["authentication_status"], "not_authenticated")
@@ -536,6 +537,94 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertEqual(result["status"], "warning")
         self.assertIn("entity_mapping", result["technical_details"])
         self.assertIn("Battery state of charge", result["user_message"])
+
+    def test_home_assistant_missing_required_fields_is_not_active_or_synced(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(
+                registry_with_home_assistant(),
+                health={"status": "ok", "last_successful_collection": "2026-08-17T15:23:00+08:00"},
+                **manager_paths(directory),
+            )
+
+            provider = manager.get("home_assistant").as_dict()
+
+            self.assertEqual(provider["lifecycle_state"], "NOT_CONFIGURED")
+            self.assertEqual(provider["sync_state"], "NEVER_SYNCED")
+            self.assertFalse(provider["provider_state"]["configured"])
+            self.assertFalse(provider["provider_state"]["active"])
+            self.assertIsNone(provider["provider_state"]["last_success_at"])
+            self.assertEqual(manager.as_dict()["status"]["home_assistant"], "not_configured")
+
+    def test_unconfigured_future_providers_do_not_inherit_generic_refresh_timestamps(self):
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(
+                registry(),
+                health={
+                    "status": "ok",
+                    "last_successful_collection": "2026-08-17T15:23:00+08:00",
+                    "latest_measurement_time": "2026-08-17T15:15:00+08:00",
+                },
+                **manager_paths(directory),
+            )
+
+            for provider_id in ("tesla", "fronius", "enphase"):
+                provider = manager.get(provider_id).as_dict()
+                self.assertEqual(provider["lifecycle_state"], "NOT_CONFIGURED")
+                self.assertIsNone(provider["provider_state"]["last_success_at"])
+                self.assertIsNone(provider["provider_state"]["last_attempt_at"])
+                self.assertFalse(provider["provider_state"]["active"])
+
+    def test_future_provider_guidance_is_provider_specific(self):
+        manager = ProviderManager(registry())
+
+        fronius = " ".join(manager.get("fronius").as_dict()["onboarding"]["recovery_steps"])
+        enphase = " ".join(manager.get("enphase").as_dict()["onboarding"]["recovery_steps"])
+        tesla = " ".join(manager.get("tesla").as_dict()["onboarding"]["recovery_steps"])
+
+        self.assertIn("Fronius inverter", fronius)
+        self.assertIn("Enphase Envoy", enphase)
+        self.assertIn("Tesla", tesla)
+        self.assertNotIn("SolarEdge", fronius)
+        self.assertNotIn("cookie", fronius.lower())
+        self.assertNotIn("SolarEdge", enphase)
+        self.assertNotIn("cookie", enphase.lower())
+
+    def test_solaredge_success_does_not_populate_other_provider_timestamps(self):
+        with TemporaryDirectory() as directory:
+            paths = manager_paths(directory)
+            manager = ProviderManager(
+                registry_with_home_assistant(),
+                connection_testers={
+                    "solaredge": lambda: {
+                        "success": True,
+                        "authentication_status": "authenticated",
+                        "available_datasets": ["daily_summary"],
+                        "warnings": [],
+                        "measurements": 24,
+                    }
+                },
+                **paths,
+            )
+            manager.action("solaredge", "save", {"username": "user@example.com", "password": "redaction-fixture-password"})
+            manager.action("solaredge", "test")
+
+            refreshed = ProviderManager(registry_with_home_assistant(), **paths)
+
+            self.assertIsNotNone(refreshed.get("solaredge").as_dict()["provider_state"]["last_success_at"])
+            self.assertIsNone(refreshed.get("home_assistant").as_dict()["provider_state"]["last_success_at"])
+            self.assertIsNone(refreshed.get("tesla").as_dict()["provider_state"]["last_success_at"])
+
+    def test_manual_and_imported_states_remain_distinct_from_connected(self):
+        manager = ProviderManager(
+            registry(),
+            provider_observations={"latest": [{"provider_id": "ocular_export"}]},
+        )
+
+        ocular = manager.get("ocular_export").as_dict()["provider_state"]
+
+        self.assertEqual(ocular["status"], "imported")
+        self.assertEqual(ocular["connection_mode"], "imported")
+        self.assertNotEqual(ocular["status"], "connected")
 
 
 if __name__ == "__main__":
