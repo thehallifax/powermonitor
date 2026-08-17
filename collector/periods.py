@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
+import sys
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.billing_period_engine import resolve_billing_cycle
 
 
 SUPPORTED_PERIODS = (
@@ -29,6 +37,14 @@ class Period:
     label: str
     start: date
     end: date
+    expected_end: Optional[date] = None
+    source: Optional[str] = None
+
+    def metadata(self) -> dict:
+        return {
+            "expected_end": (self.expected_end or self.end).isoformat(),
+            "source": self.source,
+        }
 
 
 def _month_before(day: date) -> date:
@@ -78,24 +94,11 @@ def resolve_period(
         year = current.year - 1
         return Period(kind, "Last calendar year", date(year, 1, 1), date(year, 12, 31))
     if kind == "current_billing_period":
-        period_start, period_end = _billing_fallback(current, settings.billing_period_start_day)
-        if settings.current_billing_period_start:
-            period_start = settings.current_billing_period_start
-        if period_start > current:
-            raise ValueError("current_billing_period_start cannot be in the future")
-        return Period(kind, "Current billing period", period_start, period_end)
+        cycle = resolve_billing_cycle(settings, current)
+        return Period(kind, "Current billing period", cycle.start, cycle.data_through, cycle.expected_end, cycle.source)
     if kind == "previous_billing_period":
-        if settings.previous_billing_period_start and settings.previous_billing_period_end:
-            return Period(
-                kind,
-                "Previous billing period",
-                settings.previous_billing_period_start,
-                settings.previous_billing_period_end,
-            )
-        current_period = resolve_period("current_billing_period", settings, current)
-        previous_end = current_period.start - timedelta(days=1)
-        previous_start = previous_end - timedelta(days=(current_period.end - current_period.start).days)
-        return Period(kind, "Previous billing period", previous_start, previous_end)
+        cycle = resolve_billing_cycle(settings, current)
+        return Period(kind, "Previous billing period", cycle.previous_start, cycle.previous_end, cycle.previous_end, cycle.source)
 
     if not start or not end:
         raise ValueError("Custom periods require start and end dates")

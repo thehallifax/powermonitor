@@ -1,5 +1,6 @@
 import unittest
 import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -54,7 +55,7 @@ class HistoricalBackfillTests(unittest.TestCase):
     def test_backfill_authentication_failure_marks_job_failed(self):
         with TemporaryDirectory() as directory:
             db_path = Path(directory) / "power.sqlite"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 create_readings(conn)
             DataEngine(db_path=db_path).create_historical_backfill_job(
                 job_id="job-1",
@@ -92,7 +93,7 @@ class HistoricalBackfillTests(unittest.TestCase):
     def test_backfill_regenerates_report_once_after_successful_completion(self):
         with TemporaryDirectory() as directory:
             db_path = Path(directory) / "power.sqlite"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 create_readings(conn)
             outfile = Path(directory) / "backfill.json"
 

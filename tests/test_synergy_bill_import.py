@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,7 +122,7 @@ class SynergyBillImportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             db_path = Path(temporary) / "power.sqlite"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 create_readings(conn)
                 DataEngine(connection=conn).validate_database()
                 engine = DataEngine(connection=conn)

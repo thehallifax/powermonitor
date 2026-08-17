@@ -14,16 +14,16 @@ LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 SERVICE_LABELS = {
     "collector": "com.local.powermonitor.collector",
     "web": "com.local.powermonitor.web",
-    "ocpp": "com.local.powermonitor.ocpp",
 }
 OBSOLETE_LABEL_PREFIXES = ("com.penrite.powermonitor",)
+RETIRED_LABELS = ("com.local.powermonitor.ocpp",)
 
 
 def discover_python(project_root: Path = PROJECT_ROOT) -> Path:
     venv_python = project_root / ".venv" / "bin" / "python"
-    if venv_python.exists():
-        return venv_python.resolve()
-    return Path(sys.executable).resolve()
+    if not venv_python.exists():
+        raise FileNotFoundError(f"Project virtualenv Python not found: {venv_python}")
+    return venv_python.absolute()
 
 
 def launch_agent_definitions(project_root: Path, python_executable: Path) -> dict[str, dict]:
@@ -48,17 +48,6 @@ def launch_agent_definitions(project_root: Path, python_executable: Path) -> dic
             "StandardErrorPath": str(logs / "launchagent.web.err.log"),
         },
     }
-    ocpp_importer = project_root / "collector" / "import_ha_ocpp.py"
-    if ocpp_importer.exists():
-        definitions["com.local.powermonitor.ocpp"] = {
-            "Label": "com.local.powermonitor.ocpp",
-            "ProgramArguments": [str(python_executable), str(ocpp_importer)],
-            "WorkingDirectory": str(project_root),
-            "StartInterval": 300,
-            "RunAtLoad": False,
-            "StandardOutPath": str(logs / "launchagent.ocpp.out.log"),
-            "StandardErrorPath": str(logs / "launchagent.ocpp.err.log"),
-        }
     return definitions
 
 
@@ -66,7 +55,8 @@ def obsolete_launch_agent_paths(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> 
     paths: list[Path] = []
     for prefix in OBSOLETE_LABEL_PREFIXES:
         paths.extend(sorted(launch_agents_dir.glob(f"{prefix}*.plist")))
-    return paths
+    paths.extend(launch_agents_dir / f"{label}.plist" for label in RETIRED_LABELS)
+    return sorted(set(paths))
 
 
 def obsolete_labels(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> list[str]:
@@ -81,15 +71,15 @@ def obsolete_labels(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> list[str]:
     for prefix in OBSOLETE_LABEL_PREFIXES:
         labels.add(prefix)
         labels.update(f"{prefix}.{role}" for role in SERVICE_LABELS)
+    labels.update(RETIRED_LABELS)
     return sorted(labels)
 
 
 def remove_obsolete_launch_agents(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> list[str]:
-    """Unload and remove old namespace LaunchAgents.
+    """Unload and remove obsolete namespace and retired OCPP LaunchAgents.
 
-    Older installs used com.penrite.powermonitor*. The supported namespace is
-    com.local.powermonitor.*. Cleanup is best-effort so fresh installs and test
-    fixtures remain idempotent.
+    Cleanup is best-effort so fresh installs and repeated migrations remain
+    idempotent.
     """
     messages: list[str] = []
     gui_domain = f"gui/{os.getuid()}"
@@ -116,9 +106,12 @@ def write_launch_agents(
     project_root: Path = PROJECT_ROOT,
     python_executable: Optional[Path] = None,
     launch_agents_dir: Path = LAUNCH_AGENTS_DIR,
-    selected: Iterable[str] = ("collector", "web", "ocpp"),
+    selected: Iterable[str] = ("collector", "web"),
 ) -> list[Path]:
-    python_path = (python_executable or discover_python(project_root)).resolve()
+    python_path = (python_executable or discover_python(project_root)).absolute()
+    expected_python = (project_root / ".venv" / "bin" / "python").absolute()
+    if python_path != expected_python:
+        raise ValueError(f"LaunchAgents must use the project virtualenv Python: {expected_python}")
     wanted = set(selected)
     definitions = launch_agent_definitions(project_root.resolve(), python_path)
     launch_agents_dir.mkdir(parents=True, exist_ok=True)
@@ -149,12 +142,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate PowerMonitor LaunchAgents with the active project Python.")
     parser.add_argument("--python", dest="python_path", type=Path, default=None, help="Python executable to use. Defaults to .venv/bin/python when present.")
     parser.add_argument("--launch-agents-dir", type=Path, default=LAUNCH_AGENTS_DIR)
-    parser.add_argument("--only", choices=["collector", "web", "ocpp"], action="append", help="Generate only the named LaunchAgent. Can be repeated.")
+    parser.add_argument("--only", choices=["collector", "web"], action="append", help="Generate only the named LaunchAgent. Can be repeated.")
     parser.add_argument("--keep-obsolete", action="store_true", help="Do not remove obsolete com.penrite.powermonitor LaunchAgents.")
     args = parser.parse_args()
 
-    selected = tuple(args.only) if args.only else ("collector", "web", "ocpp")
-    python_path = (args.python_path or discover_python()).resolve()
+    selected = tuple(args.only) if args.only else ("collector", "web")
+    expected_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    python_path = (args.python_path or discover_python()).absolute()
+    if python_path != expected_python.absolute():
+        raise SystemExit(f"LaunchAgents must use the project virtualenv Python: {expected_python}")
     if not python_path.exists():
         raise SystemExit(f"Python executable not found: {python_path}")
     if not args.keep_obsolete:

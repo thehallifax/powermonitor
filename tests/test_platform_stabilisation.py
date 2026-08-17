@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -108,7 +109,7 @@ class PlatformStabilisationTests(unittest.TestCase):
                 report.DB_PATH = db_path
                 report.REPORT_PATH = report_path
                 report.COLLECT_LOG_PATH = collect_log_path
-                with sqlite3.connect(db_path) as conn:
+                with closing(sqlite3.connect(db_path)) as conn, conn:
                     create_readings(conn)
                     insert_reading(conn, "2026-06-27T12:00:00", "super_off_peak", 1.4, 0.8, 0.6, 90.0, 0.03)
 

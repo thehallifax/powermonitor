@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from engine.briefing_engine import BriefingEngine
 from engine.advisor_presenter import attach_decision_to_advisors, explain_household_decisions
 from engine.bill_reconciliation_engine import BillReconciliationEngine
+from engine.billing_period_engine import resolve_billing_cycle
 from engine.battery_catalogue import (
     CATALOGUE_DISCLAIMER,
     load_battery_catalogue,
@@ -79,6 +81,17 @@ from engine.historical_comparison import (
     build_historical_comparison,
     resolve_historical_comparison,
 )
+
+
+@contextmanager
+def open_sqlite(path: Path):
+    """Open a local SQLite transaction and always release its file handle."""
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 from engine.home_profile import DEFAULT_HOME_PROFILE_PATH, HomeProfile, load_home_profile
 from engine.household_timeline import (
     DEFAULT_HOUSEHOLD_TIMELINE_PATH,
@@ -227,7 +240,7 @@ def database_content_signature() -> dict[str, Any]:
     if not DB_PATH.exists():
         return {"missing": True}
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with open_sqlite(DB_PATH) as conn:
             household_row = conn.execute(
                 """
                 SELECT household_id
@@ -272,12 +285,17 @@ def database_content_signature() -> dict[str, Any]:
 
 
 def period_payload(period: Period) -> dict[str, str]:
-    return {
+    payload = {
         "kind": period.kind,
         "label": period.label,
         "start": period.start.isoformat(),
         "end": period.end.isoformat(),
     }
+    if period.expected_end:
+        payload["expected_end"] = period.expected_end.isoformat()
+    if period.source:
+        payload["source"] = period.source
+    return payload
 
 
 def request_cache_key(name: str, settings: "Settings", *parts: Any) -> dict[str, Any]:
@@ -762,7 +780,7 @@ def runtime_check_data() -> dict:
         health_summary = public_health()
     except Exception:
         health_summary = {}
-    return runtime_diagnostics(
+    result = runtime_diagnostics(
         project_root=PROJECT_ROOT,
         database_path=DB_PATH,
         report_path=REPORT_PATH,
@@ -773,6 +791,12 @@ def runtime_check_data() -> dict:
         web_port=port,
         working_directory=Path.cwd(),
     )
+    try:
+        result["billing_period"] = resolve_billing_cycle(load_settings(), local_today()).as_dict()
+    except (OSError, ValueError, TypeError) as exc:
+        result["billing_period"] = {"error": exc.__class__.__name__}
+        result.setdefault("warnings", []).append("Active billing period could not be resolved.")
+    return result
 
 
 def web_bind_for_runtime_check() -> tuple[str, int]:
@@ -869,7 +893,7 @@ def dashboard_data(
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
     with perf_stage("database connection/setup"):
-        conn_context = sqlite3.connect(DB_PATH)
+        conn_context = open_sqlite(DB_PATH)
     with conn_context as conn:
         validate_database(conn)
         context_engine = data_engine(conn)
@@ -1218,9 +1242,10 @@ def dashboard_data(
         "context": household_current_context.as_dict(),
         "ev_data_source": settings.ev_data_source,
         "today": summary_to_dict(today_summary),
-        "period": {"kind": selected.kind, "label": selected.label, "start": selected.start.isoformat(), "end": selected.end.isoformat()},
+        "period": period_payload(selected),
         "summary": summary_to_dict(period_summary),
         "current_billing_period": summary_to_dict(billing_summary),
+        "billing_period_resolution": resolve_billing_cycle(settings, current_day).as_dict(),
         "actual_ev_charging_kwh": period_summary.actual_ev_charging_kwh,
         "actual_ev_charging_cost": period_summary.actual_ev_charging_cost,
         "actual_ev_tariff_breakdown": period_summary.actual_ev_tariff_breakdown,
@@ -1295,7 +1320,7 @@ def provider_management_data() -> ProviderManager:
 
     settings = load_settings()
     current_day = local_today()
-    with sqlite3.connect(DB_PATH) as conn:
+    with open_sqlite(DB_PATH) as conn:
         validate_database(conn)
         engine = data_engine(conn)
         capability_summary = engine.get_household_capability_summary(current_day, settings)
@@ -2550,7 +2575,7 @@ def compare_summaries(period_a: Period, summary_a: Summary, period_b: Period, su
 
 
 def comparison_data(period_a: Period, period_b: Period, settings: Settings) -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
+    with open_sqlite(DB_PATH) as conn:
         validate_database(conn)
         return compare_summaries(
             period_a,
@@ -2576,7 +2601,7 @@ def historical_comparison_data(
     )
     primary = resolved["primary_period"]
     comparison = resolved["comparison_period"]
-    with sqlite3.connect(DB_PATH) as conn:
+    with open_sqlite(DB_PATH) as conn:
         validate_database(conn)
         primary_summary = load_summary(
             conn,
@@ -9357,10 +9382,18 @@ def system_page_html(
         f"<tr><td>{html.escape(item['source'])}</td><td>{item['sessions']}</td><td>{kwh(item['energy_kwh'])}</td><td>{money(item['cost'])}</td></tr>"
         for item in counts
     ) or '<tr><td colspan="4">No EV sessions table rows found.</td></tr>'
+    billing_resolution = (runtime_check or {}).get("billing_period") or {}
     config_rows = {
         "ev_data_source": settings.ev_data_source,
-        "billing_period_start": settings.current_billing_period_start.isoformat() if settings.current_billing_period_start else "fallback",
-        "billing_period_end": settings.current_billing_period_end.isoformat() if settings.current_billing_period_end else "estimated",
+        "active_billing_period_start": billing_resolution.get("active_billing_period_start") or "unresolved",
+        "billing_data_through": billing_resolution.get("data_through") or "unresolved",
+        "expected_billing_period_end": billing_resolution.get("expected_billing_period_end") or "unresolved",
+        "billing_period_source": billing_resolution.get("period_source") or "unresolved",
+        "billing_period_cadence": billing_resolution.get("configured_cadence") or "unresolved",
+        "previous_billing_period": (
+            f"{billing_resolution.get('previous_billing_period_start')} to {billing_resolution.get('previous_billing_period_end')}"
+            if billing_resolution.get("previous_billing_period_start") else "unresolved"
+        ),
         "supply_charge_per_day": money(settings.supply_charge_per_day),
         "export_credit_rate": money(settings.export_credit_rate),
         "comparison_flat_rate": money(settings.comparison_plan_rates["flat_import_rate"]),
@@ -11272,7 +11305,7 @@ def write_html(
             period_b = comparison.get("period_b") or {}
             previous_start = date.fromisoformat(str(period_b.get("start")))
             previous_end = date.fromisoformat(str(period_b.get("end")))
-            with sqlite3.connect(DB_PATH) as conn:
+            with open_sqlite(DB_PATH) as conn:
                 validate_database(conn)
                 compared_trends = load_daily_trends(conn, previous_start, previous_end, settings)
         except (TypeError, ValueError, FileNotFoundError, RuntimeError, sqlite3.Error):
@@ -11316,13 +11349,13 @@ def write_html(
     generated_at = generated_dt.strftime("%d %b %Y, %H:%M %Z")
     if energy_timeline is None:
         try:
-            with sqlite3.connect(DB_PATH) as timeline_conn:
+            with open_sqlite(DB_PATH) as timeline_conn:
                 validate_database(timeline_conn)
                 energy_timeline = build_energy_timeline(timeline_conn, local_today(), settings, now=generated_dt)
         except (FileNotFoundError, RuntimeError, sqlite3.Error):
             energy_timeline = EnergyTimelineEngine().build(day=local_today(), readings=[], settings=settings, now=generated_dt)
     try:
-        with sqlite3.connect(DB_PATH) as historical_conn:
+        with open_sqlite(DB_PATH) as historical_conn:
             validate_database(historical_conn)
             historical_trends = build_historical_trends(historical_conn, local_today(), settings)
     except (FileNotFoundError, RuntimeError, sqlite3.Error):
@@ -11529,7 +11562,7 @@ def write_html(
         settings=settings,
         provider_registry=provider_registry,
         provider_management=provider_management,
-        solar_data_available=data_engine(conn).has_usable_solar_readings(),
+        solar_data_available=data_engine().has_usable_solar_readings(),
         now=generated_dt,
     )
     notification_readiness = NotificationEngine().build(
@@ -12688,7 +12721,7 @@ def build_live_html(
         date.fromisoformat(compared_info["end"]),
     )
     with perf_stage("database connection/setup"):
-        conn_context = sqlite3.connect(DB_PATH)
+        conn_context = open_sqlite(DB_PATH)
     with conn_context as conn:
         validate_database(conn)
         today_summary = load_summary(conn, current_day, current_day, settings)
@@ -12769,7 +12802,7 @@ def generate_report(output_path: Optional[Path] = None) -> str:
         raise FileNotFoundError(f"Database not found: {DB_PATH}")
 
     with perf_stage("database connection/setup"):
-        conn_context = sqlite3.connect(DB_PATH)
+        conn_context = open_sqlite(DB_PATH)
     with conn_context as conn:
         validate_database(conn)
         today_summary = load_summary(conn, current_day, current_day, settings)

@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import sqlite3
+from contextlib import closing
 import sys
 import zipfile
 from datetime import datetime, time, timedelta
@@ -573,7 +574,7 @@ def import_records_to_db(
     household_id: str = DEFAULT_HOUSEHOLD_ID,
 ) -> tuple[int, int]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         ensure_ev_sessions(conn)
         before = conn.execute(
             "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",

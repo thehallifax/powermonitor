@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -265,7 +266,7 @@ def import_snapshot(states: dict) -> tuple[str, float, float, str, float, float,
     rates = import_rates()
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         ensure_ev_sessions(conn)
         existing = conn.execute(
             """
@@ -362,7 +363,7 @@ def import_snapshot(states: dict) -> tuple[str, float, float, str, float, float,
 def main() -> int:
     setup_logging()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn, conn:
         ensure_ev_sessions(conn)
 
     access_key = home_assistant_token()

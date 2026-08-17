@@ -1,6 +1,7 @@
 import http.client
 import json
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import threading
@@ -296,7 +297,7 @@ class HistoricalBackfillWebTests(unittest.TestCase):
     def test_status_endpoint_reflects_persisted_changes_without_report_regeneration(self):
         with running_server(seed_job=True, job_progress={"chunks_total": 366, "chunks_completed": 2, "completed_days": ["2025-07-13"], "current_day": "2025-07-14"}) as context:
             first = context.request("GET", "/api/historical-backfill/status?job_id=job-1", headers={"Accept": "application/json"})
-            with sqlite3.connect(context.db_path) as conn:
+            with closing(sqlite3.connect(context.db_path)) as conn, conn:
                 conn.execute(
                     """
                     UPDATE historical_backfill_jobs
@@ -368,7 +369,7 @@ class HistoricalBackfillWebTests(unittest.TestCase):
 
     def test_status_endpoint_includes_live_coverage_summary_without_day_maps(self):
         with running_server(seed_job=True, job_status="complete") as context:
-            with sqlite3.connect(context.db_path) as conn:
+            with closing(sqlite3.connect(context.db_path)) as conn, conn:
                 insert_reading(conn, "2025-12-01T00:15:00+08:00", production=1.0, grid_import=0.1, grid_export=0.2)
                 insert_reading(conn, "2026-07-13T00:15:00+08:00", production=1.0, grid_import=0.1, grid_export=0.2)
             response = context.request("GET", "/api/historical-backfill/status", headers={"Accept": "application/json"})
@@ -464,7 +465,7 @@ class running_server:
         self.db_path = Path(self.temp_dir.name) / "power.sqlite"
         self.original_db_path = report.DB_PATH
         report.DB_PATH = self.db_path
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             create_readings(conn)
             DataEngine(connection=conn).validate_database()
         if self.seed_job:
@@ -483,7 +484,7 @@ class running_server:
             )
             created_at = datetime.now().astimezone() - timedelta(minutes=15)
             updated_at = created_at + timedelta(minutes=10)
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn, conn:
                 conn.execute(
                     """
                     UPDATE historical_backfill_jobs

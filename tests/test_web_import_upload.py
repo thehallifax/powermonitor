@@ -1,5 +1,6 @@
 import re
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import threading
@@ -7,7 +8,7 @@ import unittest
 import uuid
 import zipfile
 import json
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -68,7 +69,7 @@ class WebImportUploadTests(unittest.TestCase):
         report.COLLECT_LOG_PATH = self.collect_log_path
         report.SETTINGS_PATH = self.settings_path
         web.UPLOAD_DIR = self.upload_dir
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             create_readings(conn)
             insert_reading(conn)
             DataEngine(connection=conn).validate_database()
@@ -102,7 +103,7 @@ class WebImportUploadTests(unittest.TestCase):
             result = form_post(base_url, "/imports/commit", {"job_id": job_id})
             self.assertIn("Import complete", result)
 
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn, conn:
                 rows = conn.execute(
                     """
                     SELECT household_id, COUNT(*), ROUND(SUM(energy_kwh), 2)
@@ -144,7 +145,7 @@ class WebImportUploadTests(unittest.TestCase):
                 result = form_post(base_url, "/imports/commit", {"job_id": job_id})
                 self.assertIn("Import complete", result)
 
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn, conn:
                 latest = DataEngine(connection=conn).get_latest_synergy_bill()
                 history = DataEngine(connection=conn).get_import_history()
 
@@ -265,8 +266,40 @@ class WebImportUploadTests(unittest.TestCase):
             stop_server(server, thread)
 
         self.assertIn("Showing <strong>Previous billing period</strong>", html)
-        self.assertIn('name="start" value="2026-04-03"', html)
-        self.assertIn('name="end" value="2026-06-05"', html)
+        self.assertIn('name="start" value="2026-06-06"', html)
+        self.assertIn('name="end" value="2026-08-06"', html)
+
+    def test_summary_api_exposes_rolled_billing_period_metadata(self):
+        self.write_settings(
+            current_billing_period_end=None,
+            previous_billing_period_start="2026-04-03",
+            previous_billing_period_end="2026-06-05",
+        )
+        server, thread, base_url = start_server()
+        try:
+            with patch.object(report, "local_today", return_value=date(2026, 8, 17)):
+                payload = json.loads(urlopen(f"{base_url}/api/summary", timeout=10).read().decode("utf-8"))
+        finally:
+            stop_server(server, thread)
+
+        self.assertEqual(payload["period"]["start"], "2026-08-09")
+        self.assertEqual(payload["period"]["end"], "2026-08-17")
+        self.assertEqual(payload["billing_period_resolution"]["expected_billing_period_end"], "2026-10-11")
+        self.assertTrue(payload["billing_period_resolution"]["current_boundary_predicted"])
+
+    def test_production_report_path_uses_canonical_rolled_period(self):
+        self.write_settings(
+            current_billing_period_end=None,
+            previous_billing_period_start="2026-04-03",
+            previous_billing_period_end="2026-06-05",
+        )
+        with patch.object(report, "local_today", return_value=date(2026, 8, 17)):
+            markup = report.generate_report(self.report_path)
+
+        self.assertIn('name="start" value="2026-08-09"', markup)
+        self.assertIn('name="end" value="2026-08-17"', markup)
+        self.assertIn("2026-06-06 to 2026-08-08", markup)
+        self.assertIn("expected_billing_period_end</span><strong>2026-10-11", markup)
 
     def test_custom_period_query_renders_requested_dates(self):
         self.write_settings()

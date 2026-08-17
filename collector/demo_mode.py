@@ -4,6 +4,7 @@
 import json
 import math
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -225,7 +226,7 @@ def write_demo_collect_log(path: Path, today: date) -> None:
 
 def rebuild_demo_database(path: Path, today: date) -> None:
     path.unlink(missing_ok=True)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         create_readings_table(conn)
         insert_demo_readings(conn, today)
         from engine.data_engine import DataEngine

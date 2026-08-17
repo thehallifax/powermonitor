@@ -68,7 +68,7 @@ def setup_logging() -> None:
 
 def live_health() -> dict:
     settings = report.load_settings()
-    with sqlite3.connect(report.DB_PATH) as conn:
+    with report.open_sqlite(report.DB_PATH) as conn:
         report.validate_database(conn)
         return report.health_data(conn, report.local_today(), settings)
 
@@ -1305,7 +1305,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         period = report.resolve_period("current_billing_period", settings, current_day)
         summary = None
         try:
-            with sqlite3.connect(report.DB_PATH) as conn:
+            with report.open_sqlite(report.DB_PATH) as conn:
                 report.validate_database(conn)
                 summary = report.load_summary(conn, period.start, period.end, settings)
         except (FileNotFoundError, RuntimeError, sqlite3.Error):
@@ -1631,18 +1631,10 @@ table{width:100%;min-width:520px;border-collapse:collapse} th,td{padding:9px 8px
 
 def next_billing_snooze_date(settings) -> date:
     today = report.local_today()
-    if settings.current_billing_period_end:
-        return settings.current_billing_period_end + timedelta(days=1)
-    if (
-        settings.current_billing_period_start
-        and settings.previous_billing_period_start
-        and settings.previous_billing_period_end
-    ):
-        days = (
-            settings.previous_billing_period_end - settings.previous_billing_period_start
-        ).days + 1
-        return settings.current_billing_period_start + timedelta(days=days)
-    return today + timedelta(days=7)
+    try:
+        return report.resolve_billing_cycle(settings, today).expected_end + timedelta(days=1)
+    except (TypeError, ValueError, AttributeError):
+        return today + timedelta(days=7)
 
 
 def safe_filename(value: str) -> str:

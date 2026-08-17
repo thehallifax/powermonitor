@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -31,7 +32,7 @@ class Settings:
 
 class CapabilityDetectionTests(unittest.TestCase):
     def test_data_engine_detects_household_capabilities_from_scoped_data(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine = DataEngine(connection=conn)
             engine.validate_database()
@@ -51,7 +52,7 @@ class CapabilityDetectionTests(unittest.TestCase):
             self.assertFalse(summary.get("battery").usable)
 
     def test_usable_solar_readings_require_positive_normalized_generation(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine = DataEngine(connection=conn)
             engine.validate_database()
@@ -63,7 +64,7 @@ class CapabilityDetectionTests(unittest.TestCase):
             self.assertTrue(engine.has_usable_solar_readings())
 
     def test_advisor_collection_filters_missing_ev_solar_and_tariff(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine = DataEngine(connection=conn)
             engine.validate_database()
@@ -95,7 +96,7 @@ class CapabilityDetectionTests(unittest.TestCase):
             original_db_path = report.DB_PATH
             report.DB_PATH = db_path
             try:
-                with sqlite3.connect(db_path) as conn:
+                with closing(sqlite3.connect(db_path)) as conn, conn:
                     create_readings(conn)
                     DataEngine(connection=conn).validate_database()
                     insert_reading(conn, "default_household", production_kwh=1.2, grid_kwh=0.4, import_cost=0.12)

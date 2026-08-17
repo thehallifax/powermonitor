@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 import zipfile
@@ -47,7 +48,7 @@ class ImportFrameworkTests(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.inserted_records, 2)
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 rows = conn.execute(
                     "SELECT household_id, COUNT(*), ROUND(SUM(energy_kwh), 2) FROM ev_sessions GROUP BY household_id"
                 ).fetchall()
@@ -77,7 +78,7 @@ class ImportFrameworkTests(unittest.TestCase):
             self.assertTrue(second.success)
             self.assertEqual(first.inserted_records, 1)
             self.assertEqual(second.inserted_records, 0)
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 row = conn.execute(
                     """
                     SELECT start_time, end_time, energy_kwh, overnight_kwh, cost_estimate, notes_json
@@ -99,7 +100,7 @@ class ImportFrameworkTests(unittest.TestCase):
             self.assertTrue(notes["active_interval_inferred"])
 
     def test_data_engine_persists_import_history_by_household(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine_a = DataEngine(connection=conn, household_context=household_context("household_a"))
             engine_b = DataEngine(connection=conn, household_context=household_context("household_b"))

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -52,7 +53,7 @@ class SolarEdgeImportTests(unittest.TestCase):
             first_output = self.run_import(db_path, json_path)
             second_output = self.run_import(db_path, json_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 count = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
 
         self.assertEqual(count, 2)
@@ -82,7 +83,7 @@ class SolarEdgeImportTests(unittest.TestCase):
 
             output = self.run_import(db_path, json_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 measurement_time, generated, exported = conn.execute(
                     """
                     SELECT measurement_time, production_kwh, solar_to_grid_kwh
@@ -139,7 +140,7 @@ class SolarEdgeImportTests(unittest.TestCase):
             self.run_import(db_path, first_path)
             second_output = self.run_import(db_path, second_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 generated, exported = conn.execute(
                     """
                     SELECT production_kwh, solar_to_grid_kwh
@@ -187,7 +188,7 @@ class SolarEdgeImportTests(unittest.TestCase):
             self.run_import(db_path, first_path)
             second_output = self.run_import(db_path, second_path)
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 generated, exported = conn.execute(
                     """
                     SELECT production_kwh, solar_to_grid_kwh

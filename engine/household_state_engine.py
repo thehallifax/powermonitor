@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from typing import Any, Optional
 
+from .billing_period_engine import resolve_billing_cycle
+
 from .context_engine import current_tariff_bucket, import_rates, next_lower_cost_window, lowest_cost_window
 
 
@@ -349,16 +351,19 @@ class HouseholdStateEngine:
         )
 
     def _billing_state(self, billing_summary: Any, settings: Any, observed_at: datetime) -> HouseholdBillingState:
-        start = getattr(settings, "current_billing_period_start", None)
-        end = getattr(settings, "current_billing_period_end", None)
-        if isinstance(settings, dict):
-            start = settings.get("current_billing_period_start")
-            end = settings.get("current_billing_period_end")
-        start_date = parse_date(start)
+        try:
+            cycle = resolve_billing_cycle(settings, observed_at.date())
+            start_date = cycle.start
+            end_date = cycle.expected_end
+        except (TypeError, ValueError, AttributeError):
+            start = settings.get("current_billing_period_start") if isinstance(settings, dict) else getattr(settings, "current_billing_period_start", None)
+            end = settings.get("current_billing_period_end") if isinstance(settings, dict) else getattr(settings, "current_billing_period_end", None)
+            start_date = parse_date(start)
+            end_date = parse_date(end)
         day_of_period = (observed_at.date() - start_date).days + 1 if start_date else int(number(billing_summary, "reading_days"))
         return HouseholdBillingState(
             period_start=start_date.isoformat() if start_date else None,
-            period_end=parse_date(end).isoformat() if parse_date(end) else None,
+            period_end=end_date.isoformat() if end_date else None,
             day_of_period=max(day_of_period, 0),
             supply_days=int(number(billing_summary, "supply_days")),
             reading_days=int(number(billing_summary, "reading_days")),

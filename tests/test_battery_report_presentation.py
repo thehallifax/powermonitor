@@ -3,6 +3,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR_DIR = PROJECT_ROOT / "collector"
@@ -12,6 +13,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import report
+from engine.household_timeline import HouseholdTimeline, HouseholdTimelineEvent, tariff_version_for_plan
+
+
+def battery_timeline():
+    tariff = tariff_version_for_plan("synergy_ev_add_on", date(2026, 5, 1), None)
+    return HouseholdTimeline(events=[
+        HouseholdTimelineEvent.tariff_period(tariff, effective_from=date(2026, 5, 1), event_id="ev")
+    ])
 
 
 def summary() -> report.Summary:
@@ -88,7 +97,8 @@ def seasonal_days(start: date, count: int, solar_export: float = 12.0, grid_impo
 
 
 class BatteryReportPresentationTests(unittest.TestCase):
-    def test_scenario_analysis_replaces_fixed_battery_card_with_comparison_object(self):
+    @patch.object(report, "household_timeline", side_effect=lambda *_args, **_kwargs: battery_timeline())
+    def test_scenario_analysis_replaces_fixed_battery_card_with_comparison_object(self, _timeline):
         analysis = report.scenario_analysis(
             summary(),
             settings(),
@@ -119,7 +129,8 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertEqual([item["capacity_kwh"] for item in analysis["battery_comparison"]["options"]], [5.0, 10.0, 15.0, 20.0])
         self.assertIn("tariff_version", analysis["battery_comparison"])
         self.assertEqual(analysis["battery_comparison"]["tariff_name"], "Synergy EV Add On")
-        self.assertEqual(analysis["battery_comparison"]["tariff_effective_from"], "2026-07-01")
+        self.assertEqual(analysis["battery_comparison"]["tariff_effective_from"], "2026-05-01")
+        self.assertEqual(analysis["battery_comparison"]["tariff_household_effective_from"], "2026-05-01")
 
     def test_battery_investment_calculates_payback_degradation_inflation_and_rebate(self):
         comparison = {
@@ -155,7 +166,8 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertAlmostEqual(investment["ten_year_net"], expected_ten_year - 8500.0)
         self.assertEqual(investment["confidence"], "High")
 
-    def test_battery_comparison_renders_on_decisions_scenario_section(self):
+    @patch.object(report, "household_timeline", side_effect=lambda *_args, **_kwargs: battery_timeline())
+    def test_battery_comparison_renders_on_decisions_scenario_section(self, _timeline):
         analysis = report.scenario_analysis(
             summary(),
             settings(),
@@ -194,7 +206,7 @@ class BatteryReportPresentationTests(unittest.TestCase):
         self.assertIn("<h4>Battery dispatch assumptions</h4>", markup)
         self.assertIn("<h4>Grid charging assumptions</h4>", markup)
         self.assertIn("<h4>Limitations</h4>", markup)
-        self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 July 2026.", markup)
+        self.assertIn("Calculated using Synergy EV Add On tariff effective from 1 May 2026.", markup)
         self.assertIn('id="battery-investment"', markup)
         self.assertIn("Estimated investment", markup)
         self.assertIn("Estimated annual saving", markup)

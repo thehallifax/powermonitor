@@ -1232,7 +1232,7 @@ def _required_information(configuration: ProviderConfiguration) -> list[str]:
     if configuration.provider_id == "solaredge":
         configured = {credential.field for credential in configuration.credentials if credential.configured}
         if _solaredge_configuration_ready(configured):
-            return ["SolarEdge username/email and password", "Cookie only if you use the advanced fallback"]
+            return ["SolarEdge username/email", "SolarEdge password", "Cookie only if you use the advanced fallback"]
         return ["SolarEdge username/email", "SolarEdge password"]
     required = [credential.label for credential in configuration.credentials if credential.required]
     if required:

@@ -607,7 +607,7 @@ def check_tariff_updates() -> None:
         period = report.resolve_period("current_billing_period", settings, current_day)
         summary = None
         try:
-            with sqlite3.connect(report.DB_PATH) as conn:
+            with report.open_sqlite(report.DB_PATH) as conn:
                 report.validate_database(conn)
                 summary = report.load_summary(conn, period.start, period.end, settings)
         except (FileNotFoundError, RuntimeError, sqlite3.Error, ValueError):

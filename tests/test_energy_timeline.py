@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -187,7 +188,7 @@ class EnergyTimelinePresentationTests(unittest.TestCase):
     def test_dashboard_summary_includes_energy_timeline(self):
         with tempfile.TemporaryDirectory() as temporary:
             db_path = Path(temporary) / "power.sqlite"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 create_readings(conn)
                 insert_reading(conn, "2026-07-07T12:00:00", "super_off_peak", 1.0, 0.5, 0.2, 500.0, 0.1, "default_household")
                 DataEngine(connection=conn).validate_database()

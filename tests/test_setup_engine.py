@@ -177,20 +177,21 @@ class SetupEngineTests(unittest.TestCase):
         self.assertNotIn("enable_notifications", tasks)
 
     def test_solar_provider_selected_without_credentials_prompts_connection(self):
-        manager = ProviderManager(solar_registry())
-        checklist = SetupEngine(context_with("solar")).build_checklist(
-            capability_summary(
-                solar=False,
-                ev=False,
-                tariff=True,
-                latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
-            ),
-            collector_health={"status": "ok"},
-            settings=settings(billing_configured=True),
-            provider_management=manager,
-            solar_data_available=False,
-            now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
-        )
+        with TemporaryDirectory() as directory:
+            manager = ProviderManager(solar_registry(), **manager_paths(directory))
+            checklist = SetupEngine(context_with("solar")).build_checklist(
+                capability_summary(
+                    solar=False,
+                    ev=False,
+                    tariff=True,
+                    latest=datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc),
+                ),
+                collector_health={"status": "ok"},
+                settings=settings(billing_configured=True),
+                provider_management=manager,
+                solar_data_available=False,
+                now=datetime(2026, 6, 28, 9, 0, tzinfo=timezone.utc),
+            )
 
         solar_task = task_by_id(checklist, "connect_solar_provider")
         self.assertEqual(solar_task.status, "action_needed")

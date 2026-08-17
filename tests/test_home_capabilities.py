@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import unittest
 from datetime import date
 
@@ -122,7 +123,7 @@ class HomeCapabilityDetectionTests(unittest.TestCase):
         self.assertCapability(capabilities, "battery_analysis", enabled=False, available=False)
 
     def test_data_engine_can_build_home_capabilities_from_measurement_registry(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine = DataEngine(connection=conn)
 

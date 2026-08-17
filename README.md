@@ -742,14 +742,14 @@ The helper writes plists for:
 
 - `com.local.powermonitor.collector`
 - `com.local.powermonitor.web`
-- `com.local.powermonitor.ocpp` when the Home Assistant OCPP importer is
-  present
 
 These are the only supported LaunchAgent labels. Older installs may have used
-an obsolete namespace; the installer unloads and removes those plists
-automatically before writing the supported `com.local` jobs.
+an obsolete namespace or the retired `com.local.powermonitor.ocpp` service;
+the installer unloads and removes those plists automatically before writing
+the supported jobs. Historical OCPP importer code remains available for
+reference, but OCPP is not part of the active deployment.
 
-It prefers `<project>/.venv/bin/python` and prints the exact reload commands.
+It requires `<project>/.venv/bin/python` and prints the exact reload commands.
 Reload manually with:
 
 ```sh
@@ -757,8 +757,6 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.col
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.collector.plist
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.web.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.ocpp.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.powermonitor.ocpp.plist
 ```
 
 Restart a loaded job immediately with:
@@ -766,7 +764,6 @@ Restart a loaded job immediately with:
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.collector
 launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.web
-launchctl kickstart -k gui/$(id -u)/com.local.powermonitor.ocpp
 ```
 
 Check the interpreter used by a generated plist:

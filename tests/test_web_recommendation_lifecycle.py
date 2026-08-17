@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import threading
@@ -29,7 +30,7 @@ class RecommendationLifecycleWebTests(unittest.TestCase):
         report.DB_PATH = self.db_path
         report.REPORT_PATH = self.report_path
         report.COLLECT_LOG_PATH = self.collect_log_path
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             create_readings(conn)
             insert_reading(conn)
             DataEngine(connection=conn).validate_database()

@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from typing import Any, Optional, Union
 
 from .models import EngineStatus, FinancialImpact, HouseholdContext
+from .billing_period_engine import resolve_billing_cycle
 
 BUCKET_ORDER = ("overnight", "off_peak", "super_off_peak", "peak")
 BATTERY_USABLE_CAPACITIES_KWH = (5.0, 10.0, 15.0, 20.0)
@@ -125,25 +126,25 @@ class FinancialEngine:
         return float(cost) / int(days) * year_days if days else float(cost)
 
     def project_bill(self, summary: Any, settings: Any) -> tuple[float, date, str, FinancialImpact]:
-        if self._value(settings, "current_billing_period_start") and self._value(settings, "current_billing_period_end"):
-            end = self._as_date(self._value(settings, "current_billing_period_end"))
-            start = self._as_date(self._value(settings, "current_billing_period_start"))
-            days = (end - start).days + 1
-            basis = "configured billing end"
-        elif (
-            self._value(settings, "current_billing_period_start")
-            and self._value(settings, "previous_billing_period_start")
-            and self._value(settings, "previous_billing_period_end")
-        ):
-            current_start = self._as_date(self._value(settings, "current_billing_period_start"))
-            previous_start = self._as_date(self._value(settings, "previous_billing_period_start"))
-            previous_end = self._as_date(self._value(settings, "previous_billing_period_end"))
-            days = (previous_end - previous_start).days + 1
-            end = current_start + timedelta(days=days - 1)
-            basis = "previous period length"
-        else:
+        summary_end = self._as_date(self._value(summary, "end"))
+        try:
+            cycle = resolve_billing_cycle(settings, summary_end)
+            if self._as_date(self._value(summary, "start")) == cycle.start:
+                end = cycle.expected_end
+                days = cycle.expected_days
+                basis = (
+                    "configured billing end"
+                    if self._value(settings, "current_billing_period_end")
+                    else "previous period length"
+                    if self._value(settings, "previous_billing_period_start")
+                    and self._value(settings, "previous_billing_period_end")
+                    else "canonical billing cycle"
+                )
+            else:
+                raise ValueError("Summary is not the active billing cycle")
+        except (TypeError, ValueError, AttributeError):
             days = int(self._number(summary, "supply_days"))
-            end = self._as_date(self._value(summary, "end"))
+            end = summary_end
             basis = "selected period"
 
         projected = self._number(summary, "average_daily_net_cost") * max(days, 1)
@@ -461,6 +462,7 @@ class FinancialEngine:
             "tariff_history_warning": tariff_history["warning"],
             "tariff_version": tariff_metadata.get("version_id"),
             "tariff_effective_from": tariff_metadata.get("effective_from"),
+            "tariff_household_effective_from": tariff_metadata.get("effective_from"),
             "tariff_name": tariff_metadata.get("tariff_name"),
             "tariff_metadata": tariff_metadata,
             "baseline": baseline,

@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from datetime import date
@@ -66,14 +67,14 @@ class ReportPerformanceTests(unittest.TestCase):
             original = report.DB_PATH
             report.DB_PATH = db_path
             try:
-                with sqlite3.connect(db_path) as conn:
+                with closing(sqlite3.connect(db_path)) as conn, conn:
                     self.create_readings_table(conn)
                     DataEngine(connection=conn).validate_database()
                     self.insert_reading(conn, "2026-07-13T00:00:00")
 
                 before = report.database_content_signature()
 
-                with sqlite3.connect(db_path) as conn:
+                with closing(sqlite3.connect(db_path)) as conn, conn:
                     self.insert_reading(conn, "2026-07-14T00:00:00")
 
                 after = report.database_content_signature()
@@ -84,7 +85,7 @@ class ReportPerformanceTests(unittest.TestCase):
         self.assertEqual(after["readings"]["latest"], "2026-07-14T00:00:00")
 
     def test_ev_session_source_start_index_exists(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             self.create_readings_table(conn)
             DataEngine(connection=conn).validate_database()
             indexes = {

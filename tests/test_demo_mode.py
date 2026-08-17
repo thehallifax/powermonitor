@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -41,7 +42,7 @@ class DemoModeTests(unittest.TestCase):
             self.assertEqual(weather["source"], "fictional_demo_weather")
             self.assertTrue(recommendations["items"])
 
-            with sqlite3.connect(env.db_path) as conn:
+            with closing(sqlite3.connect(env.db_path)) as conn, conn:
                 DataEngine(connection=conn).validate_database()
                 readings = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
                 sessions = conn.execute("SELECT COUNT(*) FROM ev_sessions").fetchone()[0]

@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
@@ -152,7 +153,7 @@ class TariffVersioningTests(unittest.TestCase):
             ev_data_source="estimated",
             import_rates={"super_off_peak": 9.0, "overnight": 9.0, "off_peak": 9.0, "peak": 9.0},
         )
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             report.data_engine(conn).validate_database()
             summary = report.load_summary(conn, date(2026, 6, 30), date(2026, 7, 1), settings)

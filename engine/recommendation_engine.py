@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from .financial_engine import FinancialEngine
+from .billing_period_engine import resolve_billing_cycle
 from .models import (
     Decision,
     DecisionExplanation,
@@ -628,18 +629,13 @@ def build_recommendation_context(
     if household_context is None and hasattr(data_engine, "get_household_context"):
         household_context = data_engine.get_household_context()
 
-    if settings.current_billing_period_start and settings.current_billing_period_end:
-        projected_end = settings.current_billing_period_end
-        projected_days = (projected_end - settings.current_billing_period_start).days + 1
-    elif (
-        settings.current_billing_period_start
-        and settings.previous_billing_period_start
-        and settings.previous_billing_period_end
-    ):
-        projected_days = (
-            settings.previous_billing_period_end - settings.previous_billing_period_start
-        ).days + 1
-        projected_end = settings.current_billing_period_start + timedelta(days=projected_days - 1)
+    try:
+        cycle = resolve_billing_cycle(settings, end)
+        if start == cycle.start:
+            projected_end = cycle.expected_end
+            projected_days = cycle.expected_days
+    except (TypeError, ValueError, AttributeError):
+        pass
 
     projected_bill = financial_engine.project_bill(current_summary, settings)
     return {

@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from dataclasses import dataclass, field
@@ -111,7 +112,7 @@ class BillReconciliationEngineTests(unittest.TestCase):
     def test_persistence_updates_existing_reconciliation_and_redacts_bill_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
             db_path = Path(temporary) / "power.sqlite"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 create_readings(conn)
                 engine = DataEngine(connection=conn)
                 engine.validate_database()

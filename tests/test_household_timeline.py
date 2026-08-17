@@ -1,6 +1,7 @@
 import json
 import io
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import unittest
@@ -168,7 +169,7 @@ class HouseholdTimelineTests(unittest.TestCase):
             timeline_path = Path(temp_dir) / "household_timeline.json"
             timeline_path.write_text(json.dumps(mixed_timeline().as_dict()), encoding="utf-8")
             with patch.object(report, "HOUSEHOLD_TIMELINE_PATH", timeline_path):
-                with sqlite3.connect(":memory:") as conn:
+                with closing(sqlite3.connect(":memory:")) as conn, conn:
                     create_readings(conn)
                     report.data_engine(conn).validate_database()
                     summary = report.load_summary(conn, date(2026, 4, 30), date(2026, 5, 1), settings())

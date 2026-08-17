@@ -1,6 +1,7 @@
 import sys
 import unittest
 import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
@@ -100,7 +101,7 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertEqual(analytics["insights"]["highest_power_session"]["max_power_kw"], 7.2)
 
     def test_completed_historical_ocular_session_counts_as_actual(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn, "2026-07-04T23:30:00", grid_to_home_w=5000.0)
             create_ev_sessions(conn)
             insert_ev_session(conn, "hist-1", "2026-07-04T20:00:00", "2026-07-04T22:00:00", 18.0)
@@ -113,7 +114,7 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertTrue(summary.ev_session_analytics["available"])
 
     def test_same_day_zero_ocular_session_is_ignored_for_actual_totals(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn, "2026-07-05T23:30:00", grid_to_home_w=5000.0)
             create_ev_sessions(conn)
             insert_ev_session(conn, "today-zero", "2026-07-05T10:00:00", "2026-07-05T10:00:00", 0.0)
@@ -129,7 +130,7 @@ class EvAnalyticsTests(unittest.TestCase):
     def test_fallback_and_actual_labels_are_not_shown_together_for_today_zero_session(self):
         today = report.local_today()
         day_text = today.isoformat()
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn, f"{day_text}T23:30:00", grid_to_home_w=5000.0)
             create_ev_sessions(conn)
             insert_ev_session(conn, "today-zero", f"{day_text}T10:00:00", f"{day_text}T10:00:00", 0.0)
@@ -144,7 +145,7 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertNotIn("<h3>Actual EV charging</h3>", html)
 
     def test_mixed_period_uses_completed_actuals_and_mentions_ignored_sessions(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn, "2026-07-04T23:30:00", grid_to_home_w=5000.0)
             create_readings(conn, "2026-07-05T23:30:00", grid_to_home_w=5000.0)
             create_ev_sessions(conn)
@@ -163,7 +164,7 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertIn("zero-kWh or incomplete charger session ignored", html)
 
     def test_history_actual_ev_charging_uses_same_completed_sessions_as_ev_page(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_ev_sessions(conn)
             for day in range(10, 15):
                 create_readings(conn, f"2026-07-{day:02d}T23:30:00", grid_to_home_w=5000.0)
@@ -189,7 +190,7 @@ class EvAnalyticsTests(unittest.TestCase):
         self.assertEqual([trend.ev_charging_kwh for trend in trends[1:]], [0.0, 0.0, 0.0, 0.0])
 
     def test_historical_session_import_updates_ev_page_and_history_dates_totals_and_ordering(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_ev_sessions(conn)
             for day in range(10, 15):
                 create_readings(conn, f"2026-07-{day:02d}T23:30:00", grid_to_home_w=5000.0)

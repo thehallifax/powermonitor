@@ -24,6 +24,7 @@ from .ev_charging_inference import (
     split_energy_by_tariff,
 )
 from .bill_reconciliation_engine import BillReconciliation
+from .billing_period_engine import resolve_billing_cycle
 from .decision_engine import DecisionEngine
 from .models import (
     Account,
@@ -171,8 +172,12 @@ class DataEngine:
             raise FileNotFoundError("No database path configured")
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
-        with sqlite3.connect(self.db_path) as conn:
-            return callback(conn)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                return callback(conn)
+        finally:
+            conn.close()
 
     def validate_database(self) -> None:
         return self._with_connection(self.validate_connection)
@@ -1176,27 +1181,11 @@ class DataEngine:
             )
 
     def get_bill_period(self, today: date, settings: Any, kind: str = "current_billing_period") -> BillPeriod:
+        cycle = resolve_billing_cycle(settings, today)
         if kind == "current_billing_period":
-            start_day = int(settings.billing_period_start_day)
-            period_start = today.replace(day=start_day) if today.day >= start_day else (
-                today.replace(day=1) - timedelta(days=1)
-            ).replace(day=start_day)
-            period_end = today
-            if getattr(settings, "current_billing_period_start", None):
-                period_start = settings.current_billing_period_start
-            return BillPeriod(kind, "Current billing period", period_start, period_end)
+            return BillPeriod(kind, "Current billing period", cycle.start, cycle.data_through)
         if kind == "previous_billing_period":
-            if getattr(settings, "previous_billing_period_start", None) and getattr(settings, "previous_billing_period_end", None):
-                return BillPeriod(
-                    kind,
-                    "Previous billing period",
-                    settings.previous_billing_period_start,
-                    settings.previous_billing_period_end,
-                )
-            current = self.get_bill_period(today, settings)
-            days = (current.end - current.start).days + 1
-            end = current.start - timedelta(days=1)
-            return BillPeriod(kind, "Previous billing period", end - timedelta(days=days - 1), end)
+            return BillPeriod(kind, "Previous billing period", cycle.previous_start, cycle.previous_end)
         raise ValueError(f"Unsupported bill period: {kind}")
 
     def get_current_bill_summary(self, start: date, end: date) -> dict[str, Any]:

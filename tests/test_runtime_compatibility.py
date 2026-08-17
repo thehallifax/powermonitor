@@ -85,15 +85,83 @@ class RuntimeCompatibilityTests(unittest.TestCase):
             (root / "collector" / "web.py").write_text("", encoding="utf-8")
             launch_dir = Path(temporary) / "LaunchAgents"
 
-            self.assertEqual(install_launch_agents.discover_python(root), python_path.resolve())
+            self.assertEqual(install_launch_agents.discover_python(root), python_path.absolute())
             written = install_launch_agents.write_launch_agents(project_root=root, launch_agents_dir=launch_dir, selected=("collector", "web"))
 
             self.assertEqual(len(written), 2)
             for path in written:
                 with path.open("rb") as handle:
                     plist = plistlib.load(handle)
-                self.assertEqual(plist["ProgramArguments"][0], str(python_path.resolve()))
+                self.assertEqual(plist["ProgramArguments"][0], str(python_path.absolute()))
                 self.assertNotEqual(plist["ProgramArguments"][0], "/usr/bin/python3")
+
+    def test_launch_agent_generator_rejects_system_python_and_missing_venv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PowerMonitor"
+            (root / "collector").mkdir(parents=True)
+
+            with self.assertRaises(FileNotFoundError):
+                install_launch_agents.discover_python(root)
+            with self.assertRaisesRegex(ValueError, "virtualenv Python"):
+                install_launch_agents.write_launch_agents(
+                    project_root=root,
+                    python_executable=Path(sys.executable),
+                    launch_agents_dir=Path(temporary) / "LaunchAgents",
+                )
+
+    def test_launch_agent_generator_does_not_create_ocpp_and_cleans_retired_plist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PowerMonitor"
+            python_path = root / ".venv" / "bin" / "python"
+            python_path.parent.mkdir(parents=True)
+            python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+            retired = launch_dir / "com.local.powermonitor.ocpp.plist"
+            with retired.open("wb") as handle:
+                plistlib.dump({"Label": "com.local.powermonitor.ocpp"}, handle)
+
+            definitions = install_launch_agents.launch_agent_definitions(root, python_path)
+            with patch("install_launch_agents.subprocess.run"):
+                first = install_launch_agents.remove_obsolete_launch_agents(launch_dir)
+                second = install_launch_agents.remove_obsolete_launch_agents(launch_dir)
+
+            self.assertNotIn("com.local.powermonitor.ocpp", definitions)
+            self.assertFalse(retired.exists())
+            self.assertTrue(any("Removed obsolete plist" in item for item in first))
+            self.assertFalse(any("Removed obsolete plist" in item for item in second))
+
+    def test_launch_agent_validator_rejects_wrong_python_and_retired_ocpp(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "PowerMonitor"
+            launch_dir = Path(temporary) / "LaunchAgents"
+            launch_dir.mkdir()
+            python_path = root / ".venv" / "bin" / "python"
+            python_path.parent.mkdir(parents=True)
+            python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            supported = {
+                "collector": {"label": "com.local.powermonitor.collector", "script": root / "collector" / "collect_today.py"},
+                "web": {"label": "com.local.powermonitor.web", "script": root / "collector" / "web.py"},
+            }
+            for data in supported.values():
+                with (launch_dir / f"{data['label']}.plist").open("wb") as handle:
+                    plistlib.dump({
+                        "Label": data["label"],
+                        "ProgramArguments": ["/usr/local/bin/python3", str(data["script"])],
+                        "WorkingDirectory": str(root),
+                    }, handle)
+            with (launch_dir / "com.local.powermonitor.ocpp.plist").open("wb") as handle:
+                plistlib.dump({"Label": "com.local.powermonitor.ocpp", "ProgramArguments": ["/usr/local/bin/python3", "import_ha_ocpp.py"]}, handle)
+
+            with patch.object(validate_launch_agents, "PROJECT_ROOT", root), patch.object(validate_launch_agents, "SUPPORTED", supported):
+                result = validate_launch_agents.validate(
+                    launch_dir,
+                    loaded_labels=["com.local.powermonitor.collector", "com.local.powermonitor.web", "com.local.powermonitor.ocpp"],
+                )
+
+            self.assertTrue(any("incorrect Python executable" in issue for issue in result["issues"]))
+            self.assertTrue(any("retired OCPP plist" in issue for issue in result["issues"]))
+            self.assertTrue(any("retired OCPP service" in issue for issue in result["issues"]))
 
     def test_launch_agent_generator_removes_obsolete_namespace(self):
         with tempfile.TemporaryDirectory() as temporary:

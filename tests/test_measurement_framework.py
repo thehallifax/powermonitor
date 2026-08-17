@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 import unittest
 from datetime import date
 
@@ -115,7 +116,7 @@ class UniversalMeasurementFrameworkTests(unittest.TestCase):
         )
 
     def test_data_engine_loads_measurement_registry_from_readings(self):
-        with sqlite3.connect(":memory:") as conn:
+        with closing(sqlite3.connect(":memory:")) as conn, conn:
             create_readings(conn)
             engine = DataEngine(connection=conn)
 

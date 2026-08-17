@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from .billing_period_engine import resolve_billing_cycle
+
 
 COMPARISON_TYPES = (
     "previous_billing_period",
@@ -137,8 +139,9 @@ def _primary_for_type(comparison_type: str, primary_period: Any, today: date, se
                 _value(primary_period, "start"),
                 _value(primary_period, "end"),
             )
-        period_start = _value(settings, "current_billing_period_start") or _value(primary_period, "start")
-        period_end = _value(primary_period, "end")
+        cycle = resolve_billing_cycle(settings, today)
+        period_start = cycle.start
+        period_end = cycle.data_through
         return ComparisonPeriod("current_billing_period", "Current billing period", period_start, period_end)
     if comparison_type == "same_month_last_year":
         return ComparisonPeriod("this_month", "Current month", date(today.year, today.month, 1), today)
@@ -156,10 +159,14 @@ def _primary_for_type(comparison_type: str, primary_period: Any, today: date, se
 
 def _comparison_for_type(comparison_type: str, primary: ComparisonPeriod, settings: Any) -> ComparisonPeriod:
     if comparison_type == "previous_billing_period":
-        start = _value(settings, "previous_billing_period_start")
-        end = _value(settings, "previous_billing_period_end")
-        if primary.kind == "current_billing_period" and start and end:
-            return ComparisonPeriod("previous_billing_period", "Previous billing period", start, end)
+        if primary.kind == "current_billing_period":
+            cycle = resolve_billing_cycle(settings, primary.end)
+            return ComparisonPeriod(
+                "previous_billing_period",
+                "Previous billing period",
+                cycle.previous_start,
+                cycle.previous_end,
+            )
         end = primary.start - timedelta(days=1)
         return ComparisonPeriod("previous_billing_period", "Previous billing period", end - timedelta(days=primary.day_count - 1), end)
     if comparison_type == "same_month_last_year":

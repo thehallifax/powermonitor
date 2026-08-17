@@ -29,7 +29,6 @@ import validate_launch_agents
 SUPPORTED_LABELS = {
     "collector": "com.local.powermonitor.collector",
     "web": "com.local.powermonitor.web",
-    "ocpp": "com.local.powermonitor.ocpp",
 }
 DEFAULT_STALE_REPORT_MINUTES = 20.0
 
@@ -150,8 +149,6 @@ def role_from_command(command: str) -> Optional[str]:
         return "collector"
     if "web.py" in command:
         return "web"
-    if "import_ha_ocpp.py" in command:
-        return "ocpp"
     return None
 
 
@@ -186,7 +183,7 @@ def plist_runtime_mismatches(
     expected_working_directory: Path = PROJECT_ROOT,
     expected_executable: Optional[Path] = None,
 ) -> dict[str, Any]:
-    expected_executable = (expected_executable or Path(sys.executable)).resolve()
+    expected_executable = (expected_executable or (PROJECT_ROOT / ".venv" / "bin" / "python")).absolute()
     wrong_working_directory = []
     mismatched_executable = []
     for role, label in SUPPORTED_LABELS.items():
@@ -200,7 +197,7 @@ def plist_runtime_mismatches(
             continue
         working_directory = plist.get("WorkingDirectory")
         args = [str(item) for item in plist.get("ProgramArguments", [])]
-        executable = Path(args[0]).resolve() if args else None
+        executable = Path(args[0]).absolute() if args else None
         if working_directory != str(expected_working_directory):
             wrong_working_directory.append({"label": label, "working_directory": working_directory})
         if executable != expected_executable:
@@ -241,12 +238,17 @@ def diagnostics_payload(
     report_path = canonical_report_path()
     host, port = resolve_web_bind()
     launch_agents = validate_launch_agents.validate()
-    plist_mismatches = plist_runtime_mismatches(expected_executable=Path(sys.executable))
+    expected_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    plist_mismatches = plist_runtime_mismatches(expected_executable=expected_python)
     process_duplicates = duplicate_processes()
     listener_duplicates = duplicate_listeners(port)
     stale = stale_report(report_path, stale_minutes)
     missing = missing_files(report_path)
     battery_catalogue = load_battery_catalogue().summary()
+    try:
+        billing_period = report.resolve_billing_cycle(report.load_settings(), report.local_today()).as_dict()
+    except (OSError, ValueError, TypeError) as exc:
+        billing_period = {"error": exc.__class__.__name__}
     issues = []
     issues.extend(launch_agents.get("issues") or [])
     if process_duplicates["duplicate_roles"]:
@@ -266,6 +268,9 @@ def diagnostics_payload(
         issues.append("live dashboard does not match report hash")
     if battery_catalogue.get("errors"):
         issues.append("battery catalogue validation errors")
+    if billing_period.get("error"):
+        issues.append("active billing period cannot be resolved")
+    issues.extend(billing_period.get("warnings") or [])
     return {
         "ok": not issues,
         "canonical_report_path": str(report_path),
@@ -277,8 +282,10 @@ def diagnostics_payload(
         "stale_report": stale,
         "wrong_working_directory": plist_mismatches["wrong_working_directory"],
         "mismatched_executable": plist_mismatches["mismatched_executable"],
+        "expected_python_executable": str(expected_python),
         "missing_files": missing,
         "battery_catalogue": battery_catalogue,
+        "billing_period": billing_period,
         "issues": sorted(set(issues)),
     }
 

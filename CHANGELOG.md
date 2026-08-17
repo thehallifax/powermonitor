@@ -1,5 +1,20 @@
 # Changelog
 
+## OPS-024 - Production runtime audit and cleanup
+
+- Verified report, web, comparison, projection, and Data Engine billing paths use the canonical rollover resolver and added a production-style report regression.
+- Made Data Engine and report-owned SQLite connections close deterministically instead of relying on transaction context managers to release file handles.
+- Clarified battery tariff metadata as the household tariff adoption date and isolated provider/timeline tests from production runtime state.
+- Required LaunchAgents to use the project virtualenv, retired OCPP from active service management, and added idempotent stale-plist cleanup and validation.
+- Updated runtime diagnostics and LaunchAgent documentation for the two active services.
+
+## BUG-025 - Current billing-period rollover
+
+- Added one canonical billing-cycle resolver that advances stale configured anchors through every elapsed cycle using the established bill cadence.
+- Separated accrued data-through dates from expected billing-period ends and exposed boundary provenance through API and diagnostics payloads.
+- Updated current/previous selectors, Financial Engine projections, Data Engine periods, and FIN-006 comparisons to share the corrected boundaries.
+- Added regression coverage for boundary days, multi-cycle rollover, authoritative history, predicted periods, leap/month transitions, projections, comparisons, and local timezone dates.
+
 ## BAT-008A - Simplified Battery Quote Comparison UX
 
 - Simplified installer quote entry so the primary form asks for quote details a
