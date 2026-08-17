@@ -61,6 +61,25 @@ class ProviderSyncState(str, Enum):
 SENSITIVE_FIELDS = {"username", "password", "cookie", "api_key", "token", "secret"}
 SOLAREDGE_PRIMARY_FIELDS = {"username", "password"}
 SOLAREDGE_COOKIE_FALLBACK_FIELDS = {"cookie"}
+PROVIDER_ACTION_ALIASES = {
+    "configure": "configure",
+    "edit": "edit",
+    "edit_configuration": "edit",
+    "save": "save",
+    "test": "test",
+    "test_connection": "test",
+    "fix_connection": "reconnect",
+    "reconnect": "reconnect",
+    "reset": "reset",
+    "disable": "disable",
+    "enable": "enable",
+    "remove": "remove",
+    "diagnostics": "diagnostics",
+    "setup_help": "setup_help",
+    "import": "import",
+    "view_imported_data": "view_imported_data",
+}
+EXECUTABLE_PROVIDER_ACTIONS = {"configure", "edit", "save", "test", "reconnect", "reset", "disable", "enable", "remove"}
 
 
 @dataclass(frozen=True)
@@ -551,7 +570,9 @@ class ProviderManager:
         )
 
     def action(self, provider_id: str, action: str, values: Optional[dict[str, Any]] = None) -> ProviderActionResult:
-        normalized = action.strip().lower().replace(" ", "_")
+        normalized = self.resolve_action(provider_id, action)
+        if normalized not in EXECUTABLE_PROVIDER_ACTIONS:
+            raise ValueError(f"Provider action is navigation-only: {action}")
         values = values or {}
         if normalized in {"configure", "edit", "save"}:
             configuration = self.configure(provider_id, values)
@@ -633,14 +654,32 @@ class ProviderManager:
         raise ValueError(f"Unsupported provider action: {action}")
 
     def transition(self, provider_id: str, action: str) -> ManagedProvider:
+        self.resolve_action(provider_id, action)
+        provider = self.get(provider_id)
+        if provider is None:
+            raise ValueError(f"Unknown provider: {provider_id}")
+        return provider
+
+    def resolve_action(self, provider_id: str, action: str) -> str:
         provider = self.get(provider_id)
         if provider is None:
             raise ValueError(f"Unknown provider: {provider_id}")
         normalized = action.strip().lower().replace(" ", "_")
+        if normalized in EXECUTABLE_PROVIDER_ACTIONS:
+            return PROVIDER_ACTION_ALIASES[normalized]
         allowed = {item.lower().replace(" ", "_") for item in provider.actions}
+        provider_state = provider.as_dict().get("provider_state") or {}
+        allowed.update(
+            str(item).strip().lower().replace(" ", "_")
+            for item in provider_state.get("available_actions", [])
+            if item
+        )
         if normalized not in allowed:
             raise ValueError(f"Unsupported provider action: {action}")
-        return provider
+        resolved = PROVIDER_ACTION_ALIASES.get(normalized)
+        if not resolved:
+            raise ValueError(f"Unsupported provider action: {action}")
+        return resolved
 
     def _state_action(
         self,

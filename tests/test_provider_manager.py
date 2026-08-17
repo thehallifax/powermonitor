@@ -385,10 +385,21 @@ class ProviderManagerTests(unittest.TestCase):
         self.assertIn("runtime_success", onboarding["health_factors"])
 
     def test_provider_removal_and_reconnect_flow_actions_are_model_driven(self):
-        manager = ProviderManager(registry())
+        manager = ProviderManager(registry_with_home_assistant())
 
         self.assertEqual(manager.transition("solaredge", "Fix Connection").provider_id, "solaredge")
+        self.assertEqual(manager.resolve_action("solaredge", "Fix Connection"), "reconnect")
         self.assertEqual(manager.transition("solaredge", "Remove").provider_id, "solaredge")
+        for provider in manager.providers():
+            payload = provider.as_dict()
+            actions = set(provider.actions)
+            actions.update(payload["provider_state"].get("available_actions") or [])
+            for action in actions:
+                with self.subTest(provider=provider.provider_id, action=action):
+                    resolved = manager.resolve_action(provider.provider_id, action)
+                    self.assertIsInstance(resolved, str)
+                    self.assertTrue(resolved)
+                    self.assertEqual(manager.transition(provider.provider_id, action).provider_id, provider.provider_id)
         with self.assertRaises(ValueError):
             manager.transition("solaredge", "Rotate The Moon")
 
