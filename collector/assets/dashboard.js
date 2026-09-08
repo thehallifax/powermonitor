@@ -5,6 +5,7 @@
   const DEEP_LINK_PAGES = {
     recommendations: "whatif",
     "battery-investment": "whatif",
+    "battery-quotes": "whatif",
     "home-goals": "whatif",
     timeline: "analytics",
     setup: "system",
@@ -310,12 +311,50 @@
     }
   }
 
+  function updateBatteryQuoteForm(form) {
+    const select = form.querySelector('select[name="product_id"]');
+    const moduleField = form.querySelector(".battery-quote-module-field");
+    const moduleInput = form.querySelector("[data-module-count]");
+    const capacityDisplay = form.querySelector("[data-capacity-display]");
+    const capacityHidden = form.querySelector("[data-configured-capacity]");
+    if (!select || !capacityDisplay || !capacityHidden) return;
+    const selected = select.options[select.selectedIndex];
+    const modular = selected && selected.dataset.modular === "true";
+    const moduleSize = Number((selected && selected.dataset.moduleSize) || 0);
+    const fixedCapacity = Number((selected && selected.dataset.capacity) || 0);
+    if (moduleField) moduleField.classList.toggle("visible", Boolean(modular));
+    let capacity = fixedCapacity;
+    if (modular) {
+      const modules = Number((moduleInput && moduleInput.value) || 0);
+      capacity = modules > 0 && moduleSize > 0 ? modules * moduleSize : 0;
+    }
+    if (capacity > 0) {
+      const rounded = Math.round(capacity * 10) / 10;
+      capacityDisplay.value = rounded + " kWh";
+      capacityHidden.value = rounded;
+    } else {
+      capacityDisplay.value = select.value ? "Enter module count" : "Choose a product";
+      capacityHidden.value = "";
+    }
+  }
+
+  function initBatteryQuoteForms() {
+    document.querySelectorAll("[data-battery-quote-form]").forEach((form) => {
+      updateBatteryQuoteForm(form);
+      form.addEventListener("change", () => updateBatteryQuoteForm(form));
+      form.addEventListener("input", (event) => {
+        if (event.target && event.target.matches("[data-module-count]")) updateBatteryQuoteForm(form);
+      });
+    });
+  }
+
   window.addEventListener("DOMContentLoaded", function () {
     navigateToHash();
     window.addEventListener("hashchange", () => navigateToHash({ smooth: true }));
     window.addEventListener("popstate", () => navigateToHash({ smooth: true }));
     window.addEventListener("load", navigateToHash);
     document.addEventListener("click", handleSamePageAnchorClick);
+    initBatteryQuoteForms();
 
     document.querySelectorAll(".provider-config-form").forEach((form) => {
       form.addEventListener("submit", (event) => {
