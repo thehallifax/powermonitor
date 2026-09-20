@@ -28,6 +28,10 @@ from engine.historical_backfill import (
     resolve_backfill_range,
 )
 from engine.models import to_api_safe
+from engine.period_summary import PeriodSummaryService
+from presentation.simplified_app import dashboard as simplified_dashboard_html
+from presentation.simplified_app import ev_sessions as simplified_ev_html
+from presentation.simplified_app import settings as simplified_settings_html
 from engine.runtime_diagnostics import runtime_diagnostics
 from engine.tariff_catalog import (
     BUCKET_ORDER,
@@ -422,6 +426,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 self.serve_dashboard(params)
+            elif path == "/ev":
+                self.serve_simplified_ev(params)
+            elif path == "/settings":
+                self.serve_simplified_settings(params)
             elif path == "/glance":
                 self.serve_glance(params)
             elif path == "/reports/index.html":
@@ -437,6 +445,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         comparison_type=self.param(params, "comparison_type", "previous_billing_period"),
                     )
                 )
+            elif path == "/api/period-summary":
+                self.send_json(self.simplified_summary(params))
             elif path in {"/api/setup_progress", "/api/setup_tasks", "/api/setup_sections"}:
                 self.send_json(self.setup_api_payload(path, params))
             elif path == "/api/providers":
@@ -478,7 +488,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         request = urlsplit(self.path)
         try:
-            if request.path == "/recommendations/lifecycle":
+            if request.path == "/ev/import":
+                self.import_ev_sessions()
+            elif request.path == "/settings/tariff/add":
+                self.add_simplified_tariff()
+            elif request.path == "/recommendations/lifecycle":
                 self.update_recommendation_lifecycle()
             elif request.path == "/battery-quotes/save":
                 self.save_battery_quote()
@@ -512,7 +526,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, status=404)
         except (HistoricalBackfillRouteError, FileNotFoundError, ValueError, RuntimeError, sqlite3.Error, OSError) as exc:
             logging.error("POST failed for %s", request.path)
-            if request.path.startswith("/imports/"):
+            if request.path == "/ev/import":
+                self.redirect("/ev?" + urlencode({"message": "Import failed. Check that the Ocular file has the required session columns."}))
+            elif request.path.startswith("/imports/"):
                 self.send_import_error("We could not read that file. Please choose a supported Ocular Excel export or Synergy PDF bill and try again.", status=400)
             elif request.path == "/setup/billing-cycle":
                 result_html = self.import_result_html(
@@ -1420,25 +1436,125 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_html(result_html.encode("utf-8"))
 
     def serve_dashboard(self, params: dict) -> None:
-        provider_flash = provider_flash_from_params(params)
-        tariff_flash = tariff_update_flash_from_params(params)
-        historical_backfill_flash = historical_backfill_flash_from_params(params)
-        comparison_type = self.param(params, "comparison_type", "previous_billing_period")
-        requested_period, period_kind, start, end, period_flash = self.requested_dashboard_period(params)
-        if provider_flash or tariff_flash or historical_backfill_flash or requested_period:
-            content = report.build_live_html(
-                period_kind,
-                start,
-                end,
-                comparison_type=comparison_type,
-                provider_flash=provider_flash,
-                tariff_update_flash=tariff_flash,
-                historical_backfill_flash=historical_backfill_flash,
-                period_flash=period_flash,
-            ).encode("utf-8")
-            self.send_html(content)
-            return
-        self.serve_static_report()
+        try:
+            summary = self.simplified_summary(params)
+        except ValueError:
+            summary = self.simplified_summary({"period": ["this_month"]})
+            summary["tariff"]["warnings"].append("Choose a valid date range.")
+        period = summary["period"]
+        content = simplified_dashboard_html(
+            summary,
+            self.param(params, "period", "this_month"),
+            period["start"][:10],
+            (date.fromisoformat(period["end"][:10]) - timedelta(days=1)).isoformat(),
+        )
+        self.send_html(content.encode("utf-8"))
+
+    def simplified_summary(self, params: dict) -> dict:
+        today = report.local_today()
+        kind = self.param(params, "period", "this_month")
+        if kind not in {"this_month", "last_month", "this_year", "custom"}:
+            raise ValueError("Choose This month, Last month, This year, or Custom.")
+        if kind == "this_month":
+            start, end = today.replace(day=1), today
+        elif kind == "last_month":
+            last_day = today.replace(day=1) - timedelta(days=1)
+            start, end = last_day.replace(day=1), last_day
+        elif kind == "this_year":
+            start, end = today.replace(month=1, day=1), today
+        else:
+            start = date.fromisoformat(self.param(params, "start", ""))
+            end = date.fromisoformat(self.param(params, "end", ""))
+            if start > end:
+                raise ValueError("Custom start date must not be after the end date.")
+        settings = report.load_settings()
+        with report.open_sqlite(report.DB_PATH) as conn:
+            service = PeriodSummaryService(
+                data_engine=report.data_engine(conn),
+                tariff_resolver=report.tariff_resolver(settings),
+            )
+            return service.get_period_summary(start, end)
+
+    def serve_simplified_ev(self, params: dict) -> None:
+        try:
+            summary = self.simplified_summary(params)
+        except ValueError:
+            summary = self.simplified_summary({"period": ["this_month"]})
+        period = summary["period"]
+        content = simplified_ev_html(
+            summary,
+            self.param(params, "period", "this_month"),
+            period["start"][:10],
+            (date.fromisoformat(period["end"][:10]) - timedelta(days=1)).isoformat(),
+            self.param(params, "message", ""),
+        )
+        self.send_html(content.encode("utf-8"))
+
+    def serve_simplified_settings(self, params: dict) -> None:
+        settings = report.load_settings()
+        timeline = report.household_timeline(settings)
+        tariffs = []
+        for event in timeline.tariff_periods():
+            tariff = event.tariff_version().as_dict()
+            tariff["rates"] = ", ".join(
+                f"{bucket.replace('_', ' ')} {float(rate) * 100:.2f}¢/kWh"
+                for bucket, rate in sorted(dict(tariff.get("usage_rates") or {}).items())
+            )
+            tariffs.append(tariff)
+        solar_configured = str(getattr(settings, "solar_setup_choice", "")) == "solaredge"
+        content = simplified_settings_html(
+            tariffs,
+            solar_configured,
+            "Australia/Perth",
+            self.param(params, "message", ""),
+        )
+        self.send_html(content.encode("utf-8"))
+
+    def import_ev_sessions(self) -> None:
+        filename, content = self.read_uploaded_file()
+        upload_path = self.write_upload(filename, content)
+        importer = detect_importer(upload_path, self.importers())
+        if importer is None or not importer.source.source_id.startswith("ocular_"):
+            upload_path.unlink(missing_ok=True)
+            raise ValueError("Choose an Ocular CSV or Excel charging-session export.")
+        parsed = importer.parse(upload_path)
+        preview = importer.preview(parsed)
+        if any(issue.severity == "error" for issue in preview.issues):
+            upload_path.unlink(missing_ok=True)
+            raise ValueError("The Ocular export has invalid session rows.")
+        engine = report.data_engine()
+        engine.validate_database()
+        job = engine.create_import_job(importer.source, filename, upload_path, preview=preview, status="previewed", message="Ready to import")
+        result = importer.commit(parsed, engine.get_household_context(), job_id=job["job_id"])
+        engine.update_import_job(job["job_id"], result.status, result=result, message=result.message)
+        message = f"{result.inserted_records} new sessions imported; {result.updated_records} existing sessions refreshed."
+        self.redirect("/ev?" + urlencode({"message": message}))
+
+    def add_simplified_tariff(self) -> None:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        params = parse_qs(self.rfile.read(length).decode("utf-8"))
+        settings = report.load_settings()
+        store = report.household_timeline_store()
+        previous = store.load(settings)
+        new_start = self.parse_timeline_date(self.param(params, "effective_from"), "effective from")
+        active = previous.active_tariff_period(new_start)
+        new_tariff = self.timeline_tariff_version(params, new_start, None)
+        new_event = report.HouseholdTimelineEvent.tariff_period(
+            new_tariff, effective_from=new_start, source="manual_settings", confidence="high"
+        )
+        if active and active.effective_to is None:
+            if new_start <= active.effective_from:
+                raise ValueError("The new tariff must start after the current tariff starts.")
+            metadata = dict(active.metadata)
+            tariff = dict(metadata.get("tariff") or {})
+            tariff["effective_to"] = (new_start - timedelta(days=1)).isoformat()
+            metadata["tariff"] = tariff
+            closed = active.with_updates(effective_to=new_start - timedelta(days=1), metadata=metadata)
+            updated = previous.replace_event(active.event_id, closed).add_event(new_event)
+        else:
+            updated = previous.add_event(new_event)
+        store.save(updated, action="add_simplified_tariff", previous=previous)
+        self.redirect("/settings?" + urlencode({"message": "Tariff period saved. Historical periods were preserved."}))
 
     def serve_glance(self, params: dict) -> None:
         content = report.build_live_html(
@@ -1484,6 +1600,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @staticmethod
     def importers():
         return [
+            import_ocular_export.OcularCSVImporter(report.DB_PATH),
             import_ocular_export.OcularEVImporter(report.DB_PATH),
             import_synergy_bill.SynergyBillImporter(report.DB_PATH),
         ]

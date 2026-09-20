@@ -46,7 +46,8 @@ class RecommendationLifecycleWebTests(unittest.TestCase):
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         try:
             dashboard = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
-            self.assertIn("Recommendations", dashboard)
+            self.assertIn("Household electricity", dashboard)
+            self.assertNotIn("Recommendations", dashboard)
 
             post(base_url, "peak_cost_reduction", "dismiss")
             lifecycle = lifecycle_state("peak_cost_reduction", self.db_path)

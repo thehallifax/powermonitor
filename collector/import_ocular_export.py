@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import csv
 import json
 import logging
 import re
@@ -367,11 +368,27 @@ OCULAR_IMPORT_SOURCE = ImportSource(
     description="Ocular charger history workbook export",
 )
 
+OCULAR_CSV_IMPORT_SOURCE = ImportSource(
+    source_id="ocular_csv",
+    display_name="Ocular EV charging CSV",
+    supported_extensions=(".csv",),
+    description="Ocular charger session CSV export",
+)
+
+CSV_COLUMNS = {
+    "record_number": ("Transaction ID", "Record number"),
+    "start_time": ("Charging start time", "Start time"),
+    "end_time": ("Charging stop time", "End time"),
+    "energy_kwh": ("Charging amount (kWh)", "Energy (kWh)"),
+}
+CSV_DURATION_COLUMNS = ("Charging duration (min)", "Duration (min)")
+
 
 def import_record(
     conn: sqlite3.Connection,
     record: dict,
     household_id: str = DEFAULT_HOUSEHOLD_ID,
+    source: str = SOURCE,
 ) -> bool:
     transaction_id = str(record["record_number"]).strip()
     if not transaction_id:
@@ -460,7 +477,7 @@ def import_record(
             disconnected_at.isoformat(timespec="seconds") if disconnected_at else None,
             (disconnected_at or connected_at).isoformat(timespec="seconds"),
             energy_kwh,
-            SOURCE,
+            source,
             cost,
             json.dumps(breakdown, sort_keys=True),
             0.0,
@@ -479,7 +496,42 @@ def import_record(
 
 
 def parse_file(path: Path) -> list[dict]:
+    if path.suffix.lower() == ".csv":
+        return csv_records(path)
     return row_dicts(read_xlsx(path))
+
+
+def csv_records(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError("Ocular CSV is missing a header row")
+        headers = {normalize_header(name): name for name in reader.fieldnames if name}
+        positions = {}
+        for key, aliases in CSV_COLUMNS.items():
+            for alias in aliases:
+                original = headers.get(normalize_header(alias))
+                if original:
+                    positions[key] = original
+                    break
+            else:
+                raise ValueError(f"Missing Ocular CSV column: {' or '.join(aliases)}")
+        duration_header = next(
+            (headers[normalize_header(alias)] for alias in CSV_DURATION_COLUMNS if normalize_header(alias) in headers),
+            None,
+        )
+        records = []
+        for row in reader:
+            if not any(str(value or "").strip() for value in row.values()):
+                continue
+            records.append({
+                **{key: row.get(header, "") for key, header in positions.items()},
+                "duration": row.get(duration_header, "") if duration_header else "",
+                "charger_number": "",
+                "starting_user": "",
+                "stopping_user": "",
+            })
+    return records
 
 
 def parse_optional_datetime(value) -> Optional[datetime]:
@@ -527,7 +579,11 @@ def validate_records(records: list[dict]) -> list[ImportValidationIssue]:
     return issues
 
 
-def preview_records(records: list[dict], issues: Optional[list[ImportValidationIssue]] = None) -> ImportPreview:
+def preview_records(
+    records: list[dict],
+    issues: Optional[list[ImportValidationIssue]] = None,
+    source: ImportSource = OCULAR_IMPORT_SOURCE,
+) -> ImportPreview:
     issues = issues or validate_records(records)
     error_rows = {issue.row for issue in issues if issue.severity == "error" and issue.row is not None}
     starts = []
@@ -557,7 +613,7 @@ def preview_records(records: list[dict], issues: Optional[list[ImportValidationI
                 }
             )
     return ImportPreview(
-        source=OCULAR_IMPORT_SOURCE,
+        source=source,
         total_records=len(records),
         valid_records=max(len(records) - len(error_rows), 0),
         date_start=min(starts).date().isoformat() if starts else None,
@@ -572,28 +628,30 @@ def import_records_to_db(
     records: list[dict],
     db_path: Path = DB_PATH,
     household_id: str = DEFAULT_HOUSEHOLD_ID,
+    source: str = SOURCE,
 ) -> tuple[int, int]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(db_path)) as conn, conn:
         ensure_ev_sessions(conn)
         before = conn.execute(
             "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
-            (household_id, SOURCE),
+            (household_id, source),
         ).fetchone()[0]
         imported = 0
         for record in records:
-            if import_record(conn, record, household_id=household_id):
+            if import_record(conn, record, household_id=household_id, source=source):
                 imported += 1
         conn.commit()
         after = conn.execute(
             "SELECT COUNT(*) FROM ev_sessions WHERE household_id = ? AND source = ?",
-            (household_id, SOURCE),
+            (household_id, source),
         ).fetchone()[0]
     return imported, after - before
 
 
 def import_file(path: Path, household_id: str = DEFAULT_HOUSEHOLD_ID) -> tuple[int, int]:
-    return import_records_to_db(parse_file(path), DB_PATH, household_id)
+    source = OCULAR_CSV_IMPORT_SOURCE.source_id if path.suffix.lower() == ".csv" else SOURCE
+    return import_records_to_db(parse_file(path), DB_PATH, household_id, source=source)
 
 
 class OcularEVImporter:
@@ -620,7 +678,7 @@ class OcularEVImporter:
         return validate_records(parsed_data)
 
     def preview(self, parsed_data: list[dict]) -> ImportPreview:
-        return preview_records(parsed_data)
+        return preview_records(parsed_data, source=self.source)
 
     def commit(
         self,
@@ -639,8 +697,8 @@ class OcularEVImporter:
                 message="Import contains validation errors.",
             )
         household_id = household_context.household.household_id
-        processed, inserted = import_records_to_db(parsed_data, self.db_path, household_id)
-        observations = ocular_provider_observations(parsed_data, household_id, job_id)
+        processed, inserted = import_records_to_db(parsed_data, self.db_path, household_id, self.source.source_id)
+        observations = ocular_provider_observations(parsed_data, household_id, job_id, self.source.source_id)
         DataEngine(db_path=self.db_path, household_context=household_context).persist_provider_observations(observations)
         return ImportResult(
             job_id=job_id or "",
@@ -654,10 +712,38 @@ class OcularEVImporter:
         )
 
 
+class OcularCSVImporter(OcularEVImporter):
+    """Ocular session CSV importer sharing the established session pipeline."""
+
+    source = OCULAR_CSV_IMPORT_SOURCE
+
+    def detect(self, file_path: Path) -> bool:
+        if file_path.suffix.lower() != ".csv":
+            return False
+        try:
+            csv_records(file_path)
+        except (OSError, ValueError, csv.Error):
+            return False
+        return True
+
+    def validate(self, parsed_data: list[dict]) -> list[ImportValidationIssue]:
+        issues = super().validate(parsed_data)
+        return [
+            ImportValidationIssue("error", issue.message, issue.row, issue.field)
+            if issue.field == "end_time" and issue.severity == "warning"
+            else issue
+            for issue in issues
+        ]
+
+    def preview(self, parsed_data: list[dict]) -> ImportPreview:
+        return preview_records(parsed_data, self.validate(parsed_data), self.source)
+
+
 def ocular_provider_observations(
     records: list[dict],
     household_id: str,
     job_id: Optional[str] = None,
+    source: str = SOURCE,
 ) -> list[ProviderObservation]:
     observations = []
     received_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -699,7 +785,7 @@ def ocular_provider_observations(
                     "tariff_breakdown": breakdown,
                 },
                 unit="session",
-                provider_id="ocular_export",
+                provider_id=source,
                 provider_type=ProviderType.EV_CHARGER,
                 household_id=household_id,
                 observation_type=ProviderObservationType.EV_SESSION,
@@ -711,7 +797,7 @@ def ocular_provider_observations(
                     note="Imported Ocular EV charging session.",
                 ),
                 quality=ProviderObservationQuality.HIGH,
-                provenance="Ocular EV charging history workbook",
+                provenance="Ocular EV charging history import",
                 raw_reference=transaction_id,
                 import_job_id=job_id,
                 note="Normalized EV session observation from Ocular export.",

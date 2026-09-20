@@ -1,5 +1,18 @@
 # Changelog
 
+## UX-019 - Household-first simplified experience
+
+- Replaced the normal web entry point with a focused Dashboard, EV Sessions,
+  and Settings experience backed by the authoritative period-summary service.
+- Added month, year, and custom date selection; repriced household and EV
+  figures; tariff-coverage warnings; and a compact household/EV usage chart.
+- Added a first-class Ocular CSV importer alongside the existing Excel import,
+  with explicit field validation, derived duration, and source-scoped
+  idempotency.
+- Added tariff-history visibility and future-period updates that preserve
+  historical tariff versions, while retaining SolarEdge collection and
+  recovery paths.
+
 ## OPS-025 - Provider state and runtime diagnostics cleanup
 
 - Made Provider Management expose one canonical provider-state payload for card, status-map, API, registry, runtime, and diagnostics consumers.

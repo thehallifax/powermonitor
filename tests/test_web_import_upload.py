@@ -163,7 +163,7 @@ class WebImportUploadTests(unittest.TestCase):
             body = response.read().decode("utf-8")
 
             self.assertIsNone(response.headers.get("Refresh"))
-            self.assertIn("will not auto-refresh", body)
+            self.assertIn("Household electricity", body)
         finally:
             stop_server(server, thread)
 
@@ -187,34 +187,33 @@ class WebImportUploadTests(unittest.TestCase):
         self.assertIn("Current active tariff", html)
         self.assertIn("Check for tariff updates", html)
 
-    def test_live_root_serves_generated_tariff_update_section(self):
+    def test_live_root_serves_simplified_dashboard_not_legacy_tariff_section(self):
         report.generate_report(self.report_path)
         server, thread, base_url = start_server()
         try:
             html = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
 
-            self.assertIn('id="tariff-updates"', html)
-            self.assertIn("Current active tariff", html)
-            self.assertIn("Check for tariff updates", html)
+            self.assertIn("Household electricity", html)
+            self.assertNotIn('id="tariff-updates"', html)
         finally:
             stop_server(server, thread)
 
-    def test_live_root_serves_regenerated_html_on_next_request(self):
+    def test_live_root_is_independent_of_legacy_generated_report(self):
         self.report_path.write_text("<html><body><section id='tariff-updates'>first version</section></body></html>", encoding="utf-8")
         server, thread, base_url = start_server()
         try:
             first = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
-            self.assertIn("first version", first)
+            self.assertIn("Household electricity", first)
 
             self.report_path.write_text("<html><body><section id='tariff-updates'>second version</section></body></html>", encoding="utf-8")
 
             second = urlopen(f"{base_url}/", timeout=10).read().decode("utf-8")
-            self.assertIn("second version", second)
-            self.assertNotIn("first version", second)
+            self.assertIn("Household electricity", second)
+            self.assertNotIn("second version", second)
         finally:
             stop_server(server, thread)
 
-    def test_default_root_matches_canonical_generated_report(self):
+    def test_default_root_is_simplified_dashboard(self):
         self.write_settings()
         expected = report.generate_report(self.report_path)
         server, thread, base_url = start_server()
@@ -223,52 +222,54 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
-        self.assertEqual(html, expected)
+        self.assertNotEqual(html, expected)
+        self.assertIn("Household electricity", html)
+        self.assertIn("EV Sessions", html)
 
-    def test_last_7_days_query_renders_requested_period_without_overwriting_canonical_report(self):
+    def test_this_month_query_renders_requested_period_without_overwriting_canonical_report(self):
         self.write_settings()
         canonical = report.generate_report(self.report_path)
         server, thread, base_url = start_server()
         try:
-            html = urlopen(f"{base_url}/?period=last_7_days", timeout=10).read().decode("utf-8")
+            html = urlopen(f"{base_url}/?period=this_month", timeout=10).read().decode("utf-8")
         finally:
             stop_server(server, thread)
 
-        self.assertIn("Showing <strong>Last 7 days</strong>", html)
-        self.assertIn('option value="last_7_days" selected', html)
+        self.assertIn("Household electricity", html)
         today = report.local_today()
-        self.assertIn(f'name="start" value="{(today - timedelta(days=6)).isoformat()}"', html)
-        self.assertIn(f'name="end" value="{today.isoformat()}"', html)
+        self.assertIn(f'value="{today.replace(day=1).isoformat()}"', html)
+        self.assertIn(f'value="{today.isoformat()}"', html)
         self.assertNotEqual(html, canonical)
         self.assertEqual(self.report_path.read_text(encoding="utf-8"), canonical)
 
-    def test_last_30_days_query_renders_requested_period(self):
+    def test_last_month_query_renders_requested_period(self):
         self.write_settings()
         report.generate_report(self.report_path)
         server, thread, base_url = start_server()
         try:
-            html = urlopen(f"{base_url}/?period=last_30_days", timeout=10).read().decode("utf-8")
+            html = urlopen(f"{base_url}/?period=last_month", timeout=10).read().decode("utf-8")
         finally:
             stop_server(server, thread)
 
-        self.assertIn("Showing <strong>Last 30 days</strong>", html)
-        self.assertIn('option value="last_30_days" selected', html)
+        self.assertIn("Household electricity", html)
         today = report.local_today()
-        self.assertIn(f'name="start" value="{(today - timedelta(days=29)).isoformat()}"', html)
-        self.assertIn(f'name="end" value="{today.isoformat()}"', html)
+        last_day = today.replace(day=1) - timedelta(days=1)
+        self.assertIn(f'value="{last_day.replace(day=1).isoformat()}"', html)
+        self.assertIn(f'value="{last_day.isoformat()}"', html)
 
-    def test_previous_billing_period_query_renders_requested_period(self):
+    def test_this_year_query_renders_requested_period(self):
         self.write_settings()
         report.generate_report(self.report_path)
         server, thread, base_url = start_server()
         try:
-            html = urlopen(f"{base_url}/?period=previous_billing_period", timeout=10).read().decode("utf-8")
+            html = urlopen(f"{base_url}/?period=this_year", timeout=10).read().decode("utf-8")
         finally:
             stop_server(server, thread)
 
-        self.assertIn("Showing <strong>Previous billing period</strong>", html)
-        self.assertIn('name="start" value="2026-06-06"', html)
-        self.assertIn('name="end" value="2026-08-06"', html)
+        self.assertIn("Household electricity", html)
+        today = report.local_today()
+        self.assertIn(f'value="{today.replace(month=1, day=1).isoformat()}"', html)
+        self.assertIn(f'value="{today.isoformat()}"', html)
 
     def test_summary_api_exposes_rolled_billing_period_metadata(self):
         self.write_settings(
@@ -311,9 +312,9 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
-        self.assertIn("Showing <strong>Custom period</strong>", html)
-        self.assertIn('name="start" value="2026-06-01"', html)
-        self.assertIn('name="end" value="2026-06-15"', html)
+        self.assertIn("2026-06-01 to 2026-06-15", html)
+        self.assertIn('value="2026-06-01"', html)
+        self.assertIn('value="2026-06-15"', html)
 
     def test_invalid_period_query_falls_back_with_visible_message(self):
         self.write_settings()
@@ -324,9 +325,8 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
-        self.assertIn("That dashboard period was not recognised.", html)
-        self.assertIn("Showing Current billing period instead.", html)
-        self.assertIn("Showing <strong>Current billing period</strong>", html)
+        self.assertIn("Choose a valid date range.", html)
+        self.assertIn("Household electricity", html)
 
     def test_invalid_custom_dates_fall_back_with_visible_message(self):
         self.write_settings()
@@ -337,8 +337,7 @@ class WebImportUploadTests(unittest.TestCase):
         finally:
             stop_server(server, thread)
 
-        self.assertIn("Custom dashboard period start must be on or before the end date.", html)
-        self.assertIn("Showing Current billing period instead.", html)
+        self.assertIn("Choose a valid date range.", html)
 
     def test_tariff_update_post_routes_still_work(self):
         report.generate_report(self.report_path)
@@ -351,20 +350,18 @@ class WebImportUploadTests(unittest.TestCase):
 
             with patch.object(report, "check_tariff_updates", side_effect=fake_check):
                 check_result = form_post(base_url, "/tariff-updates/check", {})
-            self.assertIn("Tariff updates", check_result)
+            self.assertIn("Household electricity", check_result)
             self.assertEqual(len(repository.pending_updates()), 1)
 
             approve_id = repository.pending_updates()[0]["update_id"]
             approve_result = form_post(base_url, "/tariff-updates/approve", {"update_id": approve_id})
-            self.assertIn("Tariff updates", approve_result)
-            self.assertIn("Tariff update approved.", approve_result)
-            self.assertIn("Historical periods were not rewritten", approve_result)
+            self.assertIn("Household electricity", approve_result)
             self.assertEqual(repository.pending_updates(), [])
 
             repository.stage_pending(sample_tariff_update("pending-dismiss"))
             dismiss_id = repository.pending_updates()[0]["update_id"]
             dismiss_result = form_post(base_url, "/tariff-updates/dismiss", {"update_id": dismiss_id})
-            self.assertIn("Tariff updates", dismiss_result)
+            self.assertIn("Household electricity", dismiss_result)
             self.assertEqual(repository.pending_updates(), [])
         finally:
             stop_server(server, thread)
